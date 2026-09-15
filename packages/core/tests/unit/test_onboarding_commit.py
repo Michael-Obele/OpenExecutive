@@ -363,3 +363,51 @@ def test_two_drafts_matching_one_existing_department_apply_once(dept_db: Path) -
     finance = dept_store.get_department("finance", dept_db)
     assert finance is not None
     assert finance.config.charter.mission == "First"
+
+
+def test_rerun_preserves_every_column_upsert_writes(people_db: Path) -> None:
+    """Guards the whole carry-across, not just the two contacts above.
+
+    ``upsert_person``'s UPDATE branch writes every column unconditionally, so
+    any field ``save_onboarding_people`` forgets to pass is silently NULLed on
+    a re-run. If someone adds a column there, this fails instead of quietly
+    wiping user data.
+    """
+    from datetime import date
+
+    ids = save_onboarding_people([PersonDraft(full_name="Dana Reyes", is_principal=True)])
+    pid = ids["Dana Reyes"]
+    people_store.update_person(
+        pid,
+        email="dana@example.com",
+        slack_user_id="U1",
+        telegram_chat_id="T1",
+        discord_user_id="D1",
+        preferred_channel="slack",
+        response_sla_hours=4,
+        on_leave_until=date(2030, 1, 1),
+        department_slugs=["finance"],
+        db_path=people_db,
+    )
+    before = people_store.get_person(pid, db_path=people_db)
+    assert before is not None
+
+    save_onboarding_people(
+        [PersonDraft(full_name="Dana Reyes", role="CEO", is_principal=True)]
+    )
+    after = people_store.get_person(pid, db_path=people_db)
+    assert after is not None
+
+    # role is the one field the draft is allowed to change.
+    for field in (
+        "email",
+        "slack_user_id",
+        "telegram_chat_id",
+        "discord_user_id",
+        "preferred_channel",
+        "response_sla_hours",
+        "on_leave_until",
+        "department_slugs",
+    ):
+        assert getattr(after, field) == getattr(before, field), f"{field} was not preserved"
+    assert after.role == "CEO"
