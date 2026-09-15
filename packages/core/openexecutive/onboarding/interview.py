@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -53,13 +54,22 @@ logger = logging.getLogger(__name__)
 # Budgets. The user can always short-circuit with force_draft, so these only
 # bound a runaway model.
 MAX_QUESTIONS = 8
-MAX_TRANSCRIPT_CHARS = 120_000
+# Must stay above what a single legal /start can produce — a 20k description
+# plus 8 attachments at 15k extracted chars each is ~140k. A lower ceiling
+# locked the user out of the conversation on turn one for doing exactly what
+# the UI invites ("you can also attach a deck").
+MAX_TRANSCRIPT_CHARS = 250_000
 
 # Field bounds. Enforced here rather than with Field(max_length=...) so a
 # rejection reports a fixed string instead of echoing the offending value
 # back in FastAPI's 422 body — these drafts carry the company's financials.
 MAX_NAME_CHARS = 200
+MAX_ROLE_CHARS = 200
 MAX_MISSION_CHARS = 2000
+# The profile is rendered into the CACHED system prompt on every Executive
+# turn (see CLAUDE.md), so an unbounded field here is a permanent cost on
+# every request, not just one big row.
+MAX_PROFILE_TEXT_CHARS = 10_000
 
 _MAX_TOKENS = 8000
 # Truncation for the repair turn that echoes the model's own bad output back at
@@ -72,6 +82,12 @@ EMIT_TOOL_NAME = "emit_company_draft"
 
 # The first thing the user sees. A constant, so /onboard/interview/start costs
 # no model call and cannot fail.
+# Sent when the transcript would otherwise end on an assistant turn.
+_CONTINUE_PROMPT = (
+    "Continue from what you already have: ask the next question, or draft "
+    "the profile if you have enough."
+)
+
 OPENING_PROMPT = (
     "Tell me about your company — what you do, who you sell to, roughly how "
     "big you are, and what you're focused on this year. Write it however you "
@@ -135,6 +151,20 @@ class CompanyDraft(BaseModel):
 class Question(BaseModel):
     question: str
     hint: str = ""
+
+
+@dataclass(frozen=True)
+class DraftError:
+    """One validation failure, in two renderings.
+
+    ``detail`` quotes the offending value — useful to the model in the repair
+    turn, and NEVER safe in an HTTP body, because a rejected name or head
+    reference is client-supplied text sitting next to the company's
+    financials. ``safe`` is the fixed string the route returns.
+    """
+
+    safe: str
+    detail: str
 
 
 _ASK_TOOL: dict[str, Any] = {
@@ -325,54 +355,88 @@ _EMIT_TOOL: dict[str, Any] = {
 TOOLS: list[dict[str, Any]] = sorted([_ASK_TOOL, _EMIT_TOOL], key=lambda t: str(t["name"]))
 
 
-def validate_draft(draft: CompanyDraft) -> list[str]:
-    """Referential-integrity errors (empty list = OK).
+def validate_draft(draft: CompanyDraft) -> list[DraftError]:
+    """Referential-integrity and bounds errors (empty list = OK).
 
     Field-level validation already happened in ``model_validate``; this is the
     cross-object layer the commit step relies on, mirroring
-    ``fixtures.generator.validate_bundle``.
+    ``fixtures.generator.validate_bundle``. Every error carries both a
+    model-facing ``detail`` and a client-facing ``safe`` string — see
+    ``DraftError``.
     """
-    errors: list[str] = []
+    errors: list[DraftError] = []
+
+    def add(safe: str, detail: str | None = None) -> None:
+        errors.append(DraftError(safe=safe, detail=detail or safe))
 
     if not draft.profile.name.strip():
-        errors.append("profile.name is required")
+        add("Your company needs a name.", "profile.name is required")
     if not draft.people:
-        errors.append("at least one person is required")
+        add(
+            "Add at least one person, and mark which one is you.",
+            "at least one person is required",
+        )
 
     all_names = [p.full_name.strip() for p in draft.people]
     if any(not n for n in all_names):
-        errors.append("every person needs a non-empty full_name")
-    if len(set(all_names)) != len(all_names):
-        dupes = sorted({n for n in all_names if all_names.count(n) > 1})
-        errors.append(f"duplicate full_name(s) in roster: {dupes}")
+        add("Every person needs a name.", "every person needs a non-empty full_name")
+    # Case-INSENSITIVE, matching the key save_onboarding_people upserts on.
+    # A case-sensitive check let "JANE DOE" and "Jane Doe" both through, and the
+    # upsert then collapsed them onto one row — last write wins, which could
+    # land on the non-principal spelling and leave the company with NO principal.
+    folded = [n.lower() for n in all_names]
+    if len(set(folded)) != len(folded):
+        dupes = sorted({n for n in all_names if folded.count(n.lower()) > 1})
+        add(
+            "Two people have the same name — give them distinct names.",
+            f"duplicate full_name(s) in roster: {dupes}",
+        )
 
     principals = [p for p in draft.people if p.is_principal]
     if len(principals) != 1:
         # find_principal_person() backs caller resolution, alert routing, and
         # the scheduler's principal brief. Zero or two is a real breakage.
-        errors.append(
-            f"exactly one person must have is_principal=true (got {len(principals)})"
+        add(
+            "Mark exactly one person as you.",
+            f"exactly one person must have is_principal=true (got {len(principals)})",
         )
 
     if any(len(n) > MAX_NAME_CHARS for n in all_names):
-        errors.append(f"a person's name is too long (limit {MAX_NAME_CHARS} characters)")
+        add(f"A person's name is too long (limit {MAX_NAME_CHARS} characters).")
+    if any(len(p.role) > MAX_ROLE_CHARS for p in draft.people):
+        add(f"A person's role is too long (limit {MAX_ROLE_CHARS} characters).")
 
-    names = set(all_names)
+    # The profile lands in the cached system prompt on every Executive turn, so
+    # an unbounded field here is a permanent per-request cost.
+    for label, value in (
+        ("name", draft.profile.name),
+        ("mission", draft.profile.mission),
+        ("vision", draft.profile.vision),
+        ("industry", draft.profile.industry),
+        ("stage", draft.profile.stage),
+    ):
+        if len(value) > MAX_PROFILE_TEXT_CHARS:
+            add(
+                f"The company {label} is too long "
+                f"(limit {MAX_PROFILE_TEXT_CHARS:,} characters)."
+            )
+
+    names = {n.lower() for n in all_names}
     for d in draft.departments:
         if not d.title.strip():
-            errors.append("every department needs a non-empty title")
+            add("Every department needs a name.", "every department needs a non-empty title")
         if len(d.title) > MAX_NAME_CHARS:
-            errors.append(
-                f"a department title is too long (limit {MAX_NAME_CHARS} characters)"
-            )
+            add(f"A department name is too long (limit {MAX_NAME_CHARS} characters).")
         if len(d.mission) > MAX_MISSION_CHARS:
-            errors.append(
-                f"a department mission is too long (limit {MAX_MISSION_CHARS} characters)"
+            add(
+                f"A department description is too long "
+                f"(limit {MAX_MISSION_CHARS:,} characters)."
             )
-        if d.head_person_name and d.head_person_name not in names:
-            errors.append(
+        if d.head_person_name and d.head_person_name.strip().lower() not in names:
+            add(
+                "A department is led by someone who isn't on the team list.",
                 f"department '{d.title}' head_person_name "
-                f"'{d.head_person_name}' is not in the roster"
+                f"'{d.head_person_name}' is not in the roster",
             )
     # Same fallback the store uses, so two titles that both slugify to
     # nothing collide here exactly as they would on insert.
@@ -383,7 +447,10 @@ def validate_draft(draft: CompanyDraft) -> list[str]:
     ]
     if len(set(slugs)) != len(slugs):
         dupes = sorted({s for s in slugs if slugs.count(s) > 1})
-        errors.append(f"duplicate department title(s): {dupes}")
+        add(
+            "Two departments have the same name.",
+            f"duplicate department title(s): {dupes}",
+        )
 
     return errors
 
@@ -422,6 +489,13 @@ def _build_messages(
         messages.append({"role": t.role, "content": t.text})
     if not messages:
         raise InterviewError("The setup session has no conversation yet.")
+    # A draft records itself as an assistant turn, so the transcript can end on
+    # one — e.g. "ask me more questions" then "draft again" without typing.
+    # Sending that as a trailing assistant message is a prefill, which the API
+    # rejects alongside a forced tool_choice, and semantically asks the model to
+    # continue its own summary rather than act.
+    if messages[-1]["role"] == "assistant":
+        messages.append({"role": "user", "content": _CONTINUE_PROMPT})
     if existing_profile is not None and not existing_profile.is_empty():
         block = existing_profile.to_prompt_block()
         if block:
@@ -572,9 +646,10 @@ async def advance(
             )
             errors = [str(exc)]
         else:
-            errors = validate_draft(draft)
-            if not errors:
+            draft_errors = validate_draft(draft)
+            if not draft_errors:
                 return draft
+            errors = [e.detail for e in draft_errors]
             logger.info("onboarding interview: draft has %d consistency error(s)", len(errors))
 
         if attempt == 0:

@@ -389,6 +389,16 @@ def _draft(**overrides: Any) -> iv.CompanyDraft:
     return iv.CompanyDraft.model_validate(_draft_dict(**overrides))
 
 
+def _details(errors: list[iv.DraftError]) -> list[str]:
+    """The model-facing rendering — the one that may quote input."""
+    return [e.detail for e in errors]
+
+
+def _safes(errors: list[iv.DraftError]) -> list[str]:
+    """The client-facing rendering — the one the route puts in a 422."""
+    return [e.safe for e in errors]
+
+
 def test_validate_draft_accepts_a_good_draft() -> None:
     assert iv.validate_draft(_draft()) == []
 
@@ -397,7 +407,7 @@ def test_validate_draft_requires_exactly_one_principal() -> None:
     none_flagged = _draft(
         people=[{"full_name": "Dana Reyes", "role": "CEO"}], departments=[]
     )
-    assert any("is_principal" in e for e in iv.validate_draft(none_flagged))
+    assert any("is_principal" in e for e in _details(iv.validate_draft(none_flagged)))
 
     two_flagged = _draft(
         people=[
@@ -406,7 +416,7 @@ def test_validate_draft_requires_exactly_one_principal() -> None:
         ],
         departments=[],
     )
-    assert any("is_principal" in e for e in iv.validate_draft(two_flagged))
+    assert any("is_principal" in e for e in _details(iv.validate_draft(two_flagged)))
 
 
 def test_validate_draft_rejects_duplicate_person_names() -> None:
@@ -417,12 +427,12 @@ def test_validate_draft_rejects_duplicate_person_names() -> None:
         ],
         departments=[],
     )
-    assert any("duplicate full_name" in e for e in iv.validate_draft(dupes))
+    assert any("duplicate full_name" in e for e in _details(iv.validate_draft(dupes)))
 
 
 def test_validate_draft_catches_unknown_department_head() -> None:
     orphan = _draft(departments=[{"title": "Ops", "head_person_name": "Ghost"}])
-    errors = iv.validate_draft(orphan)
+    errors = _details(iv.validate_draft(orphan))
     assert any("not in the roster" in e for e in errors)
 
 
@@ -434,19 +444,19 @@ def test_validate_draft_rejects_colliding_department_titles() -> None:
     colliding = _draft(
         departments=[{"title": "Customer Success"}, {"title": "customer success"}]
     )
-    assert any("duplicate department title" in e for e in iv.validate_draft(colliding))
+    assert any("duplicate department title" in e for e in _details(iv.validate_draft(colliding)))
 
 
 def test_validate_draft_requires_a_company_name() -> None:
     nameless = _draft()
     nameless.profile.name = "   "
-    assert any("profile.name" in e for e in iv.validate_draft(nameless))
+    assert any("profile.name" in e for e in _details(iv.validate_draft(nameless)))
 
 
 def test_validate_draft_requires_at_least_one_person() -> None:
     assert any(
         "at least one person" in e
-        for e in iv.validate_draft(_draft(people=[], departments=[]))
+        for e in _details(iv.validate_draft(_draft(people=[], departments=[])))
     )
 
 
@@ -473,20 +483,116 @@ def test_agent_in_council_registry_but_not_specialist_registry() -> None:
 def test_degenerate_titles_collide_like_the_store_would() -> None:
     """Two titles that both slugify to nothing land on one slug on insert."""
     colliding = _draft(departments=[{"title": "###"}, {"title": "!!!"}])
-    assert any("duplicate department title" in e for e in iv.validate_draft(colliding))
+    assert any("duplicate department title" in e for e in _details(iv.validate_draft(colliding)))
 
 
-def test_validate_draft_bounds_name_and_mission_lengths_without_echoing() -> None:
+def test_validate_draft_bounds_name_role_and_mission_lengths() -> None:
     """Bounds live here, not in Field(max_length=), so 422s can't echo input."""
     long_person = _draft(
         people=[{"full_name": "SECRETNAME" * 30, "is_principal": True}], departments=[]
     )
-    errors = iv.validate_draft(long_person)
-    assert any("name is too long" in e for e in errors)
-    assert not any("SECRETNAME" in e for e in errors)
+    assert any("name is too long" in e for e in _safes(iv.validate_draft(long_person)))
+
+    long_role = _draft(
+        people=[{"full_name": "Dana", "role": "R" * 500, "is_principal": True}],
+        departments=[],
+    )
+    assert any("role is too long" in e for e in _safes(iv.validate_draft(long_role)))
 
     long_title = _draft(departments=[{"title": "T" * 300}])
-    assert any("title is too long" in e for e in iv.validate_draft(long_title))
+    assert any(
+        "department name is too long" in e for e in _safes(iv.validate_draft(long_title))
+    )
 
     long_mission = _draft(departments=[{"title": "Ops", "mission": "m" * 2500}])
-    assert any("mission is too long" in e for e in iv.validate_draft(long_mission))
+    assert any(
+        "description is too long" in e for e in _safes(iv.validate_draft(long_mission))
+    )
+
+
+def test_validate_draft_bounds_profile_text() -> None:
+    """The profile renders into the CACHED system prompt on every turn, so an
+    unbounded field is a permanent per-request cost, not one big row."""
+    huge = _draft()
+    huge.profile.mission = "m" * (iv.MAX_PROFILE_TEXT_CHARS + 1)
+    assert any("mission is too long" in e for e in _safes(iv.validate_draft(huge)))
+
+    huge2 = _draft()
+    huge2.profile.name = "n" * (iv.MAX_PROFILE_TEXT_CHARS + 1)
+    assert any("name is too long" in e for e in _safes(iv.validate_draft(huge2)))
+
+
+def test_safe_error_strings_never_quote_input() -> None:
+    """The route returns .safe; only the model's repair turn sees .detail."""
+    leaky = _draft(
+        people=[
+            {"full_name": "SECRETPERSON", "is_principal": True},
+            {"full_name": "SECRETPERSON"},
+        ],
+        departments=[{"title": "SECRETDEPT", "head_person_name": "SECRETHEAD"}],
+    )
+    errors = iv.validate_draft(leaky)
+    assert errors
+    blob = " ".join(_safes(errors))
+    for secret in ("SECRETPERSON", "SECRETDEPT", "SECRETHEAD"):
+        assert secret not in blob, f"{secret} leaked into a client-facing string"
+    # The model, by contrast, must get the specifics to repair the draft.
+    assert "SECRETHEAD" in " ".join(_details(errors))
+
+
+def test_duplicate_person_names_are_matched_case_insensitively() -> None:
+    """save_onboarding_people upserts on a case-folded name, so a case-only
+    difference is the SAME person — a case-sensitive check let both through and
+    the upsert then collapsed them, potentially leaving no principal at all."""
+    variants = _draft(
+        people=[
+            {"full_name": "JANE DOE", "role": "CEO", "is_principal": True},
+            {"full_name": "Jane Doe", "role": "Advisor"},
+        ],
+        departments=[],
+    )
+    assert any("duplicate full_name" in e for e in _details(iv.validate_draft(variants)))
+
+
+def test_department_head_is_matched_case_insensitively() -> None:
+    ok = _draft(
+        people=[{"full_name": "Dana Reyes", "is_principal": True}],
+        departments=[{"title": "Ops", "head_person_name": "dana reyes"}],
+    )
+    assert iv.validate_draft(ok) == []
+
+
+def test_transcript_budget_allows_a_full_legal_start() -> None:
+    """A 20k description plus the documented 8 attachments is ~140k. A lower
+    ceiling locked the user out of the conversation on their first turn."""
+    from openexecutive.api.models import ONBOARD_MESSAGE_MAX_CHARS
+    from openexecutive.api.intake_uploads import (
+        _INTAKE_GEN_CHARS_PER_FILE,
+        _INTAKE_MAX_FILES,
+    )
+
+    largest_legal_start = (
+        ONBOARD_MESSAGE_MAX_CHARS + _INTAKE_MAX_FILES * _INTAKE_GEN_CHARS_PER_FILE
+    )
+    assert iv.MAX_TRANSCRIPT_CHARS > largest_legal_start
+
+
+@pytest.mark.asyncio
+async def test_transcript_never_ends_on_an_assistant_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A draft records itself as an assistant turn, so "ask me more" then
+    "draft again" left one trailing — a prefill, which the API rejects
+    alongside a forced tool_choice."""
+    provider = _ScriptedProvider([_tool_response(iv.EMIT_TOOL_NAME, _draft_dict())])
+    _install(monkeypatch, provider)
+
+    transcript = [
+        iv.Turn(role="user", text="We are Northwind Tools, 40 people."),
+        iv.Turn(role="assistant", text="A bootstrapped industrial supplier."),
+    ]
+    await iv.advance(transcript, force_draft=True)
+
+    roles = [m["role"] for m in provider.calls[0]["messages"]]
+    assert roles[-1] == "user", f"trailing assistant prefill: {roles}"
+    assert all(a != b for a, b in zip(roles, roles[1:]))

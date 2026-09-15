@@ -455,7 +455,14 @@ async def start_interview(
         return _turn_response(session_id, session)
 
     session.transcript.append(Turn(role="user", text=opening.strip()))
-    return await _advance_interview(session_id, session)
+    try:
+        return await _advance_interview(session_id, session)
+    except HTTPException:
+        # The error body carries no session_id, so the client can never resume
+        # this one — leaving it in the dict would orphan it until the TTL, and
+        # a burst of failures during a provider blip would evict live sessions.
+        _interview_sessions.pop(session_id, None)
+        raise
 
 
 @router.post("/onboard/interview/message", response_model=OnboardTurnResponse)
@@ -578,8 +585,11 @@ async def commit_interview(body: OnboardCommitRequest) -> CompanyProfileResponse
         CompanyDraft(profile=profile, people=people, departments=departments)
     )
     if errors:
+        # .safe, never .detail — the detailed rendering quotes the rejected
+        # value (a name, a head reference), which is client text sitting next
+        # to the company's financials. Only the repair turn sees .detail.
         logger.info("onboarding commit: rejected draft (%d error(s))", len(errors))
-        raise HTTPException(status_code=422, detail=errors[0])
+        raise HTTPException(status_code=422, detail=errors[0].safe)
 
     profile = derive_org_structure(profile, people, departments)
 

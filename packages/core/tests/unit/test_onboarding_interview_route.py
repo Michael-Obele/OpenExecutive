@@ -508,11 +508,15 @@ def test_draft_records_an_assistant_turn_so_the_transcript_stays_alternating(
 
     roles = [t.role for t in route._interview_sessions[sid].transcript]
     assert all(a != b for a, b in zip(roles, roles[1:])), f"non-alternating: {roles}"
-    # And the real builder accepts it.
-    assert [
+
+    # And what the real builder would send alternates and ends on a user turn
+    # (never an assistant prefill, which a forced tool_choice rejects).
+    built = [
         m["role"]
         for m in iv._build_messages(route._interview_sessions[sid].transcript, None)
-    ] == roles
+    ]
+    assert all(a != b for a, b in zip(built, built[1:])), f"non-alternating: {built}"
+    assert built[-1] == "user"
 
 
 def test_a_failed_follow_up_keeps_the_draft_reviewable(
@@ -542,7 +546,7 @@ def test_commit_rejects_a_roster_with_no_principal(
     body["departments"] = []
     resp = client.post("/onboard/interview/commit", json=body)
     assert resp.status_code == 422
-    assert "is_principal" in resp.json()["detail"]
+    assert "exactly one person" in resp.json()["detail"]
     assert not profile_path.exists()
 
 
@@ -567,7 +571,9 @@ def test_commit_rejects_an_unknown_department_head(
     body["departments"] = [{"title": "Sales", "head_person_name": "Nobody Here"}]
     resp = client.post("/onboard/interview/commit", json=body)
     assert resp.status_code == 422
-    assert "not in the roster" in resp.json()["detail"]
+    # The SAFE rendering — the detailed one quotes the rejected head name.
+    assert "isn't on the team list" in resp.json()["detail"]
+    assert "Nobody Here" not in resp.text
 
 
 def test_commit_rejects_duplicate_person_names(
@@ -633,3 +639,59 @@ def test_displayed_question_budget_matches_the_enforced_one(
     """These were two separate constants that could drift silently."""
     resp = client.post("/onboard/interview/start", data={"description": ""})
     assert resp.json()["max_questions"] == iv.MAX_QUESTIONS
+
+
+def test_commit_422_never_echoes_the_rejected_value(
+    client: TestClient, seeded: list[Any]
+) -> None:
+    """validate_draft's detailed strings quote input; the route must return the
+    safe rendering, because a rejected name sits next to the financials."""
+    seeded.append(_draft())
+    sid = _start(client)
+    body = _commit_body(sid)
+    body["people"] = [
+        {"full_name": "SECRETPERSON", "is_principal": True},
+        {"full_name": "SECRETPERSON"},
+    ]
+    body["departments"] = [{"title": "Ops", "head_person_name": "SECRETHEAD"}]
+    resp = client.post("/onboard/interview/commit", json=body)
+    assert resp.status_code == 422
+    assert "SECRETPERSON" not in resp.text
+    assert "SECRETHEAD" not in resp.text
+
+
+def test_failed_first_turn_leaves_no_orphan_session(
+    client: TestClient, seeded: list[Any]
+) -> None:
+    """The 502 body carries no session_id, so the client can never resume it —
+    leaving it in the dict orphans it, and a burst of provider failures would
+    evict live sessions through the cap sweep."""
+    before = len(route._interview_sessions)
+    for _ in range(3):
+        seeded.append(iv.InterviewError("The setup assistant is unavailable right now."))
+        resp = client.post("/onboard/interview/start", data={"description": "hello"})
+        assert resp.status_code == 502
+    assert len(route._interview_sessions) == before
+
+
+def test_a_full_legal_start_does_not_lock_the_conversation(
+    client: TestClient, seeded: list[Any]
+) -> None:
+    """A big description plus the documented 8 attachments must still leave
+    room to keep talking."""
+    seeded.append(iv.Question(question="What stage are you?"))
+    resp = client.post(
+        "/onboard/interview/start",
+        data={"description": "x" * 19_000},
+        files=[
+            ("files", (f"f{i}.txt", b"y" * 14_000, "text/plain")) for i in range(8)
+        ],
+    )
+    assert resp.status_code == 200, resp.text
+    sid = resp.json()["session_id"]
+
+    seeded.append(iv.Question(question="And your north star?"))
+    follow_up = client.post(
+        "/onboard/interview/message", json={"session_id": sid, "message": "Series A."}
+    )
+    assert follow_up.status_code == 200, follow_up.text

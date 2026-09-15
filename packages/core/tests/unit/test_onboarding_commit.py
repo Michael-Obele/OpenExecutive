@@ -411,3 +411,72 @@ def test_rerun_preserves_every_column_upsert_writes(people_db: Path) -> None:
     ):
         assert getattr(after, field) == getattr(before, field), f"{field} was not preserved"
     assert after.role == "CEO"
+
+
+def test_drafts_resolving_to_one_row_by_title_apply_once(dept_db: Path) -> None:
+    """The shipped `hr` department is titled "People & Talent", so slug !=
+    slugify(title). Keying the dedupe on the drafted slug missed that: both
+    drafts resolved to the same row and the second silently clobbered the
+    first, while counts claimed two updates."""
+    hr = dept_store.get_department("hr", dept_db)
+    assert hr is not None and hr.config.title != "HR", "fixture assumption"
+
+    before = len(dept_store.list_departments(dept_db))
+    counts = reconcile_onboarding_departments(
+        [
+            DepartmentDraft(title="HR", mission="Recruiting and payroll"),
+            DepartmentDraft(title=hr.config.title, mission="Culture and L&D"),
+        ],
+        {},
+    )
+    assert counts == {"updated": 1, "created": 0}, "must not claim two updates"
+    assert len(dept_store.list_departments(dept_db)) == before
+
+    after = dept_store.get_department("hr", dept_db)
+    assert after is not None
+    assert after.config.charter.mission == "Recruiting and payroll", (
+        "the first draft must win, not be silently overwritten"
+    )
+
+
+def test_demoted_roster_member_loses_wildcard(people_db: Path) -> None:
+    """Someone who stays on the roster but is no longer principal falls through
+    _demote_stale_principals (they ARE in keep_ids) — they must lose WILDCARD
+    in the main loop or they keep blanket approval authority."""
+    from openexecutive.people.models import AuthorityScope
+
+    ids = save_onboarding_people([PersonDraft(full_name="Alice", is_principal=True)])
+    people_store.set_authority_scope(
+        ids["Alice"],
+        [AuthorityScope.WILDCARD, AuthorityScope.LEGAL_SIGN],
+        db_path=people_db,
+    )
+
+    save_onboarding_people(
+        [
+            PersonDraft(full_name="Alice", role="Founder", is_principal=False),
+            PersonDraft(full_name="Bob", role="CEO", is_principal=True),
+        ]
+    )
+
+    alice = people_store.get_person(ids["Alice"], db_path=people_db)
+    assert alice is not None
+    assert alice.is_principal is False
+    assert [s.value for s in alice.authority_scope] == ["legal_sign"]
+
+    principal = people_store.find_principal_person(db_path=people_db)
+    assert principal is not None and principal.full_name == "Bob"
+
+
+def test_case_variant_names_collapse_onto_one_row_not_two(people_db: Path) -> None:
+    """The upsert key is case-folded, so two spellings are one person. The
+    snapshot is refreshed in the loop so the second never inserts a duplicate."""
+    ids = save_onboarding_people(
+        [
+            PersonDraft(full_name="JANE DOE", role="CEO", is_principal=True),
+            PersonDraft(full_name="Jane Doe", role="Advisor"),
+        ]
+    )
+    assert len(set(ids.values())) == 1
+    everyone = people_store.list_people(db_path=people_db)
+    assert len(everyone) == 1, f"duplicate rows: {[p.full_name for p in everyone]}"

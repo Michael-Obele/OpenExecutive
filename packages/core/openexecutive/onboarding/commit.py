@@ -25,6 +25,7 @@ from openexecutive.utils.slug import DEPARTMENT_SLUG_FALLBACK, slugify
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from openexecutive.memory.company_profile import CompanyProfile
     from openexecutive.onboarding.interview import DepartmentDraft, PersonDraft
+    from openexecutive.people.models import AuthorityScope
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +53,13 @@ def save_onboarding_people(drafts: list[PersonDraft]) -> dict[str, int]:
     try:
         from openexecutive.people.models import AuthorityScope
         from openexecutive.people.store import (
-            initialize_db as init_people_db,
-        )
-        from openexecutive.people.store import (
+            get_person,
             list_people,
             set_authority_scope,
             upsert_person,
+        )
+        from openexecutive.people.store import (
+            initialize_db as init_people_db,
         )
 
         named = [d for d in drafts if d.full_name.strip()]
@@ -96,8 +98,19 @@ def save_onboarding_people(drafts: list[PersonDraft]) -> dict[str, int]:
                     reports_to_person_id=prior.reports_to_person_id,
                 )
             ids[name] = pid
+            # Register immediately: two spellings of one name resolve to the
+            # same row, and a stale snapshot would insert a duplicate instead.
+            refreshed = get_person(pid)
+            if refreshed is not None:
+                existing[name.lower()] = refreshed
+
             if draft.is_principal:
                 set_authority_scope(pid, [AuthorityScope.WILDCARD])
+            elif prior is not None and prior.is_principal:
+                # Demoted but still on the roster — _demote_stale_principals
+                # skips them (they ARE in keep_ids), so strip WILDCARD here or
+                # they keep blanket approval authority.
+                _strip_wildcard(pid, prior.authority_scope)
 
         _demote_stale_principals(set(ids.values()))
         return ids
@@ -116,10 +129,8 @@ def _demote_stale_principals(keep_ids: set[int]) -> None:
     principal with blanket approval authority, and ``find_principal_person``
     (oldest id wins) keeps resolving to them.
     """
-    from openexecutive.people.models import AuthorityScope
     from openexecutive.people.store import (
         list_people,
-        set_authority_scope,
         upsert_person,
     )
 
@@ -141,11 +152,17 @@ def _demote_stale_principals(keep_ids: set[int]) -> None:
             on_leave_until=person.on_leave_until,
             reports_to_person_id=person.reports_to_person_id,
         )
-        remaining: list[AuthorityScope] = [
-            s for s in person.authority_scope if s != AuthorityScope.WILDCARD
-        ]
-        if remaining != person.authority_scope:
-            set_authority_scope(person.id, remaining)
+        _strip_wildcard(person.id, person.authority_scope)
+
+
+def _strip_wildcard(person_id: int, current: list[AuthorityScope]) -> None:
+    """Remove WILDCARD, leaving any other scope the person was granted."""
+    from openexecutive.people.models import AuthorityScope as Scope
+    from openexecutive.people.store import set_authority_scope
+
+    remaining: list[Scope] = [s for s in current if s != Scope.WILDCARD]
+    if len(remaining) != len(current):
+        set_authority_scope(person_id, remaining)
 
 
 def reconcile_onboarding_departments(
@@ -190,15 +207,21 @@ def reconcile_onboarding_departments(
             # Same fallback the store uses, so the slug we look up is the one
             # create_department would have assigned.
             drafted_slug = slugify(title, fallback=DEPARTMENT_SLUG_FALLBACK)
-            if drafted_slug in seen:
+            match = by_slug.get(drafted_slug) or by_title.get(title.lower())
+            # Key on the row actually being touched. Keying on the drafted slug
+            # alone missed the match-by-TITLE case: the shipped `hr` department
+            # is titled "People & Talent", so drafts "HR" and "People & Talent"
+            # have different slugs but resolve to the same row — the second
+            # silently clobbered the first while counts claimed two updates.
+            key = match.slug if match is not None else drafted_slug
+            if key in seen:
                 logger.info(
-                    "onboarding: skipping a department title that collides with "
-                    "an earlier one in the same draft"
+                    "onboarding: skipping a department that resolves to one "
+                    "already handled in this draft"
                 )
                 continue
-            seen.add(drafted_slug)
+            seen.add(key)
 
-            match = by_slug.get(drafted_slug) or by_title.get(title.lower())
             head_id = person_ids.get(draft.head_person_name.strip()) if draft.head_person_name else None
 
             if match is None:
@@ -209,7 +232,6 @@ def reconcile_onboarding_departments(
                 # row we just made instead of creating a `-2` duplicate.
                 by_slug[slug] = created.config
                 by_title[created.config.title.strip().lower()] = created.config
-                seen.add(slug)
                 # create_department fixes authority to propose_only and takes no
                 # head, so apply the drafted values in a second call.
                 update_department(slug, authority_level=draft.authority_level)
