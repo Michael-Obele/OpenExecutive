@@ -460,6 +460,7 @@ async def _apply_state_from_source(source_dir: Path, settings: Any) -> dict[str,
         where={"type": "recent_research"},
     )
     store.delete_notion_docs()
+    store.delete_attachment_docs()
     from openexecutive.knowledge.notion_sync import reset_local_state
 
     reset_local_state(profile_path=settings.company_profile_path)
@@ -703,6 +704,7 @@ async def reset_all_state(
             where={"type": "recent_research"},
         )
         store.delete_notion_docs()
+        store.delete_attachment_docs()
         from openexecutive.knowledge.notion_sync import reset_local_state
 
         reset_local_state(profile_path=settings.company_profile_path)
