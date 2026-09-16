@@ -152,6 +152,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from openexecutive.audit import AuditLogger, set_audit_logger
     from openexecutive.config import get_settings
     from openexecutive.knowledge.loader import (
+        migrate_attachments_out_of_company_docs,
         reconcile_company_docs,
         seed_builtin_knowledge,
         seed_failures,
@@ -179,10 +180,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await seed_builtin_skills(store=store)
     await seed_failures(store=store)
 
-    # Repair company_docs rows left by the old upload path, which indexed
-    # documents under their random staging filename: those chunks match no
-    # DELETE and are displaced by no re-upload, so nothing else can reach
-    # them. Converges on a stable store, so it is safe to run every boot.
+    # Two boot-time repairs of company_docs, in one task, in order.
+    #
+    # First, move out any attachment chunks: they were written into
+    # company_docs under a domain outside the specialist set, which did NOT
+    # keep them out of retrieval (an unfiltered query builds no `where`
+    # clause and matches every domain). They belong in the isolated
+    # collection nothing queries. It runs first so that a row it is about to
+    # move cannot also be re-indexed by the reconcile in the same pass.
+    #
+    # Then repair rows left by the old upload path, which indexed documents
+    # under their random staging filename: those chunks match no DELETE and
+    # are displaced by no re-upload, so nothing else can reach them. Both
+    # converge on a stable store, so it is safe to run every boot.
     #
     # Deliberately NOT awaited here. `ingest_file` does synchronous embedding
     # work, and the boot that matters most — the first one after this deploy —
@@ -195,6 +205,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Strong ref, same reason as `_thread_rename_tasks` in discord_bot: a bare
     # create_task is only weakly held and can be GC'd mid-flight.
     async def _reconcile_company_docs() -> None:
+        try:
+            # On a thread, not merely off the lifespan: every step of the
+            # migration blocks (metadata scan, text fetch, embedding pass), so
+            # scheduling it on this loop would defer the stall rather than
+            # avoid it, and `/health` would go unanswered for the whole repair.
+            moved = await asyncio.to_thread(
+                migrate_attachments_out_of_company_docs, store
+            )
+            if moved:
+                logging.getLogger("openexecutive").info(
+                    "company_docs reconcile: moved %d attachment chunk(s) out of the "
+                    "company collection",
+                    moved,
+                )
+        except Exception:
+            logging.getLogger("openexecutive").exception("attachment migration failed")
+
         try:
             swept, indexed = await reconcile_company_docs(
                 store, settings.company_profile_path.parent / "docs"

@@ -691,13 +691,11 @@ knowledge:
         path, an uploaded plan.md and a fixture-loaded plan.md are the same
         document rather than two.
 
-        Chat/email attachments (integrations.attachments) share this
-        collection but are namespaced `attachment:<bare filename>`. The
-        sender chooses that filename and the filename is the id namespace, so
-        an unprefixed one would upsert straight over the curated company
-        document it collides with — same "unvetted text must not blend into
-        curated uploads" reasoning that isolates NOTION_WIKI and
-        RECENT_RESEARCH, applied within a collection.
+        Chat/integration attachments are NOT in this collection — see
+        ATTACHMENTS below. They used to be, isolated only by a domain outside
+        the specialist set, which isolated nothing. Rows left by that path are
+        migrated out on boot by
+        loader.migrate_attachments_out_of_company_docs, not purged.
 
         RECONCILE ON BOOT. The lifespan calls
         loader.reconcile_company_docs(store, docs_dir), which drops rows whose
@@ -743,6 +741,37 @@ knowledge:
         retriever queries it with a small n and appends it under a clearly-
         labelled "Recent research (unverified, web-sourced …)" section ranked
         BELOW the curated company-documents section.
+    - name: ATTACHMENTS
+      what: |
+        Files attached in an integration channel (ChromaDB collection
+        `inbound_attachments`), written only by
+        integrations.attachments._schedule_ingest. Rows carry
+        `type=attachment`, domain `attachment`, filename
+        `attachment:<bare name>`.
+
+        The one collection retriever.retrieve NEVER queries. An attachment's
+        content is chosen by whoever sent the message, passes through no
+        upload endpoint, gets no review, and leaves no copy in docs/. It is
+        already inlined into the turn that carried it, which is where it is
+        useful; what it must not become is company knowledge resurfacing in
+        later, unrelated turns. NOTION_WIKI and RECENT_RESEARCH are
+        queried-but-labelled; this one is not queried at all.
+
+        Wiped per company by store.delete_attachment_docs() on client-slot
+        restore and fixture reset — drop-and-recreate, not a where-delete,
+        because a surviving row there is one company's attachment visible to
+        the next.
+
+        Caveat for anyone auditing an existing install: before this
+        collection existed, the ingest built its store with the bare
+        ChromaDBStore() default rather than settings.vector_store_path, so
+        wherever that differs from VECTOR_STORE_PATH the rows went to a
+        different database than the API reads. In a container that directory
+        is outside the data volume and goes with the container; on a
+        non-container install with a stable CWD it persists as a stray
+        <cwd>/chroma_db holding the plaintext of every attachment ever sent,
+        which no wipe path reaches and an operator should delete by hand. The
+        boot migration cannot see it either way and correctly reports zero.
   domain_aliases_source: openexecutive.knowledge.retriever.DOMAIN_ALIASES
   dedupe_note: Multi-domain chunks can fan out to multiple rows; the retriever dedupes by text before returning.
   upload_domains: |
@@ -764,7 +793,19 @@ knowledge:
     external OER sources, and external_sources falls back to ["general"] for a
     source that declares no domains; widening BUILTIN too would fan unvetted
     third-party material into every specialist's context. NOTION_WIKI and
-    RECENT_RESEARCH keep their existing filters.
+    RECENT_RESEARCH keep their existing filters, and ATTACHMENTS is not
+    queried at all.
+
+    The property that makes all of this easy to get wrong: _with_general
+    returns a falsy filter UNCHANGED, and ChromaDBStore.query builds a `where`
+    clause only when the filter is truthy. So a retrieve with no domain filter
+    and no specialist — every Executive-level turn, as opposed to the
+    specialist fan-out — queries COMPANY with no `where` at all and matches
+    EVERY domain, including values chosen precisely because no specialist maps
+    to them. An unrecognised domain excludes nothing. That is what put inbound
+    attachments in front of the Executive under "From your company documents",
+    and it is why isolation belongs in the collection, never in a domain
+    value.
 
 memory:
   episodic_db: ./episodic_memory.db
@@ -2882,34 +2923,53 @@ integrations:
     extracted to Anthropic vision content blocks and forwarded to the
     Executive in the same turn as the text. Inbound documents
     (PDF/DOCX/TXT/MD/CSV) have their text extracted and inlined into the
-    user message AND are indexed into the ChromaDB ``company_docs``
-    collection in a fire-and-forget background task, so attachments
-    surface in future RAG retrieval. Per-file cap 20 MB; extracted text
+    user message AND are indexed into the ChromaDB
+    ``inbound_attachments`` collection in a fire-and-forget background
+    task. Per-file cap 20 MB; extracted text
     truncated to 40 000 chars. Web chat exposes this through
     ``POST /chat/upload`` (multipart) — capped at 5 files per turn.
 
-    Indexed under ``source_name="attachment:<bare filename>"`` and domain
-    ``general``. Both matter. The name is the chunk-id namespace and the
-    retrieval citation, and an attachment's filename is chosen by whoever
-    sent the message — unprefixed, an emailed ``strategy-2026.md`` would
-    upsert straight over the curated company document of that name, so
-    inbound content stays in its own namespace and its provenance is
-    visible in the ``[filename]`` citation. (``Path(...).name`` strips
-    directory components first.)
+    Indexed under ``source_name="attachment:<bare filename>"``, domain
+    ``attachment``, metadata ``type=attachment``. The name is the chunk-id
+    namespace and the retrieval citation, and an attachment's filename is
+    chosen by whoever sent the message — unprefixed, an inbound
+    ``strategy-2026.md`` would upsert over the curated company document of
+    that name, so inbound content stays in its own namespace and its
+    provenance is visible. (``Path(...).name`` strips directory components
+    first.) The prefix does NOT separate senders from each other: ids are
+    md5 of the prefixed name alone, so two senders' ``notes.md`` collide.
+    Inert while nothing reads the collection, and the first thing to fix if
+    that changes.
 
-    The domain stays ``company_docs``, which is deliberately NOT one of the
-    specialist domains: these chunks match no domain filter and so do not
-    reach the Executive. Leaving them inert is a decision, not an oversight —
-    anyone who can attach a file in an integration channel would otherwise be
-    writing into every specialist's RAG context, and these rows have no
-    removal path (never written to docs/, so GET /documents does not list them
-    and DELETE /documents/{filename} 404s before reaching the store). Making
-    them retrievable needs its own change, with a delete path alongside it.
+    Isolation is the COLLECTION. ``inbound_attachments`` is the one
+    collection ``retriever.retrieve`` never queries at all, so an attachment
+    cannot resurface as company knowledge in a later, unrelated turn. It is
+    still inlined into the turn that carried it, which is where it is useful.
+    The domain value is belt-and-braces behind that: ``attachment`` is in
+    neither UPLOAD_DOMAINS nor DOMAIN_ALIASES, and deliberately not
+    ``general``, which ``_with_general`` would fan out to every specialist.
+
+    What this replaced, because the reasoning was wrong and should not come
+    back: the rows lived in ``company_docs`` under domain ``company_docs``,
+    on the premise that a domain outside the specialist set matched no
+    filter. It matched every one — the mechanism is written up once under
+    knowledge.general_catch_all. They came back under "From your company
+    documents", top-ranked and indistinguishable from a curated upload.
+    ``loader.migrate_attachments_out_of_company_docs`` moves the
+    legacy rows across on boot (write-then-delete: the store holds the only
+    copy). Wiped per company by ``store.delete_attachment_docs()`` on
+    client-slot restore and fixture reset.
+
+    Attachment processing is roster-gated on Discord (``_is_rostered`` in
+    ``on_message``): it used to run before ``_handle_message``'s gate, so an
+    unrostered sender's file was downloaded and indexed before their message
+    was dropped. There is still no operator surface listing these rows —
+    ``GET /documents`` is a filesystem listing and attachments are never
+    written to docs/.
 
     Passing the staging tempfile path as the identity was the #113 bug on this
     path too: duplicate chunks on every re-send, and no filename any API call
-    could delete. The boot reconcile drops their orphans rather than
-    recovering them, there being no file on disk to recover from.
+    could delete.
   broadcast_tools: |
     openexecutive.orchestrator.broadcast_tools — two new tools exposed
     to the Executive alongside the existing per-Person DM tools:
