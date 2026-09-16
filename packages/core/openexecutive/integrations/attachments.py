@@ -158,7 +158,7 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
     async def _run() -> None:
         suffix = _suffix_from_filename(filename)
         try:
-            from openexecutive.knowledge.loader import ingest_file
+            from openexecutive.knowledge.loader import GENERAL_DOMAIN, ingest_file
             from openexecutive.knowledge.store import ChromaDBStore
 
             store = ChromaDBStore()
@@ -167,7 +167,28 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
                 tmp_path = Path(tmp.name)
 
             try:
-                count = await ingest_file(tmp_path, store, domain="company_docs")
+                # `source_name` is the real attachment name: `tmp_path` is a
+                # random staging name, and indexing under it both duplicates
+                # on every re-send and leaves chunks no API call can delete.
+                #
+                # It is PREFIXED, and stripped to a bare name, because an
+                # attachment name is chosen by whoever sent the message. The
+                # name is the chunk-id namespace, so an unprefixed
+                # "strategy-2026.md" arriving by email would upsert straight
+                # over the curated company document of that name. The prefix
+                # keeps inbound content in its own namespace and makes the
+                # provenance visible in the `[filename]` retrieval citation —
+                # the same reason Notion and research artifacts are isolated.
+                #
+                # `domain` is the catch-all rather than the old "company_docs"
+                # — that was not one of the specialist domains, so every
+                # attachment landed where no specialist could retrieve it.
+                count = await ingest_file(
+                    tmp_path,
+                    store,
+                    domain=GENERAL_DOMAIN,
+                    source_name=f"attachment:{Path(filename).name}",
+                )
                 logger.info(
                     "attachments: indexed %d chunks from %s into ChromaDB",
                     count,

@@ -151,7 +151,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from openexecutive.alerts.store import initialize_db as initialize_alerts_db
     from openexecutive.audit import AuditLogger, set_audit_logger
     from openexecutive.config import get_settings
-    from openexecutive.knowledge.loader import seed_builtin_knowledge, seed_failures
+    from openexecutive.knowledge.loader import (
+        reconcile_company_docs,
+        seed_builtin_knowledge,
+        seed_failures,
+    )
     from openexecutive.knowledge.skills_index import seed_builtin_skills
     from openexecutive.knowledge.store import ChromaDBStore
     from openexecutive.memory.episodic import initialize_db
@@ -174,6 +178,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await seed_builtin_knowledge(store=store)
     await seed_builtin_skills(store=store)
     await seed_failures(store=store)
+
+    # Repair company_docs rows left by the old upload path, which indexed
+    # documents under their random staging filename: those chunks match no
+    # DELETE and are displaced by no re-upload, so nothing else can reach
+    # them. Idempotent — chunk ids are filename-derived, so a clean store
+    # makes this a no-op. Best-effort, like the seeding above.
+    try:
+        swept, indexed = await reconcile_company_docs(
+            store, settings.company_profile_path.parent / "docs"
+        )
+        if swept or indexed:
+            logging.getLogger("openexecutive").info(
+                "company_docs reconcile: dropped %d orphaned chunk(s), indexed %d document(s)",
+                swept,
+                indexed,
+            )
+    except Exception:
+        logging.getLogger("openexecutive").exception("company_docs reconcile failed")
 
     initialize_db()
     initialize_alerts_db()

@@ -1,9 +1,22 @@
-"""Unit tests for POST /documents — domain must come from the multipart form.
+"""Unit tests for POST/DELETE /documents.
 
-Regression guard: `domain` was declared as a bare default (`domain: str =
-"general"`), which FastAPI parses as a query parameter. The UI sends it as a
-form field, so it was silently dropped and every upload landed under
-"general" — invisible to domain-filtered specialist retrieval.
+Regression guards, in the order they were found:
+
+1. `domain` was declared as a bare default (`domain: str = "general"`), which
+   FastAPI parses as a query parameter. The UI sends it as a form field, so it
+   was silently dropped and every upload landed under "general".
+
+2. (#113) The handler staged the upload in a `tempfile.NamedTemporaryFile` and
+   passed *that* path to `ingest_file`, which derives chunk metadata AND the
+   chunk id from it. The id is an MD5 of a freshly random path, so the id-keyed
+   upsert never collided: re-uploads appended a whole duplicate chunk set, and
+   the stored `filename` was `tmpXXXXXXXX.md`, which
+   `DELETE /documents/{filename}` could never match — it unlinked the on-disk
+   copy, returned 200, and left every chunk in the store forever.
+
+3. (#114) `domain` was an unvalidated free string, so `domain=finanace`
+   returned 200 and indexed the document where no specialist filters, making it
+   permanently unretrievable with no error and no way to notice.
 """
 from __future__ import annotations
 
@@ -19,11 +32,15 @@ from openexecutive.api.routes import documents
 
 
 class _CapturingStore:
-    """Records the metadata passed to add_documents so the test can assert
-    the domain tag without standing up a real ChromaDB / embedding model."""
+    """Models the parts of ChromaDBStore the document routes rely on.
+
+    Critically it upserts by id and filters deletes by the `where` clause, so
+    the duplicate-chunk and failed-delete bugs are reproducible here rather
+    than needing a real ChromaDB and embedding model.
+    """
 
     def __init__(self) -> None:
-        self.added: list[dict[str, Any]] = []
+        self.rows: dict[str, dict[str, Any]] = {}
 
     def add_documents(
         self,
@@ -32,7 +49,27 @@ class _CapturingStore:
         ids: list[str],
         collection: str,
     ) -> None:
-        self.added.extend(metadatas)
+        for chunk_id, meta in zip(ids, metadatas, strict=True):
+            self.rows[chunk_id] = meta
+
+    def delete_documents(self, collection: str, where: dict[str, Any]) -> None:
+        key, value = next(iter(where.items()))
+        self.rows = {i: m for i, m in self.rows.items() if m.get(key) != value}
+
+    def iter_chunk_metadata(self, collection: str) -> list[tuple[str, dict[str, Any]]]:
+        return list(self.rows.items())
+
+    def delete_by_ids(self, collection: str, ids: list[str]) -> None:
+        for chunk_id in ids:
+            self.rows.pop(chunk_id, None)
+
+    # -- assertion helpers ------------------------------------------------
+    @property
+    def added(self) -> list[dict[str, Any]]:
+        return list(self.rows.values())
+
+    def filenames(self) -> set[str]:
+        return {m["filename"] for m in self.rows.values()}
 
 
 @pytest.fixture
@@ -100,3 +137,87 @@ def test_get_document_rejects_dotfile(client: TestClient) -> None:
     # collapsed by path normalization before it ever reaches the handler.)
     resp = client.get("/documents/.env")
     assert resp.status_code == 400
+
+
+# ── #113: stable, filename-derived document identity ──────────────────────
+
+
+def test_reupload_upserts_instead_of_duplicating(client: TestClient) -> None:
+    """The bug: each upload staged to a fresh temp path, so chunk ids (an MD5
+    of that path) never collided and the upsert always inserted."""
+    store: _CapturingStore = client.app.state.store  # type: ignore[attr-defined]
+
+    assert _upload(client).status_code == 200
+    after_first = set(store.rows)
+    assert after_first, "expected at least one indexed chunk"
+
+    assert _upload(client).status_code == 200
+
+    assert set(store.rows) == after_first, "re-upload must reuse the same chunk ids"
+    assert len(store.rows) == len(after_first), "re-upload must not grow the collection"
+
+
+def test_indexed_under_real_filename_not_temp_path(client: TestClient) -> None:
+    assert _upload(client).status_code == 200
+    store: _CapturingStore = client.app.state.store  # type: ignore[attr-defined]
+
+    assert store.filenames() == {"plan.md"}
+    assert {m["source"] for m in store.added} == {"plan.md"}
+    # The specific failure mode: identity taken from the staging file.
+    assert not any(m["filename"].startswith("tmp") for m in store.added)
+
+
+def test_delete_removes_chunks_from_the_index(client: TestClient) -> None:
+    """The bug: DELETE matched on `filename`, which held the temp name, so it
+    removed nothing, unlinked the on-disk copy and still returned 200 —
+    leaving the chunks permanently unreachable."""
+    assert _upload(client).status_code == 200
+    store: _CapturingStore = client.app.state.store  # type: ignore[attr-defined]
+    assert store.rows
+
+    resp = client.delete("/documents/plan.md")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"deleted": "plan.md"}
+    assert store.rows == {}, "DELETE must drop the document's chunks, not just the file"
+
+
+def test_delete_leaves_other_documents_indexed(client: TestClient) -> None:
+    files = {"file": ("other.md", io.BytesIO(b"# Other\nUnrelated content."), "text/markdown")}
+    assert client.post("/documents", files=files, data={"domain": "hr"}).status_code == 200
+    assert _upload(client).status_code == 200
+
+    assert client.delete("/documents/plan.md").status_code == 200
+
+    store: _CapturingStore = client.app.state.store  # type: ignore[attr-defined]
+    assert store.filenames() == {"other.md"}
+
+
+# ── #114: domain validation ───────────────────────────────────────────────
+
+
+def test_unknown_domain_is_rejected(client: TestClient) -> None:
+    """A typo used to return 200 and index the document where no specialist
+    filters — silently unretrievable, with nothing to reveal it."""
+    resp = _upload(client, domain="finanace")
+
+    assert resp.status_code == 400
+    assert "finanace" in resp.json()["detail"]
+    store: _CapturingStore = client.app.state.store  # type: ignore[attr-defined]
+    assert store.rows == {}, "a rejected upload must not be indexed"
+
+
+def test_rejected_domain_does_not_write_the_file(client: TestClient, tmp_path: Path) -> None:
+    assert _upload(client, domain="nonsense").status_code == 400
+    assert not (tmp_path / "company" / "docs" / "plan.md").exists()
+
+
+@pytest.mark.parametrize(
+    "domain",
+    ["strategy", "finance", "hr", "legal", "operations", "marketing", "board", "product", "general"],
+)
+def test_every_known_domain_is_accepted(client: TestClient, domain: str) -> None:
+    resp = _upload(client, domain=domain)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["domain"] == domain
