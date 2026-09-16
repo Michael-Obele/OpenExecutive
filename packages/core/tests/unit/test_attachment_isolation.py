@@ -263,6 +263,24 @@ def test_migration_also_catches_rows_already_carrying_the_type_tag():
 # ── retrieval isolation ───────────────────────────────────────────────────
 
 
+def _fake_review_store() -> Any:
+    """ReviewStore stub returning empty sets.
+
+    `retrieve` falls back to the real `_default_review_store()`, which opens a
+    SQLite file that a clean checkout does not have — so without this the test
+    passes or fails depending on whether some earlier test created the DB.
+    Same shape as the fixture in `test_retriever_gating`.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        get_rejected_filenames=lambda _ct: set(),
+        get_rejected_source_ids=lambda: set(),
+        get_priority_map=lambda _ct: {},
+        list_annotations=lambda domains=None, active_only=True: [],
+    )
+
+
 def _retrieve_collections_queried(**retrieve_kwargs: Any) -> list[str]:
     """Run the real `retrieve` and report which collections it asked for."""
     from unittest.mock import MagicMock
@@ -280,6 +298,7 @@ def _retrieve_collections_queried(**retrieve_kwargs: Any) -> list[str]:
     retriever.retrieve(
         query="what is the gross margin for the quarter, in detail?",
         store=store,
+        review_store=_fake_review_store(),
         **retrieve_kwargs,
     )
     return seen
@@ -403,10 +422,15 @@ def test_migrated_attachment_is_no_longer_reachable_by_an_unfiltered_retrieve():
     _seed_legacy_attachment(store, "leak.md", "ACME gross margin is 91 percent.")
 
     query = "what is the gross margin for the quarter, in detail?"
-    before = retriever.retrieve(query=query, specialist_name=None, store=store)
+    rs = _fake_review_store()
+    before = retriever.retrieve(
+        query=query, specialist_name=None, store=store, review_store=rs
+    )
     assert "91 percent" in before, "expected to reproduce the leak pre-migration"
 
     _migrate(store)
 
-    after = retriever.retrieve(query=query, specialist_name=None, store=store)
+    after = retriever.retrieve(
+        query=query, specialist_name=None, store=store, review_store=rs
+    )
     assert "91 percent" not in after
