@@ -12,6 +12,7 @@ import {
   curateDomain,
   deleteAnnotation,
   getBuiltinFile,
+  getFailureFile,
   getReviewItem,
   getTrustedDefaults,
   listAllAnnotations,
@@ -140,13 +141,19 @@ function ItemSlideOver({
   }, [itemId_stable]);
 
   useEffect(() => {
-    if (!detail || detail.item.content_type !== "builtin") return;
+    // Failure case studies are file-backed too; without this an SME sees no
+    // content and is pushed toward approving something they cannot read.
+    const fileBacked =
+      detail?.item.content_type === "builtin" || detail?.item.content_type === "failure";
+    if (!detail || !fileBacked) return;
     const [, domain, filename] = detail.item.item_id.split(":");
+    const fetchFile =
+      detail.item.content_type === "failure" ? getFailureFile : getBuiltinFile;
     let cancelled = false;
     setContentLoading(true);
     setContentError(false);
     setContent(null);
-    getBuiltinFile(domain, filename)
+    fetchFile(domain, filename)
       .then((f) => { if (!cancelled) setContent(f.content); })
       .catch(() => { if (!cancelled) { setContent(null); setContentError(true); } })
       .finally(() => { if (!cancelled) setContentLoading(false); });
@@ -230,7 +237,7 @@ function ItemSlideOver({
   }
 
   const { item, annotations } = detail;
-  const isBuiltin = item.content_type === "builtin";
+  const isBuiltin = item.content_type === "builtin" || item.content_type === "failure";
   const isExternal = item.content_type === "external";
 
   return (
@@ -676,6 +683,7 @@ export default function ReviewQueue() {
             >
               <option value="">All types</option>
               <option value="builtin">Built-in</option>
+              <option value="failure">Failure case studies</option>
               <option value="external">Reference library</option>
             </select>
           </div>
@@ -854,7 +862,7 @@ function ItemRow({
     <div className="bg-surface-elevated/40 border border-line rounded-lg px-4 py-3 flex items-center gap-3">
       {/* Icon */}
       <div className="flex-shrink-0 text-fg-subtle">
-        {item.content_type === "builtin" ? (
+        {item.content_type === "builtin" || item.content_type === "failure" ? (
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
           </svg>

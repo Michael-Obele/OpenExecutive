@@ -92,6 +92,24 @@ def _review_store():  # type: ignore[no-untyped-def]
     return ReviewStore(db_path=DB_PATH)
 
 
+def _existing_review_item(item_id: str):  # type: ignore[no-untyped-def]
+    """Look up a review item without 500ing or materialising the database.
+
+    `sqlite3.connect` creates the file, and a DB with no `review_items` table
+    raises — neither should turn a legitimate upload into a server error.
+    Absent review state simply means nothing is known to be trusted.
+    """
+    from openexecutive.memory.episodic import DB_PATH
+
+    if not DB_PATH.exists():
+        return None
+    try:
+        return _review_store().get_item(item_id)
+    except Exception:
+        logger.warning("review state unreadable during upload check", exc_info=True)
+        return None
+
+
 @router.get("/builtin", response_model=BuiltinListResponse)
 async def list_builtin_files() -> BuiltinListResponse:
     files: list[BuiltinFileMeta] = []
@@ -134,7 +152,7 @@ async def create_builtin_file(body: BuiltinFileWrite, request: Request) -> Built
     # FAILURE namespace fixes that at the source; this makes sure no future
     # id-space change can quietly re-open it.
     item_id = build_item_id(ContentType.BUILTIN, body.domain, body.filename)
-    existing = _review_store().get_item(item_id)
+    existing = _existing_review_item(item_id)
     if existing is not None and existing.trusted_default:
         raise HTTPException(
             status_code=409,
@@ -303,7 +321,9 @@ async def list_external_sources(request: Request) -> ExternalSourcesResponse:
         if s.is_ingested
     ]
     if ingested:
-        ReviewStore.sync_external_registrations(ingested)
+        from openexecutive.memory.episodic import DB_PATH as _REVIEW_DB
+
+        ReviewStore.sync_external_registrations(ingested, _REVIEW_DB)
 
     return ExternalSourcesResponse(sources=sources, total_chunks=sum(chunk_counts.values()))
 
@@ -471,6 +491,21 @@ async def update_failure_file(
         chunk_size=400,
         overlap=40,
     )
+    # Mirror update_builtin_file: register (a doc created before failure docs
+    # were registered still has no row, and editing must create one) and mark
+    # it needs_revision so an edit behaves the same for both content types.
+    from openexecutive.knowledge.review_store import ContentType, build_item_id
+
+    rs = _review_store()
+    item_id = build_item_id(ContentType.FAILURE, domain, filename)
+    rs.register(
+        item_id=item_id,
+        content_type=ContentType.FAILURE,
+        domain=domain,
+        filename=filename,
+    )
+    rs.touch_modified(item_id)
+
     return BuiltinWriteResponse(domain=domain, filename=filename, chunks_indexed=chunks)
 
 

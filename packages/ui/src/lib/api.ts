@@ -1195,7 +1195,10 @@ export async function deleteArtifact(id: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export type ReviewStatus = "pending" | "approved" | "rejected" | "needs_revision";
-export type ReviewContentType = "builtin" | "external";
+// `failure` = shipped or user-authored failure case studies. They have their
+// own id namespace (`failure:<domain>:<file>`) so a user upload can never
+// collide with a shipped one.
+export type ReviewContentType = "builtin" | "external" | "failure";
 export type ReviewPriority = "low" | "normal" | "high";
 
 export interface ReviewItem {

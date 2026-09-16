@@ -203,6 +203,7 @@ def _migrate_failure_namespace(conn: sqlite3.Connection) -> int:
     if already is not None:
         return 0
 
+    from openexecutive.knowledge.loader import BUILTIN_KNOWLEDGE_PATH
     from openexecutive.knowledge.shipped_manifest import SHIPPED_BUILTIN_FILES
 
     migrated = 0
@@ -221,6 +222,35 @@ def _migrate_failure_namespace(conn: sqlite3.Connection) -> int:
             (old_id,),
         ).fetchone()
         if old is None:
+            continue
+
+        # A real file at knowledge/builtin/<domain>/<filename> means this row
+        # is NOT (only) the shipped failure doc: it is a user upload that the
+        # old bug merged onto the shipped row — one row governing two files.
+        # Transplanting its decision onto the case study would both mis-apply
+        # the SME's judgement AND delete the only row governing the upload,
+        # silently un-suppressing content someone had rejected. Keep the row
+        # for the upload it actually governs, untrusted and withheld, and let
+        # the shipped doc keep its own fresh trusted-default row.
+        if (BUILTIN_KNOWLEDGE_PATH / domain / filename).exists():
+            now = datetime.now(UTC).isoformat()
+            if old["reviewed_at"] is None:
+                # Never actually decided — the `approved` came from the shipped
+                # default this row inherited, not from a human. Queue it.
+                conn.execute(
+                    "UPDATE review_items SET trusted_default = 0, status = 'pending', "
+                    "last_modified_at = ? WHERE item_id = ?",
+                    (now, old_id),
+                )
+            else:
+                # A human decided. Keep that decision — it was far more likely
+                # about their own upload than about a case study they never
+                # saw — and just strip the trust the collision conferred.
+                conn.execute(
+                    "UPDATE review_items SET trusted_default = 0, last_modified_at = ? "
+                    "WHERE item_id = ?",
+                    (now, old_id),
+                )
             continue
 
         # Carry the human's decision onto the new row, then drop the old one.

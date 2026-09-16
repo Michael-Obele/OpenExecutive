@@ -957,3 +957,136 @@ def test_legacy_upgrade_does_not_requeue_failure_docs(tmp_path: Path) -> None:
     assert store.get_item(f"builtin:{d0}:{f0}") is None
     assert store.get_item(build_item_id(ContentType.FAILURE, d0, f0)) is not None
     assert store.get_withheld_keys(ContentType.FAILURE) == set()
+
+
+def test_migration_preserves_a_deliberate_curation(tmp_path: Path) -> None:
+    """The other merge direction, which the backfill cannot rescue.
+
+    On a database already upgraded by an earlier commit the backfill marker is
+    set, so it is a no-op. If the operator had curated a domain containing
+    failure docs, those rows are `pending` ON PURPOSE. The migration copies
+    that across, and nothing promotes it back — which is exactly right, and is
+    why the merge direction has to be correct on its own rather than relying
+    on the backfill to clean up after it.
+    """
+    import sqlite3
+    from pathlib import PurePosixPath
+
+    from openexecutive.knowledge.review_store import build_item_id
+    from openexecutive.knowledge.shipped_manifest import SHIPPED_BUILTIN_FILES
+
+    db = tmp_path / "curated.db"
+    ReviewStore.initialize_db(db)
+    ReviewStore.sync_builtin_registrations(db)
+    ReviewStore.backfill_trusted_defaults(db)
+
+    p = next(
+        PurePosixPath(r)
+        for r in sorted(SHIPPED_BUILTIN_FILES)
+        if PurePosixPath(r).parts[0] == "failures"
+    )
+    domain = p.parent.name
+    # Rewind just the failure namespace, leaving a curated `builtin:` row.
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM review_items WHERE content_type='failure'")
+        conn.execute("DELETE FROM review_meta WHERE key='failure_namespace_v1'")
+        conn.execute(
+            "INSERT INTO review_items (item_id, content_type, domain, filename, "
+            "status, trusted_default, registered_at, last_modified_at) "
+            "VALUES (?, 'builtin', ?, ?, 'pending', 1, '2025-01-01', '2025-01-01')",
+            (f"builtin:{domain}:{p.name}", domain, p.name),
+        )
+
+    ReviewStore.sync_builtin_registrations(db)
+    ReviewStore.backfill_trusted_defaults(db)  # marker already set: no-op
+
+    store = ReviewStore(db_path=db)
+    migrated = store.get_item(build_item_id(ContentType.FAILURE, domain, p.name))
+    assert migrated is not None
+    assert migrated.status == ReviewStatus.PENDING, "curation intent must survive"
+    # And the operator can still back out of it.
+    assert store.stop_curation(domain) >= 1
+    assert store.get_item(migrated.item_id).status == ReviewStatus.APPROVED  # type: ignore[union-attr]
+
+
+def test_migration_does_not_hijack_a_merged_user_upload(tmp_path: Path) -> None:
+    """The population this migration exists for is where the old bug FIRED.
+
+    There, one `builtin:<d>:<f>` row governed two files: the shipped failure
+    doc and a user upload that INSERT-OR-IGNOREd onto it. Transplanting that
+    row's decision onto the case study both mis-applies the SME's judgement
+    and deletes the only row governing the upload — silently un-suppressing
+    content someone had rejected, with no row left to re-reject it from.
+    """
+    import sqlite3
+    from pathlib import PurePosixPath
+
+    from openexecutive.knowledge.loader import BUILTIN_KNOWLEDGE_PATH
+    from openexecutive.knowledge.review_store import build_item_id
+    from openexecutive.knowledge.shipped_manifest import SHIPPED_BUILTIN_FILES
+
+    p = next(
+        PurePosixPath(r)
+        for r in sorted(SHIPPED_BUILTIN_FILES)
+        if PurePosixPath(r).parts[0] == "failures"
+    )
+    domain, filename = p.parent.name, p.name
+
+    db = tmp_path / "merged.db"
+    ReviewStore.initialize_db(db)
+    ReviewStore.sync_builtin_registrations(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM review_items WHERE content_type='failure'")
+        conn.execute("DELETE FROM review_meta")
+        conn.execute(
+            "INSERT INTO review_items (item_id, content_type, domain, filename, "
+            "status, trusted_default, reviewed_at, reviewer_notes, registered_at, "
+            "last_modified_at) VALUES (?, 'builtin', ?, ?, 'rejected', 1, "
+            "'2025-06-01', 'confidential draft', '2025-01-01', '2025-01-01')",
+            (f"builtin:{domain}:{filename}", domain, filename),
+        )
+
+    # The upload really is on disk — that is what makes the row ambiguous.
+    planted = BUILTIN_KNOWLEDGE_PATH / domain / filename
+    planted.write_text("# planted", encoding="utf-8")
+    try:
+        ReviewStore.sync_builtin_registrations(db)
+        ReviewStore.backfill_trusted_defaults(db)
+        store = ReviewStore(db_path=db)
+
+        upload = store.get_item(f"builtin:{domain}:{filename}")
+        assert upload is not None, "the row governing the upload must survive"
+        assert upload.status == ReviewStatus.REJECTED, "the SME decision stands"
+        assert upload.trusted_default is False, "collision-conferred trust is stripped"
+        assert (domain, filename) in store.get_withheld_keys(ContentType.BUILTIN)
+
+        shipped = store.get_item(build_item_id(ContentType.FAILURE, domain, filename))
+        assert shipped is not None
+        assert shipped.status == ReviewStatus.APPROVED, "no transplanted rejection"
+        assert shipped.trusted_default is True
+    finally:
+        planted.unlink()
+
+
+def test_builtin_chunk_domain_matches_its_review_row(tmp_path: Path) -> None:
+    """The gate key is `(domain, filename)` — both sides must derive it the same.
+
+    Chunk metadata used `infer_domain_from_path` over the ABSOLUTE path, so an
+    install under e.g. `/srv/product/` tagged every chunk `product` while
+    review rows used the directory name. No key would ever match and the gate
+    would fail wide open.
+    """
+    from openexecutive.knowledge.loader import (
+        BUILTIN_KNOWLEDGE_PATH,
+        infer_domain_from_path,
+    )
+    from openexecutive.knowledge.shipped_manifest import SHIPPED_BUILTIN_FILES
+
+    for rel in sorted(SHIPPED_BUILTIN_FILES):
+        path = BUILTIN_KNOWLEDGE_PATH / rel
+        chunk_domain = infer_domain_from_path(path, root=BUILTIN_KNOWLEDGE_PATH)
+        assert chunk_domain == path.parent.name, f"{rel}: {chunk_domain}"
+
+    # And it is immune to a domain word in the install prefix.
+    root = Path("/srv/product/app/builtin")
+    assert infer_domain_from_path(root / "strategy" / "x.md", root=root) == "strategy"

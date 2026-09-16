@@ -355,8 +355,12 @@ def test_search_omits_a_rejected_external_source(client: TestClient, review_db: 
 
 
 def test_search_omits_a_withheld_failure_case(client: TestClient, review_db: Any) -> None:
-    """Failure cases share review registrations but their own Chroma collection."""
-    _register(review_db, "strategy", "kodak-digital.md")
+    """Failure cases have their own content type AND their own Chroma collection."""
+    from openexecutive.knowledge.review_store import ContentType
+
+    _register(
+        review_db, "strategy", "kodak-digital.md", content_type=ContentType.FAILURE
+    )
 
     data = client.post("/knowledge/search", json={"query": "strategy"}).json()
 
