@@ -2242,10 +2242,140 @@ external_monitoring:
 
 review:
   store: openexecutive.knowledge.review_store.ReviewStore (shares episodic_memory.db).
+  default_state: |
+    Shipped content is TRUSTED ON ARRIVAL. `sync_builtin_registrations` and
+    `sync_external_registrations` register `approved` with a NULL
+    `reviewed_at`, so a new instance starts with an EMPTY review queue.
+    Before this, all 81 built-in docs registered `pending`, and a brand-new
+    box greeted its first user with "81 items need review" — work nobody had
+    a basis to do on day one, gating nothing.
+
+    PROVENANCE IS AN EXPLICIT COLUMN FED BY A COMMITTED MANIFEST — never
+    inferred, and never re-derived from the filesystem. Two mistakes were
+    caught here in review, both of which silently approved a user's own
+    unvetted document and labelled it "shipped" in the UI:
+      1. Keying on (pending, reviewed_at NULL). A brand-new upload via
+         `POST /knowledge/builtin` -> `ReviewStore.register()` has exactly
+         that shape.
+      2. Keying on "a .md file exists under knowledge/builtin/". That route
+         writes the user's file into that SAME tree
+         (`api/routes/knowledge._resolve_path`), so a directory scan re-flagged
+         uploads as shipped on the next boot.
+    So `review_items.trusted_default` (INTEGER, default 0; additive ALTER for
+    older DBs) is set to 1 only for paths listed in
+    `knowledge/shipped_manifest.py::SHIPPED_BUILTIN_FILES`, which
+    `sync_builtin_registrations` iterates instead of rglobbing the tree.
+    Regenerate that manifest when adding or removing a built-in doc;
+    `test_shipped_manifest_matches_git` fails on drift. `register()` never
+    sets the flag, so user content stays `trusted_default = 0` forever.
+
+    Two states, read together:
+      - trusted_default=1, approved, reviewed_at IS NULL -> shipped, unvetted
+      - approved + reviewed_at set                       -> an SME signed off
+    `count_trusted_defaults_by_domain()` counts the first kind and drives the
+    "Curate N" affordance. The UI reads `trusted_default` off the API rather
+    than inferring it.
+
+    MIGRATION ORDER MATTERS. `ReviewStore.backfill_trusted_defaults()` must run
+    AFTER both registration syncs, because it only touches rows they have
+    flagged `trusted_default = 1`. Call sites: `api/main.py` lifespan and
+    `clients/slots._ensure_schemas`. A `review_meta` marker row
+    (`trusted_defaults_backfill_v1`) makes it fire exactly once, written under
+    `BEGIN IMMEDIATE` with `INSERT OR IGNORE` so two workers booting together
+    cannot raise a UNIQUE violation out of the lifespan. The marker lives in
+    `review_meta` rather than `PRAGMA user_version` because
+    `episodic_memory.db` is shared with episodic memory, alerts, people,
+    talent and more.
+
+    The migration's rule is NO SHIPPED DOC LOSES RETRIEVABILITY ON UPGRADE.
+    Its only exclusion is `reviewed_at IS NULL` (which `set_status` always
+    stamps, so every explicit approve/reject is skipped). Notes and
+    annotations deliberately do NOT hold a row back: `retrieve`
+    injects annotations by DOMAIN regardless of item status, so withholding an
+    annotated doc would feed the Executive a correction to a document it can
+    no longer see.
   effect_on_retrieval: |
-    Rejected items are filtered out of every retrieval. Approved items
-    can be promoted in priority. The Executive never sees pending items
-    until an SME approves them.
+    WITHHELD = `pending` OR `rejected`. `get_withheld_filenames(content_type)`
+    is the single query the retrieval path uses; it replaced the old
+    rejected-only lookups, which no longer exist.
+
+    Both `retrieve` and `retrieve_failures` apply it, and so does
+    `POST /knowledge/search` — the diagnostic panel documents itself as
+    showing what RAG would surface, so it drops withheld rows too. It
+    degrades to unfiltered if review state is unreadable (a read-only
+    diagnostic should not 500, and must not create the DB file);
+    `retrieve` is the enforcing gate and does NOT degrade. The failures
+    path is the one that used to leak: failure case studies are registered
+    for review but indexed into FAILURES_COLLECTION, and `retrieve_failures`
+    consulted no review state at all, so rejecting a failure case study did
+    nothing.
+
+    The gate is now real. It could only be made real once shipped content
+    defaulted to approved — enforcing it beforehand would have left a fresh
+    instance with zero retrievable knowledge.
+
+    `needs_revision` is deliberately NOT withheld. `touch_modified` flips an
+    item there on ANY content edit, so withholding it would make editing a
+    file in the knowledge UI silently delete it from retrieval. Approved
+    items can still be promoted in priority.
+
+    The filter keys on the `(domain, filename)` PAIR that Chroma metadata
+    carries. Bare filename was both ambiguous and caller-choosable:
+    `POST /knowledge/builtin` accepts any `(domain, filename)`, so uploading a
+    file named after a shipped doc in a different domain silently withheld
+    that shipped doc from every specialist. `get_priority_map` uses the same
+    key for the same reason. The old design leaned on "all shipped basenames
+    are unique", which only a test over the shipped tree ever checked and
+    which nothing enforced at the write path.
+
+    IDENTITY IS NAMESPACED. `build_item_id` is the single constructor, with
+    three disjoint namespaces: `builtin:<domain>:<file>`,
+    `failure:<domain>:<file>`, `external:<source_id>`. Failure case studies
+    used to fold into `builtin:`, which is the namespace a user upload reaches
+    — and since no file sits at `knowledge/builtin/<domain>/<file>` for a
+    failure doc, `create_builtin_file`'s exists() guard never fired, so an
+    upload INSERT-OR-IGNOREd onto the shipped row and inherited `approved` +
+    `trusted_default = 1`. `_migrate_failure_namespace` (marker
+    `failure_namespace_v1`) re-keys existing rows, carrying status,
+    reviewed_at, notes and annotations across under `PRAGMA
+    defer_foreign_keys`. `create_builtin_file` also refuses outright to write
+    onto a `trusted_default = 1` row, so a future id-space change cannot
+    silently re-open it.
+  curation: |
+    Opt-in, per domain. `POST /review/curate {domain, action: start|stop}`
+    moves a domain's untouched trusted defaults to `pending` (and back).
+    Both directions require `trusted_default = 1 AND reviewed_at IS NULL`, so
+    neither a user's own upload nor an item an SME decided on is ever moved.
+
+    `domain` is REQUIRED — there is no "curate everything" selector. While a
+    domain is curated its items are withheld, so no single call may take the
+    whole knowledge base away from the Executive. The UI confirms with the
+    exact count before starting.
+  bulk_approve: |
+    `POST /review/bulk-approve` selects by `domain` (min_length=1 —
+    the store reads a falsy domain as "no filter", so an empty string would
+    widen a scoped call to every pending item), an explicit `item_ids` list
+    (over BULK_MAX_IDS=500 raises rather than silently truncating), or
+    `all_pending: true`. A call with no selector is a 400 —
+    the same "a bulk call must always carry a selector" rule as
+    `/alerts/bulk-ack`. Returns `{approved_count, item_ids}` and writes a
+    `review_bulk_approve` audit event; `/review/curate` writes `review_curate`.
+  reset_and_slots: |
+    `reset_all_state` wipes `review_annotations` + `review_items` (child
+    first) and re-registers the shipped docs — built-in and any ingested OER
+    sources. It then re-registers, as `pending`, every `.md` under
+    `knowledge/builtin/` the manifest does NOT claim: the reset does not
+    delete user-authored files or their Chroma chunks, so without this a doc
+    an SME had REJECTED came back retrievable with no review row at all —
+    un-suppressed and invisible in the queue. Conservative on purpose, since
+    a previously-approved upload returning for review is the safe direction,
+    and deleting the operator's files would be worse. This means a reset no
+    longer
+    inherits the previous operator's approvals and rejections — a stale
+    rejection would otherwise keep suppressing retrieval on the new box.
+    `clients.slots._ensure_schemas` runs `sync_builtin_registrations` after
+    `initialize_db`, so a newly activated client slot has its trusted
+    defaults immediately instead of an empty table until the next restart.
 
 workflows:
   contract: Structured input → ordered named steps → rendered Markdown artifact.

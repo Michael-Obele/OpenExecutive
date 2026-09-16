@@ -274,8 +274,8 @@ def _fake_review_store() -> Any:
     from types import SimpleNamespace
 
     return SimpleNamespace(
-        get_rejected_filenames=lambda _ct: set(),
-        get_rejected_source_ids=lambda: set(),
+        get_withheld_keys=lambda _ct: set(),
+        get_withheld_source_ids=lambda: set(),
         get_priority_map=lambda _ct: {},
         list_annotations=lambda domains=None, active_only=True: [],
     )

@@ -565,6 +565,28 @@ def _ensure_schemas() -> None:
     init_departments(db_path)
     init_monitoring(db_path)
     ReviewStore.initialize_db(db_path)
+    # Register shipped knowledge as trusted defaults too — without this a
+    # freshly activated slot has an empty review_items table until the next
+    # process restart, so its knowledge page and review stats read as empty.
+    ReviewStore.sync_builtin_registrations(db_path)
+    # External sources as well, mirroring the lifespan. A slot captured from a
+    # pre-existing database carries `external:*` rows; the backfill below only
+    # promotes rows a sync has flagged as shipped, so skipping this would leave
+    # them `pending` — and pending is now withheld from retrieval.
+    try:
+        from openexecutive.knowledge.external_sources import load_manifest
+
+        ingested = [
+            {"id": src.id, "domains": src.domains}
+            for src in load_manifest()
+            if src.cache_dir.exists() and any(src.cache_dir.iterdir())
+        ]
+        if ingested:
+            ReviewStore.sync_external_registrations(ingested, db_path)
+    except Exception:
+        logger.exception("slot schema init: sync_external_registrations failed")
+    # Must follow both syncs: it only promotes rows they have flagged.
+    ReviewStore.backfill_trusted_defaults(db_path)
 
 
 def _reseed_blank_defaults(*, seed_departments: bool = True) -> None:

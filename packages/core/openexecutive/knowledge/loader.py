@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import re
@@ -150,8 +151,25 @@ def _make_chunk_id(source: str, chunk_index: int) -> str:
     return hashlib.md5(base.encode()).hexdigest()
 
 
-def infer_domain_from_path(path: Path) -> str:
-    for part in path.parts:
+def infer_domain_from_path(path: Path, root: Path | None = None) -> str:
+    """Infer a knowledge domain from a path's components.
+
+    Pass ``root`` for content under a known tree: only the parts BELOW it are
+    scanned. Without it this walks the ABSOLUTE path, so an install rooted at
+    e.g. `/srv/product/` tags every chunk `product` no matter which domain
+    directory the file is actually in. That was merely a mis-tag until the
+    review gate began keying on `(domain, filename)` — a chunk domain that
+    disagrees with its review row's domain means the key never matches and
+    withheld content is retrieved. Callers under `knowledge/builtin/` must
+    pass the root so the metadata agrees with what `review_items` stores.
+    """
+    parts = path.parts
+    if root is not None:
+        # A path outside the root keeps its absolute parts — the caller asked
+        # for a hint, not a constraint.
+        with contextlib.suppress(ValueError):
+            parts = path.relative_to(root).parts
+    for part in parts:
         domain = DOMAIN_MAP.get(part.lower())
         if domain:
             return domain
@@ -299,7 +317,7 @@ async def ingest_builtin_file(
     text = path.read_text(encoding="utf-8")
     if not text.strip():
         return 0
-    domain = infer_domain_from_path(path)
+    domain = infer_domain_from_path(path, root=BUILTIN_KNOWLEDGE_PATH)
     chunks = chunk_text(text, chunk_size=chunk_size, overlap=overlap)
     metadatas: list[dict[str, Any]] = [
         {
@@ -586,7 +604,7 @@ async def seed_builtin_knowledge(
         # collection by openexecutive.knowledge.skills_index.seed_builtin_skills.
         if any(p in md_file.relative_to(BUILTIN_KNOWLEDGE_PATH).parts for p in ("skills", "failures")):
             continue
-        domain = infer_domain_from_path(md_file)
+        domain = infer_domain_from_path(md_file, root=BUILTIN_KNOWLEDGE_PATH)
         text = md_file.read_text(encoding="utf-8")
         chunks = chunk_text(text)
 
@@ -637,7 +655,7 @@ async def seed_failures(
 
     total = 0
     for md_file in FAILURES_KNOWLEDGE_PATH.rglob("*.md"):
-        domain = infer_domain_from_path(md_file)
+        domain = infer_domain_from_path(md_file, root=BUILTIN_KNOWLEDGE_PATH)
         text = md_file.read_text(encoding="utf-8")
         if not text.strip():
             continue
