@@ -292,17 +292,29 @@ async def ingest_builtin_file(
     return len(chunks)
 
 
+def _company_doc_names(docs_dir: Path) -> set[str]:
+    """Filenames in ``docs_dir`` that count as company documents.
+
+    One definition, shared by the listing endpoint and the boot reconcile, so
+    the two can never disagree about what is on disk. Excludes subdirectories
+    (Notion sync writes into ``docs/notion/``, which belongs to its own
+    collection) and dotfiles.
+    """
+    if not docs_dir.is_dir():
+        return set()
+    return {p.name for p in docs_dir.iterdir() if p.is_file() and not p.name.startswith(".")}
+
+
 def list_company_docs(docs_dir: Path) -> list[dict[str, Any]]:
     if not docs_dir.exists():
         return []
     return [
         {
-            "filename": f.name,
-            "size_bytes": f.stat().st_size,
-            "modified_at": f.stat().st_mtime,
+            "filename": name,
+            "size_bytes": (docs_dir / name).stat().st_size,
+            "modified_at": (docs_dir / name).stat().st_mtime,
         }
-        for f in sorted(docs_dir.iterdir())
-        if f.is_file() and not f.name.startswith(".")
+        for name in sorted(_company_doc_names(docs_dir))
     ]
 
 
@@ -334,7 +346,7 @@ async def reconcile_company_docs(
     which are never written to ``docs_dir`` — cannot be recovered and are
     dropped by the sweep.
     """
-    live = {p.name for p in docs_dir.iterdir() if p.is_file()} if docs_dir.is_dir() else set()
+    live = _company_doc_names(docs_dir)
 
     orphans: list[str] = []
     indexed_names: set[str] = set()
@@ -351,8 +363,6 @@ async def reconcile_company_docs(
 
     indexed = 0
     for doc_name in sorted(live - indexed_names):
-        if doc_name.startswith("."):
-            continue
         try:
             if await ingest_file(docs_dir / doc_name, store, collection=collection):
                 indexed += 1

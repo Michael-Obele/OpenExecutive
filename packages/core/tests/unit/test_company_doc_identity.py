@@ -26,32 +26,7 @@ from openexecutive.knowledge.loader import (
 )
 from openexecutive.knowledge.retriever import DOMAIN_ALIASES, _with_general
 
-
-class _FakeStore:
-    """Id-keyed store exposing the surface `reconcile_company_docs` uses."""
-
-    def __init__(self, rows: dict[str, dict[str, Any]] | None = None) -> None:
-        self.rows: dict[str, dict[str, Any]] = dict(rows or {})
-
-    def add_documents(
-        self,
-        texts: list[str],
-        metadatas: list[dict[str, Any]],
-        ids: list[str],
-        collection: str,
-    ) -> None:
-        for chunk_id, meta in zip(ids, metadatas, strict=True):
-            self.rows[chunk_id] = meta
-
-    def iter_chunk_metadata(self, collection: str) -> list[tuple[str, dict[str, Any]]]:
-        return list(self.rows.items())
-
-    def delete_by_ids(self, collection: str, ids: list[str]) -> None:
-        for chunk_id in ids:
-            self.rows.pop(chunk_id, None)
-
-    def filenames(self) -> set[str]:
-        return {m["filename"] for m in self.rows.values()}
+from ._fake_store import FakeStore as _FakeStore
 
 
 def _orphan(name: str, index: int = 0) -> tuple[str, dict[str, Any]]:

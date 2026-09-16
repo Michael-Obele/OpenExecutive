@@ -30,46 +30,7 @@ from fastapi.testclient import TestClient
 
 from openexecutive.api.routes import documents
 
-
-class _CapturingStore:
-    """Models the parts of ChromaDBStore the document routes rely on.
-
-    Critically it upserts by id and filters deletes by the `where` clause, so
-    the duplicate-chunk and failed-delete bugs are reproducible here rather
-    than needing a real ChromaDB and embedding model.
-    """
-
-    def __init__(self) -> None:
-        self.rows: dict[str, dict[str, Any]] = {}
-
-    def add_documents(
-        self,
-        texts: list[str],
-        metadatas: list[dict[str, Any]],
-        ids: list[str],
-        collection: str,
-    ) -> None:
-        for chunk_id, meta in zip(ids, metadatas, strict=True):
-            self.rows[chunk_id] = meta
-
-    def delete_documents(self, collection: str, where: dict[str, Any]) -> None:
-        key, value = next(iter(where.items()))
-        self.rows = {i: m for i, m in self.rows.items() if m.get(key) != value}
-
-    def iter_chunk_metadata(self, collection: str) -> list[tuple[str, dict[str, Any]]]:
-        return list(self.rows.items())
-
-    def delete_by_ids(self, collection: str, ids: list[str]) -> None:
-        for chunk_id in ids:
-            self.rows.pop(chunk_id, None)
-
-    # -- assertion helpers ------------------------------------------------
-    @property
-    def added(self) -> list[dict[str, Any]]:
-        return list(self.rows.values())
-
-    def filenames(self) -> set[str]:
-        return {m["filename"] for m in self.rows.values()}
+from ._fake_store import FakeStore as _CapturingStore
 
 
 @pytest.fixture
