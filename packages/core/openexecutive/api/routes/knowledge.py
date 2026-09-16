@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -13,6 +14,8 @@ from openexecutive.knowledge.loader import (
     FAILURES_KNOWLEDGE_PATH,
     UPLOAD_DOMAINS,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/knowledge")
 
@@ -631,6 +634,15 @@ async def search_knowledge(
                 rs.get_withheld_source_ids(),
             )
         except Exception:
+            # Say so. A silently degraded mirror is worse than a loud one: an
+            # SME who rejects a doc, still sees it listed here, and has no
+            # signal will conclude rejection is broken — while chat is in fact
+            # withholding it correctly.
+            logger.warning(
+                "review state unreadable; /knowledge/search is showing "
+                "unfiltered results this request",
+                exc_info=True,
+            )
             return set(), set()
 
     _withheld_builtin, _withheld_external = _withheld_sets()

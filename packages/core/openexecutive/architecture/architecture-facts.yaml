@@ -2994,7 +2994,7 @@ integrations:
     ``POST /chat/upload`` (multipart) — capped at 5 files per turn.
 
     Indexed under ``source_name="attachment:<bare filename>"`` and domain
-    ``general``. Both matter. The name is the chunk-id namespace and the
+    ``company_docs``. Both matter. The name is the chunk-id namespace and the
     retrieval citation, and an attachment's filename is chosen by whoever
     sent the message — unprefixed, an emailed ``strategy-2026.md`` would
     upsert straight over the curated company document of that name, so
