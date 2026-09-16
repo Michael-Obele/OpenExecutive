@@ -37,9 +37,10 @@ class FakeStore:
     def iter_chunk_metadata(self, collection: str) -> list[tuple[str, dict[str, Any]]]:
         return list(self.rows.items())
 
-    def delete_by_ids(self, collection: str, ids: list[str]) -> None:
-        for chunk_id in ids:
-            self.rows.pop(chunk_id, None)
+    def delete_by_ids(self, collection: str, ids: list[str]) -> int:
+        # Returns the count actually removed, like ChromaDBStore.delete_by_ids —
+        # callers report that number, so the fake must not overstate it either.
+        return sum(self.rows.pop(chunk_id, None) is not None for chunk_id in ids)
 
     # -- assertion helpers ------------------------------------------------
     @property

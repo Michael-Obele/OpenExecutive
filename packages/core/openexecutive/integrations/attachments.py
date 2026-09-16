@@ -158,7 +158,7 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
     async def _run() -> None:
         suffix = _suffix_from_filename(filename)
         try:
-            from openexecutive.knowledge.loader import GENERAL_DOMAIN, ingest_file
+            from openexecutive.knowledge.loader import ingest_file
             from openexecutive.knowledge.store import ChromaDBStore
 
             store = ChromaDBStore()
@@ -180,13 +180,22 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
                 # provenance visible in the `[filename]` retrieval citation —
                 # the same reason Notion and research artifacts are isolated.
                 #
-                # `domain` is the catch-all rather than the old "company_docs"
-                # — that was not one of the specialist domains, so every
-                # attachment landed where no specialist could retrieve it.
+                # `domain` stays "company_docs", which is NOT one of the
+                # specialist domains — so these chunks match no specialist's
+                # domain filter and never reach the Executive's context. That
+                # is a known gap, left deliberately: anyone who can attach a
+                # file in an integration channel would otherwise be writing
+                # into every specialist's RAG context, and these rows have no
+                # removal path at all (they are never written to
+                # `company/docs/`, so `GET /documents` does not list them and
+                # `DELETE /documents/{filename}` 404s before reaching the
+                # store). Making them retrievable is a trust-boundary decision
+                # that needs its own change, with a delete path alongside it —
+                # not a side effect of fixing the chunk-id bug below.
                 count = await ingest_file(
                     tmp_path,
                     store,
-                    domain=GENERAL_DOMAIN,
+                    domain="company_docs",
                     source_name=f"attachment:{Path(filename).name}",
                 )
                 logger.info(

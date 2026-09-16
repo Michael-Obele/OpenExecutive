@@ -332,20 +332,42 @@ async def reconcile_company_docs(
 ) -> tuple[int, int]:
     """Sweep temp-named orphans, then index documents that have no chunks.
 
-    Returns ``(orphans_deleted, files_indexed)``. Safe to run on every boot.
+    Returns ``(orphans_deleted, files_indexed)``. Converges on a stable store,
+    so it is safe to run on every boot.
 
     Only files with *no* rows in the collection are indexed. A document that is
     already indexed under its real filename is left untouched — its ``domain``
     came from whatever the uploader chose, and the on-disk copy carries no
     record of that, so re-ingesting would silently retag a ``finance`` document
-    as ``general``. Recovered documents do land under ``general``, which is the
-    honest answer (their domain died with the orphaned rows) and is retrievable
-    by every specialist rather than by none.
+    as ``general``. Recovered documents land under ``general`` explicitly (NOT
+    via ``infer_domain_from_path``, which scans every component of the absolute
+    path and would tag them ``finance`` on an install rooted under, say,
+    ``/srv/finance/``). That is the honest answer — their domain died with the
+    orphaned rows — and ``general`` is retrievable by every specialist rather
+    than by none.
 
     Documents whose only copy was the orphaned index — chat/email attachments,
     which are never written to ``docs_dir`` — cannot be recovered and are
     dropped by the sweep.
+
+    A document that extracts to no text writes no chunks, so it is retried on
+    every boot. That is wasted work rather than churn (the store still
+    converges), and it is bounded by however many unreadable files are sitting
+    in ``docs_dir``.
+
+    Does nothing at all when ``docs_dir`` does not exist. An absent directory is
+    ambiguous — "no documents" and "the volume is not mounted yet" look
+    identical — and in the second case every recoverable document would be
+    swept precisely because the file that would have spared it is invisible.
     """
+    if not docs_dir.is_dir():
+        logger.warning(
+            "reconcile_company_docs: %s does not exist — skipping "
+            "(cannot distinguish an empty docs dir from an unmounted one)",
+            docs_dir,
+        )
+        return 0, 0
+
     live = _company_doc_names(docs_dir)
 
     orphans: list[str] = []
@@ -359,19 +381,24 @@ async def reconcile_company_docs(
         else:
             indexed_names.add(name)
 
-    store.delete_by_ids(collection, orphans)
+    deleted = store.delete_by_ids(collection, orphans)
 
     indexed = 0
     for doc_name in sorted(live - indexed_names):
         try:
-            if await ingest_file(docs_dir / doc_name, store, collection=collection):
+            if await ingest_file(
+                docs_dir / doc_name,
+                store,
+                domain=GENERAL_DOMAIN,
+                collection=collection,
+            ):
                 indexed += 1
         except Exception:
             # One unreadable document must not abort the reconcile —
             # the rest of the index is still worth repairing.
             logger.exception("reconcile_company_docs: index failed: %s", doc_name)
 
-    return len(orphans), indexed
+    return deleted, indexed
 
 
 async def seed_builtin_knowledge(

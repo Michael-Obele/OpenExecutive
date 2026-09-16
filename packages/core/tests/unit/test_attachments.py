@@ -292,11 +292,17 @@ def test_attachment_name_is_stripped_to_a_bare_name():
     assert kwargs["source_name"] == "attachment:passwd.md"
 
 
-def test_attachment_lands_in_a_retrievable_domain():
-    """It used to be tagged "company_docs", which is not one of the specialist
-    domains, so no specialist could ever retrieve an attachment."""
+def test_attachment_domain_stays_outside_the_specialist_domains():
+    """Pins a deliberate gap, so a later change has to be deliberate too.
+
+    "company_docs" is not one of the specialist domains, so these chunks match
+    no domain filter and never reach the Executive. Anyone who can attach a
+    file in an integration channel would otherwise be writing into every
+    specialist's RAG context, and these rows have no removal path — they are
+    never written to company/docs/, so GET /documents does not list them and
+    DELETE /documents/{filename} 404s before reaching the store."""
     from openexecutive.knowledge.loader import UPLOAD_DOMAINS
 
     _, kwargs = _ingest_call("board-deck.md")
 
-    assert kwargs["domain"] in UPLOAD_DOMAINS
+    assert kwargs["domain"] not in UPLOAD_DOMAINS

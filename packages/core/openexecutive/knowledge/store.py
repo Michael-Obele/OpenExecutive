@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -161,16 +162,28 @@ class ChromaDBStore(KnowledgeStore):
             for cid, md in zip(ids, metas, strict=False)
         ]
 
-    def delete_by_ids(self, collection: str, ids: list[str]) -> None:
-        """Delete specific chunk ids. No-op on an empty list (Chroma treats a
-        delete with neither ids nor where as 'delete everything')."""
+    def delete_by_ids(self, collection: str, ids: list[str]) -> int:
+        """Delete specific chunk ids; returns how many were actually deleted.
+
+        No-op on an empty list — Chroma treats a delete with neither ids nor
+        where as 'delete everything', so the guard must come before the call,
+        not inside it.
+
+        Returns 0 rather than ``len(ids)`` when the delete raises, so a caller
+        reporting the count cannot claim to have removed rows that are still
+        there.
+        """
         if not ids:
-            return
+            return 0
         try:
             col = self._get_or_create_collection(collection)
             col.delete(ids=ids)
+            return len(ids)
         except Exception:
-            pass
+            logging.getLogger(__name__).exception(
+                "delete_by_ids failed for %d id(s) in %s", len(ids), collection
+            )
+            return 0
 
     def delete_company_docs(self) -> None:
         """Delete and recreate the company_docs collection, clearing all indexed documents."""

@@ -141,12 +141,17 @@ async def test_sweep_spares_a_real_document_named_like_a_temp_file(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_sweep_tolerates_a_missing_docs_dir(tmp_path: Path) -> None:
+async def test_sweep_skips_entirely_when_the_docs_dir_is_missing(tmp_path: Path) -> None:
+    """An absent docs dir is ambiguous: "no documents" and "the volume is not
+    mounted yet" look identical. Sweeping in the second case destroys exactly
+    the documents that were recoverable, because the file that would have
+    spared each one is invisible."""
     store = _FakeStore(dict([_orphan("tmp1du9epr4.md")]))
 
     swept, indexed = await reconcile_company_docs(store, tmp_path / "does-not-exist")
 
-    assert (swept, indexed) == (1, 0)
+    assert (swept, indexed) == (0, 0)
+    assert store.rows, "an unmounted docs dir must not be read as 'delete everything'"
 
 
 @pytest.mark.asyncio
@@ -216,3 +221,92 @@ def test_every_specialist_retrieves_general_company_docs(specialist: str) -> Non
     """The whole point of #114: an unclassified upload must be visible to all
     specialists rather than to none."""
     assert GENERAL_DOMAIN in (_with_general(DOMAIN_ALIASES[specialist]) or [])
+
+
+def test_with_general_leaves_an_empty_filter_alone() -> None:
+    """`store.query` treats both None and [] as "no filter", so [] already
+    matches every domain — widening it to ["general"] would *narrow* it to
+    general-only, inverting this function's purpose."""
+    assert _with_general([]) == []
+
+
+@pytest.mark.asyncio
+async def test_recovered_document_lands_under_general_despite_the_install_path(
+    tmp_path: Path,
+) -> None:
+    """`infer_domain_from_path` scans every component of the absolute path, so
+    an install rooted under e.g. /srv/finance/ would tag recovered documents
+    `finance`. The reconcile must pass the domain explicitly."""
+    docs = tmp_path / "finance" / "company" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "plan.md").write_text("# Plan\n" + "grow revenue thirty percent. " * 50)
+    store = _FakeStore()
+
+    await reconcile_company_docs(store, docs)
+
+    assert {m["domain"] for m in store.rows.values()} == {GENERAL_DOMAIN}
+
+
+@pytest.mark.asyncio
+async def test_sweep_reports_zero_when_the_delete_fails(tmp_path: Path) -> None:
+    """The boot log must not claim to have dropped rows that are still there."""
+    docs = _docs_dir(tmp_path)
+    store = _FakeStore(dict([_orphan("tmp1du9epr4.md")]))
+    store.delete_by_ids = lambda collection, ids: 0  # type: ignore[assignment]
+
+    swept, _ = await reconcile_company_docs(store, docs)
+
+    assert swept == 0
+
+
+class _RecordingStore(_FakeStore):
+    """Captures the domain filter each collection is queried with."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.queries: dict[str, list[str] | None] = {}
+
+    def query(
+        self,
+        query_text: str,
+        collection: str,
+        domain_filter: list[str] | None = None,
+        n_results: int = 5,
+    ) -> list[dict[str, Any]]:
+        self.queries[collection] = domain_filter
+        return []
+
+
+def test_retrieve_widens_only_the_company_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Guards the wiring, not just the helper: reverting the `_with_general`
+    call in `retrieve()` would otherwise leave the whole suite green while
+    #114 silently regresses."""
+    from openexecutive.knowledge import retriever
+    from openexecutive.knowledge.store import ChromaDBStore
+
+    store = _RecordingStore()
+    monkeypatch.setattr(retriever, "_default_review_store", lambda: _NullReviewStore())
+
+    retriever.retrieve(
+        query="what is our runway and hiring plan for next quarter",
+        specialist_name="cfo",
+        store=store,  # type: ignore[arg-type]
+    )
+
+    assert store.queries[ChromaDBStore.COMPANY_COLLECTION] == ["finance", GENERAL_DOMAIN]
+    assert store.queries[ChromaDBStore.BUILTIN_COLLECTION] == ["finance"]
+    assert store.queries[ChromaDBStore.NOTION_COLLECTION] == ["finance"]
+
+
+class _NullReviewStore:
+    def get_rejected_filenames(self, *a: Any, **k: Any) -> set[str]:
+        return set()
+
+    def get_rejected_source_ids(self, *a: Any, **k: Any) -> set[str]:
+        return set()
+
+    def get_priority_map(self, *a: Any, **k: Any) -> dict[str, str]:
+        return {}
+
+    def list_annotations(self, *a: Any, **k: Any) -> list[Any]:
+        return []

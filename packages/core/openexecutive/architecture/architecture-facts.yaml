@@ -2895,13 +2895,21 @@ integrations:
     upsert straight over the curated company document of that name, so
     inbound content stays in its own namespace and its provenance is
     visible in the ``[filename]`` citation. (``Path(...).name`` strips
-    directory components first.) The domain was ``company_docs`` until
-    #113/#114, which is not one of the specialist domains — no specialist
-    could retrieve an attachment at all. Passing the staging tempfile path
-    as the identity was the #113 bug on this path too: duplicate chunks on
-    every re-send, and no filename any API call could delete (attachments
-    are never written to docs/, so the boot reconcile drops their orphans
-    rather than recovering them).
+    directory components first.)
+
+    The domain stays ``company_docs``, which is deliberately NOT one of the
+    specialist domains: these chunks match no domain filter and so do not
+    reach the Executive. Leaving them inert is a decision, not an oversight —
+    anyone who can attach a file in an integration channel would otherwise be
+    writing into every specialist's RAG context, and these rows have no
+    removal path (never written to docs/, so GET /documents does not list them
+    and DELETE /documents/{filename} 404s before reaching the store). Making
+    them retrievable needs its own change, with a delete path alongside it.
+
+    Passing the staging tempfile path as the identity was the #113 bug on this
+    path too: duplicate chunks on every re-send, and no filename any API call
+    could delete. The boot reconcile drops their orphans rather than
+    recovering them, there being no file on disk to recover from.
   broadcast_tools: |
     openexecutive.orchestrator.broadcast_tools — two new tools exposed
     to the Executive alongside the existing per-Person DM tools:

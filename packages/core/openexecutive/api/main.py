@@ -182,20 +182,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Repair company_docs rows left by the old upload path, which indexed
     # documents under their random staging filename: those chunks match no
     # DELETE and are displaced by no re-upload, so nothing else can reach
-    # them. Idempotent — chunk ids are filename-derived, so a clean store
-    # makes this a no-op. Best-effort, like the seeding above.
-    try:
-        swept, indexed = await reconcile_company_docs(
-            store, settings.company_profile_path.parent / "docs"
-        )
-        if swept or indexed:
-            logging.getLogger("openexecutive").info(
-                "company_docs reconcile: dropped %d orphaned chunk(s), indexed %d document(s)",
-                swept,
-                indexed,
+    # them. Converges on a stable store, so it is safe to run every boot.
+    #
+    # Deliberately NOT awaited here. `ingest_file` does synchronous embedding
+    # work, and the boot that matters most — the first one after this deploy —
+    # is exactly the one where every pre-fix document needs re-embedding at
+    # once. Awaiting that would stall the lifespan before the app serves
+    # anything, failing the container healthcheck and crash-looping on
+    # precisely the installs with the most to repair. A degraded search index
+    # for a few seconds after boot is the cheaper failure.
+    #
+    # Strong ref, same reason as `_thread_rename_tasks` in discord_bot: a bare
+    # create_task is only weakly held and can be GC'd mid-flight.
+    async def _reconcile_company_docs() -> None:
+        try:
+            swept, indexed = await reconcile_company_docs(
+                store, settings.company_profile_path.parent / "docs"
             )
-    except Exception:
-        logging.getLogger("openexecutive").exception("company_docs reconcile failed")
+            if swept or indexed:
+                logging.getLogger("openexecutive").info(
+                    "company_docs reconcile: dropped %d orphaned chunk(s), indexed %d document(s)",
+                    swept,
+                    indexed,
+                )
+        except Exception:
+            logging.getLogger("openexecutive").exception("company_docs reconcile failed")
+
+    _reconcile_task = asyncio.create_task(_reconcile_company_docs())
+    app.state.reconcile_task = _reconcile_task
 
     initialize_db()
     initialize_alerts_db()

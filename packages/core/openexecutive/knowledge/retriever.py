@@ -173,10 +173,15 @@ def _with_general(domains: list[str] | None) -> list[str] | None:
     shares its rows with external OER sources, which fall back to ``general``
     when a source declares no domains (``external_sources``); fanning those
     into every specialist would blend unvetted third-party material into every
-    answer. ``None`` means "no domain filter" and already matches everything.
+    answer.
+
+    An absent filter is returned unchanged. ``store.query`` treats both ``None``
+    and ``[]`` as "no domain filter", so both already match every domain —
+    widening ``[]`` to ``["general"]`` would *narrow* it to general-only, the
+    exact inversion of this function's purpose.
     """
-    if domains is None:
-        return None
+    if not domains:
+        return domains
     return domains if GENERAL_DOMAIN in domains else [*domains, GENERAL_DOMAIN]
 
 
