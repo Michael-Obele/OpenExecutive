@@ -3,16 +3,13 @@ import { betterAuth } from 'better-auth/minimal';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { sveltekitCookies } from 'better-auth/svelte-kit';
 import { getRequestEvent } from '$app/server';
-import { google } from 'better-auth/social-providers';
 import { db } from '$lib/server/db';
 import { auditAuth, checkEmailAllowed } from '$lib/server/roster';
 
-// Better Auth config — ports `packages/ui/src/auth.ts` roster contract:
-// Google OAuth only (email must be verified), 24h session TTL, roster gate
-// via `user.validateUserInfo` (runs on create-user, link-account, and OAuth
-// sign-in with the fresh provider email). Fail-open on roster-fetch errors
-// at request time is handled in hooks.server.ts so a backend hiccup never
-// locks out valid sessions — the strict gate here already vetted them once.
+// Better Auth config — email+password (no OAuth), 24h session TTL, roster gate
+// via `user.validateUserInfo` (runs on create-user for sign-up and on sign-in
+// for email/password). Fail-open on roster-fetch errors at request time is
+// handled in hooks.server.ts so a backend hiccup never locks out valid sessions.
 export const auth = betterAuth({
 	baseURL: env.ORIGIN,
 	secret: env.BETTER_AUTH_SECRET,
@@ -21,12 +18,7 @@ export const auth = betterAuth({
 		expiresIn: 24 * 60 * 60,
 		updateAge: 60 * 60
 	},
-	socialProviders: {
-		google: {
-			clientId: env.AUTH_GOOGLE_ID ?? '',
-			clientSecret: env.AUTH_GOOGLE_SECRET ?? ''
-		}
-	},
+	emailAndPassword: { enabled: true },
 	user: {
 		validateUserInfo: async ({ user }) => {
 			const email = typeof user.email === 'string' ? user.email.toLowerCase() : null;
@@ -46,7 +38,7 @@ export const auth = betterAuth({
 				});
 				return { error: 'not_in_allowlist' };
 			}
-			auditAuth('auth_login', `Login: ${email}`, email, { provider: 'google', source });
+			auditAuth('auth_login', `Login: ${email}`, email, { provider: 'email', source });
 		}
 	},
 	plugins: [
