@@ -9,7 +9,7 @@ Open Executive is designed to transform leadership and management. Highly config
 
 It meets people where they already work, with integrations for Slack, Discord, Telegram, email, Google Workspace, Notion and any MCP-compatible AI tool, with more on the roadmap. Open Executive will always be open source.
 
-A managed cloud offering is coming, where you can get access without deploying anything yourself.
+A managed cloud offering is coming (https://openexecutive.ai), where you can get access without deploying anything yourself.
 
 
 ## Demo
