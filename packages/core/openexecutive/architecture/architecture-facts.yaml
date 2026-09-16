@@ -2901,7 +2901,7 @@ integrations:
     requires escaping. Cross-platform plain text is the safest cut.
   mcp_gateway: |
     openexecutive.orchestrator.mcp_gateway.MCPGateway — proxies remote MCP
-    servers as tools available to the Executive (Gmail, Calendar, GitHub, …).
+    servers as tools available to the Executive (Gmail, Calendar, Drive, …).
     The MCP is configured via company/mcp_servers.json (workspace-mcp at
     --tool-tier complete to expose the full Google Workspace tool surface).
 
