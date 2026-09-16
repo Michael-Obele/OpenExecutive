@@ -11,6 +11,7 @@ from openexecutive.knowledge.loader import (
     BUILTIN_KNOWLEDGE_PATH,
     DOMAIN_MAP,
     FAILURES_KNOWLEDGE_PATH,
+    UPLOAD_DOMAINS,
 )
 
 router = APIRouter(prefix="/knowledge")
@@ -544,7 +545,12 @@ async def search_knowledge(
     `retrieve()` produces. Intended for the Knowledge UI's Query mode and
     for tuning the knowledge base offline.
     """
-    from openexecutive.knowledge.retriever import DOMAIN_ALIASES
+    from openexecutive.knowledge.retriever import (
+        DOMAIN_ALIASES,
+        _default_review_store,
+        _with_general,
+    )
+    from openexecutive.knowledge.review_store import ContentType
     from openexecutive.knowledge.store import ChromaDBStore
 
     if not body.query.strip():
@@ -555,9 +561,12 @@ async def search_knowledge(
     if bad:
         raise HTTPException(status_code=400, detail=f"Invalid include values: {sorted(bad)}")
 
+    # UPLOAD_DOMAINS, not DOMAIN_MAP: `general` is a real, uploadable company
+    # domain, and rejecting it here made this endpoint unable to introspect the
+    # documents most likely to need it — the unclassified ones.
     if body.domain_filter:
         for d in body.domain_filter:
-            if d not in DOMAIN_MAP:
+            if d not in UPLOAD_DOMAINS:
                 raise HTTPException(status_code=400, detail=f"Unknown domain: {d}")
 
     if body.specialist and body.specialist not in DOMAIN_ALIASES:
@@ -584,16 +593,55 @@ async def search_knowledge(
     n_failures = max(1, min(body.n_failures, _MAX_RESULTS_PER_BUCKET))
     n_external = max(1, min(body.n_external, _MAX_RESULTS_PER_BUCKET))
 
-    def _query_collection(collection: str, n: int) -> list[dict[str, object]]:
+    def _query_collection(
+        collection: str, n: int, domains: list[str] | None = None
+    ) -> list[dict[str, object]]:
         try:
             return store.query(
                 query_text=body.query,
                 collection=collection,
-                domain_filter=effective_domains,
+                domain_filter=effective_domains if domains is None else domains,
                 n_results=n,
             )
         except Exception:
             return []
+
+    # Mirror `retrieve()`'s review gate. Withheld = pending or rejected; the
+    # chat path drops those before a specialist ever sees them, so a panel
+    # that advertises itself as showing "what RAG would surface" must drop
+    # them too — otherwise it reports knowledge the Executive cannot use.
+    # Resolved once per request, via the retriever's own resolver so both
+    # paths read the same database. Company docs are never registered in
+    # `review_items`, so the company bucket is deliberately not filtered.
+    #
+    # Degrades to "nothing withheld" rather than failing, matching the
+    # per-collection `except` above: this is a read-only diagnostic, and a
+    # broken panel helps nobody. `retrieve()` is the enforcing gate and does
+    # NOT degrade. The exists() check matters on its own — `sqlite3.connect`
+    # creates the file, and a diagnostic read must not materialise a database.
+    def _withheld_sets() -> tuple[set[str], set[str]]:
+        from openexecutive.memory.episodic import DB_PATH
+
+        if not DB_PATH.exists():
+            return set(), set()
+        try:
+            rs = _default_review_store()
+            return (
+                rs.get_withheld_filenames(ContentType.BUILTIN),
+                rs.get_withheld_source_ids(),
+            )
+        except Exception:
+            return set(), set()
+
+    _withheld_builtin, _withheld_external = _withheld_sets()
+
+    def _is_withheld(row: dict[str, object]) -> bool:
+        md = row.get("metadata") or {}
+        md_dict = md if isinstance(md, dict) else {}
+        source_id = md_dict.get("source_id")
+        if source_id:
+            return source_id in _withheld_external
+        return md_dict.get("filename") in _withheld_builtin
 
     builtin_hits: list[SearchHit] = []
     external_hits: list[SearchHit] = []
@@ -607,7 +655,11 @@ async def search_knowledge(
         wanted_builtin = n_builtin if want_builtin else 0
         wanted_external = n_external if want_external else 0
         window = (wanted_builtin + wanted_external) * _BUILTIN_OVERFETCH_MULTIPLIER
-        raw = _query_collection(ChromaDBStore.BUILTIN_COLLECTION, window)
+        raw = [
+            r
+            for r in _query_collection(ChromaDBStore.BUILTIN_COLLECTION, window)
+            if not _is_withheld(r)
+        ]
         for r in raw:
             md = r.get("metadata") or {}
             md_dict = md if isinstance(md, dict) else {}
@@ -625,14 +677,29 @@ async def search_knowledge(
 
     company_hits: list[SearchHit] = []
     if "company" in include:
+        # Mirror `retrieve()` exactly: it widens the COMPANY filter with the
+        # `general` catch-all. Without this, the panel an operator uses to
+        # debug retrieval would report zero company hits for a specialist that
+        # does retrieve them in chat — showing the very #114 symptom the
+        # catch-all fixes.
         company_hits = _hits_from_chroma(
-            _query_collection(ChromaDBStore.COMPANY_COLLECTION, n_company)
+            _query_collection(
+                ChromaDBStore.COMPANY_COLLECTION,
+                n_company,
+                domains=_with_general(effective_domains),
+            )
         )
 
     failure_hits: list[SearchHit] = []
     if "failures" in include:
         failure_hits = _hits_from_chroma(
-            _query_collection(ChromaDBStore.FAILURES_COLLECTION, n_failures)
+            [
+                r
+                for r in _query_collection(
+                    ChromaDBStore.FAILURES_COLLECTION, n_failures
+                )
+                if not _is_withheld(r)
+            ]
         )
 
     return KnowledgeSearchResponse(

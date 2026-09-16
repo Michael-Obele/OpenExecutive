@@ -176,7 +176,7 @@ def _backfill_trusted_defaults(conn: sqlite3.Connection) -> int:
     reachable; now `pending` is withheld, and any shipped row left behind here
     would silently vanish from the Executive's context. That is why notes and
     annotations do NOT hold a row back: they are supplementary, not decisions.
-    An annotated doc is the worst case — `retrieve_context` injects annotations
+    An annotated doc is the worst case — `retrieve` injects annotations
     by DOMAIN regardless of item status, so withholding the doc would feed the
     Executive a correction to a document it can no longer see.
 
