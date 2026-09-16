@@ -42,11 +42,16 @@ def settings_stub(tmp_path: Path) -> Any:
 def _isolate_dbs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point every DB the reset touches at tmp_path and initialize schemas."""
     from openexecutive.departments import store as dept_store
+    from openexecutive.knowledge import review_store as rs_mod
     from openexecutive.memory import episodic
     from openexecutive.people import store as people_store
 
     episodic_path = tmp_path / "episodic.db"
     monkeypatch.setattr(episodic, "DB_PATH", episodic_path)
+    # The reset wipes and re-registers knowledge review state. Its module
+    # DB_PATH default is bound at import, so without this every test in this
+    # file writes review rows into the real ./episodic_memory.db.
+    monkeypatch.setattr(rs_mod, "DB_PATH", episodic_path)
     monkeypatch.setattr(people_store, "DB_PATH", tmp_path / "people.db")
     monkeypatch.setattr(dept_store, "DB_PATH", tmp_path / "depts.db")
     # ``initialize_db``'s ``db_path`` default is bound at def time, so a
@@ -163,3 +168,53 @@ def test_reset_bootstraps_are_idempotent_on_second_call(
         assert cadence_rows, "expected at least one dept_cadence row after reset"
         for slug, count in cadence_rows:
             assert count == 1, f"dept_cadence for {slug} duplicated: {count} rows"
+
+
+def test_reset_clears_review_state_and_reregisters_defaults(
+    settings_stub: Any, _isolate_dbs: Path
+) -> None:
+    """A factory reset must not inherit the previous operator's review decisions.
+
+    A rejection suppresses retrieval, so a stale one would keep silently
+    withholding knowledge on the reset box. After the wipe the shipped docs are
+    re-registered as trusted defaults rather than left as an empty table.
+    """
+    from openexecutive.knowledge import review_store as rs_mod
+    from openexecutive.knowledge.review_store import ReviewStatus, ReviewStore
+
+    ReviewStore.initialize_db(_isolate_dbs)
+    store = ReviewStore(db_path=_isolate_dbs)
+    ReviewStore.sync_builtin_registrations(_isolate_dbs)
+
+    stale = store.list_items(limit=1)[0]
+    store.set_status(stale.item_id, ReviewStatus.REJECTED, "previous operator's call")
+    store.add_annotation(stale.item_id, stale.domain, "stale correction")
+    assert store.get_withheld_filenames(rs_mod.ContentType.BUILTIN)
+
+    with patch.object(ChromaDBStore, "delete_company_docs", lambda self: None), \
+         patch.object(ChromaDBStore, "delete_documents", lambda self, **kw: None):
+        asyncio.run(fixture_loader.reset_all_state(settings_stub))
+
+    counts = store.count_by_status()
+    assert counts["rejected"] == 0
+    assert counts["pending"] == 0
+    assert counts["approved"] == counts["total"] > 0  # re-registered as defaults
+    assert store.get_withheld_filenames(rs_mod.ContentType.BUILTIN) == set()
+    assert store.list_annotations(active_only=False) == []
+
+
+def test_reset_survives_a_db_without_review_tables(
+    settings_stub: Any, _isolate_dbs: Path
+) -> None:
+    """The review schema is not guaranteed to exist on the reset path."""
+    from openexecutive.knowledge import review_store as rs_mod
+
+    with sqlite3.connect(_isolate_dbs) as conn:
+        conn.execute("DROP TABLE IF EXISTS review_annotations")
+        conn.execute("DROP TABLE IF EXISTS review_items")
+
+    with patch.object(ChromaDBStore, "delete_company_docs", lambda self: None), \
+         patch.object(ChromaDBStore, "delete_documents", lambda self, **kw: None):
+        asyncio.run(fixture_loader.reset_all_state(settings_stub))
+
+    assert rs_mod.ReviewStore(db_path=_isolate_dbs).count_by_status()["total"] > 0

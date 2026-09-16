@@ -732,6 +732,53 @@ async def reset_all_state(
             ),
         )
 
+        # 3c. Knowledge review state (same DB as the episodic rows above). A
+        # "factory reset" that keeps the previous operator's approvals,
+        # rejections and SME annotations is not a factory reset — and a
+        # rejection still suppresses retrieval, so a stale one would silently
+        # withhold knowledge on the new box. Wipe both tables (child first for
+        # FK ordering), then re-register the shipped docs so the reset state is
+        # trusted defaults rather than an empty table.
+        # Resolve the review DB through ``memory.episodic.DB_PATH`` like every
+        # other consumer (``api/routes/review._store``,
+        # ``retriever._default_review_store``). ``review_store.DB_PATH`` is
+        # bound at import, so using it here could wipe a different file than
+        # the one the app reads under a runtime override.
+        from openexecutive.knowledge.review_store import ReviewStore
+        from openexecutive.memory.episodic import DB_PATH as _REVIEW_DB_PATH
+
+        # Guarded like the episodic wipe above: never materialise a DB the
+        # caller never created. ``sqlite3.connect`` creates the file, so an
+        # unguarded initialize_db + sync would leave ~81 rows in a stray DB.
+        if _REVIEW_DB_PATH.exists():
+            # ``_delete_all_rows`` guards a missing FILE but not a missing
+            # TABLE, and nothing guarantees the review schema exists here (a
+            # slot restored before these tables shipped, or a test DB built
+            # table-by-table). ``initialize_db`` is idempotent.
+            ReviewStore.initialize_db(_REVIEW_DB_PATH)
+            _delete_all_rows(
+                _REVIEW_DB_PATH,
+                ("review_annotations", "review_items"),
+            )
+            try:
+                ReviewStore.sync_builtin_registrations(_REVIEW_DB_PATH)
+            except Exception:
+                logger.exception("reset: sync_builtin_registrations failed")
+            # External (OER) sources too, or they carry no review rows until
+            # the next process restart re-syncs them in the lifespan. Same
+            # selector as api/main.py: only sources ingested onto this disk.
+            try:
+                from openexecutive.knowledge.external_sources import load_manifest
+                ingested = [
+                    {"id": src.id, "domains": src.domains}
+                    for src in load_manifest()
+                    if src.cache_dir.exists() and any(src.cache_dir.iterdir())
+                ]
+                if ingested:
+                    ReviewStore.sync_external_registrations(ingested, _REVIEW_DB_PATH)
+            except Exception:
+                logger.exception("reset: sync_external_registrations failed")
+
         # 4. People (child tables first to satisfy FK ordering)
         from openexecutive.people import store as people_store
         people_cleared = _delete_all_rows(

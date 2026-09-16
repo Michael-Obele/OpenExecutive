@@ -181,6 +181,8 @@ The first time you visit the app, you'll be guided through a wizard to set up yo
 
 After onboarding, the Executive will reference your specific company context in every response.
 
+The built-in knowledge base is **trusted by default** — the Executive can use it straight away, and the Review queue starts empty rather than asking you to sign off on ~81 shipped documents. Items reach the queue when you upload a document, edit an existing file, or deliberately send a domain for review from the Review page. While a domain is being reviewed its content is withheld from the Executive, so the UI confirms the count before it starts.
+
 ## Interfaces
 
 | Interface | How to Use |

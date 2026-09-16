@@ -275,8 +275,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from openexecutive.knowledge.external_sources import load_manifest
     from openexecutive.knowledge.review_store import ReviewStore
 
-    ReviewStore.initialize_db()
-    ReviewStore.sync_builtin_registrations()
+    # Pass the path the readers resolve (`api/routes/review._store` and
+    # `retriever._default_review_store` both use `memory.episodic.DB_PATH`).
+    # `review_store.DB_PATH` is bound at import, so a bare call could write the
+    # backfill marker to a different file than the app reads.
+    from openexecutive.memory.episodic import DB_PATH as REVIEW_DB_PATH
+
+    ReviewStore.initialize_db(REVIEW_DB_PATH)
+    ReviewStore.sync_builtin_registrations(REVIEW_DB_PATH)
 
     # Register any OER sources that were already ingested before this PR deployed.
     ingested_external = [
@@ -285,7 +291,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if src.cache_dir.exists() and any(src.cache_dir.iterdir())
     ]
     if ingested_external:
-        ReviewStore.sync_external_registrations(ingested_external)
+        ReviewStore.sync_external_registrations(ingested_external, REVIEW_DB_PATH)
+
+    # One-shot legacy migration. Must run AFTER both syncs: it only promotes
+    # rows they have flagged as shipped, so an older install's phantom
+    # "81 items need review" backlog clears without touching a user's own
+    # uploads that are genuinely awaiting a first review.
+    ReviewStore.backfill_trusted_defaults(REVIEW_DB_PATH)
 
     from openexecutive.evals.persistence import (
         initialize_eval_runs_db,
