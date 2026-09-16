@@ -77,6 +77,21 @@ def _get_store(request: Request):  # type: ignore[return]
     return ChromaDBStore(persist_directory=get_settings().vector_store_path)
 
 
+def _review_store():  # type: ignore[no-untyped-def]
+    """ReviewStore bound to the DB every other consumer reads.
+
+    `ReviewStore()`'s default is captured at import, so a runtime override of
+    `EPISODIC_DB_PATH` (client slots, tests) left this module writing review
+    rows into one database while `routes/review._store` and
+    `retriever._default_review_store` read another — the gate would silently
+    consult state this module never wrote.
+    """
+    from openexecutive.knowledge.review_store import ReviewStore
+    from openexecutive.memory.episodic import DB_PATH
+
+    return ReviewStore(db_path=DB_PATH)
+
+
 @router.get("/builtin", response_model=BuiltinListResponse)
 async def list_builtin_files() -> BuiltinListResponse:
     files: list[BuiltinFileMeta] = []
@@ -109,16 +124,30 @@ async def create_builtin_file(body: BuiltinFileWrite, request: Request) -> Built
     if path.exists():
         raise HTTPException(status_code=409, detail="File already exists. Use PUT to update.")
 
+    from openexecutive.knowledge.loader import ingest_builtin_file
+    from openexecutive.knowledge.review_store import ContentType, build_item_id
+
+    # Defence in depth. Shipped failure docs used to derive ids in this very
+    # namespace, so an upload of a name like `board/theranos.md` landed on a
+    # row already marked `approved` + `trusted_default = 1` and inherited it —
+    # trusted, unqueued, and labelled "ships with the product" in the UI. The
+    # FAILURE namespace fixes that at the source; this makes sure no future
+    # id-space change can quietly re-open it.
+    item_id = build_item_id(ContentType.BUILTIN, body.domain, body.filename)
+    existing = _review_store().get_item(item_id)
+    if existing is not None and existing.trusted_default:
+        raise HTTPException(
+            status_code=409,
+            detail="That name belongs to content shipped with Open Executive.",
+        )
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body.content, encoding="utf-8")
 
-    from openexecutive.knowledge.loader import ingest_builtin_file
-    from openexecutive.knowledge.review_store import ContentType, ReviewStore
-
     chunks = await ingest_builtin_file(path, _get_store(request))
 
-    ReviewStore().register(
-        item_id=f"builtin:{body.domain}:{body.filename}",
+    _review_store().register(
+        item_id=item_id,
         content_type=ContentType.BUILTIN,
         domain=body.domain,
         filename=body.filename,
@@ -138,7 +167,7 @@ async def update_builtin_file(
         raise HTTPException(status_code=404, detail="File not found. Use POST to create.")
 
     from openexecutive.knowledge.loader import ingest_builtin_file
-    from openexecutive.knowledge.review_store import ContentType, ReviewStore
+    from openexecutive.knowledge.review_store import ContentType, build_item_id
     from openexecutive.knowledge.store import ChromaDBStore
 
     store = _get_store(request)
@@ -149,8 +178,8 @@ async def update_builtin_file(
     path.write_text(body.content, encoding="utf-8")
     chunks = await ingest_builtin_file(path, store)
 
-    rs = ReviewStore()
-    item_id = f"builtin:{domain}:{filename}"
+    rs = _review_store()
+    item_id = build_item_id(ContentType.BUILTIN, domain, filename)
     rs.register(item_id=item_id, content_type=ContentType.BUILTIN, domain=domain, filename=filename)
     rs.touch_modified(item_id)
 
@@ -323,7 +352,7 @@ async def delete_builtin_file(domain: str, filename: str, request: Request) -> d
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
-    from openexecutive.knowledge.review_store import ReviewStore
+    from openexecutive.knowledge.review_store import ContentType, build_item_id
     from openexecutive.knowledge.store import ChromaDBStore
 
     store = _get_store(request)
@@ -332,7 +361,9 @@ async def delete_builtin_file(domain: str, filename: str, request: Request) -> d
         where={"source": str(path)},
     )
     path.unlink()
-    ReviewStore().delete_item(f"builtin:{domain}:{filename}")
+    _review_store().delete_item(
+        build_item_id(ContentType.BUILTIN, domain, filename)
+    )
     return {"deleted": filename}
 
 
@@ -396,6 +427,20 @@ async def create_failure_file(body: BuiltinFileWrite, request: Request) -> Built
         chunk_size=400,
         overlap=40,
     )
+
+    # Register, exactly as create_builtin_file does. Without this a
+    # user-authored failure case study had no review row at all, so it could
+    # never enter the withheld set — `retrieve_failures` applied a gate that
+    # could not reach it, and no SME decision could block it.
+    from openexecutive.knowledge.review_store import ContentType, build_item_id
+
+    _review_store().register(
+        item_id=build_item_id(ContentType.FAILURE, body.domain, body.filename),
+        content_type=ContentType.FAILURE,
+        domain=body.domain,
+        filename=body.filename,
+    )
+
     return BuiltinWriteResponse(domain=body.domain, filename=body.filename, chunks_indexed=chunks)
 
 
@@ -445,6 +490,10 @@ async def delete_failure_file(domain: str, filename: str, request: Request) -> d
         where={"source": str(path)},
     )
     path.unlink()
+
+    from openexecutive.knowledge.review_store import ContentType, build_item_id
+
+    _review_store().delete_item(build_item_id(ContentType.FAILURE, domain, filename))
     return {"deleted": filename}
 
 
@@ -622,7 +671,7 @@ async def search_knowledge(
     # broken panel helps nobody. `retrieve()` is the enforcing gate and does
     # NOT degrade. The exists() check matters on its own — `sqlite3.connect`
     # creates the file, and a diagnostic read must not materialise a database.
-    def _withheld_sets() -> tuple[set[str], set[str]]:
+    def _withheld_sets() -> tuple[set[tuple[str, str]], set[str]]:
         from openexecutive.memory.episodic import DB_PATH
 
         if not DB_PATH.exists():
@@ -630,7 +679,8 @@ async def search_knowledge(
         try:
             rs = _default_review_store()
             return (
-                rs.get_withheld_filenames(ContentType.BUILTIN),
+                rs.get_withheld_keys(ContentType.BUILTIN)
+                | rs.get_withheld_keys(ContentType.FAILURE),
                 rs.get_withheld_source_ids(),
             )
         except Exception:
@@ -653,7 +703,7 @@ async def search_knowledge(
         source_id = md_dict.get("source_id")
         if source_id:
             return source_id in _withheld_external
-        return md_dict.get("filename") in _withheld_builtin
+        return (md_dict.get("domain"), md_dict.get("filename")) in _withheld_builtin
 
     builtin_hits: list[SearchHit] = []
     external_hits: list[SearchHit] = []

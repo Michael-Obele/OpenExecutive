@@ -32,6 +32,13 @@ class ReviewStatus(StrEnum):
 class ContentType(StrEnum):
     BUILTIN = "builtin"
     EXTERNAL = "external"
+    # Failure case studies ship under `knowledge/builtin/failures/<domain>/`
+    # but need their OWN id namespace. Folding them into `builtin:<domain>:<f>`
+    # put them in the namespace `POST /knowledge/builtin` writes to, and since
+    # no file sits at `builtin/<domain>/<f>` that route's 409 guard could not
+    # fire — an upload INSERT-OR-IGNOREd onto the shipped row and inherited
+    # its `approved` + `trusted_default = 1`.
+    FAILURE = "failure"
 
 
 class Priority(StrEnum):
@@ -110,6 +117,18 @@ def _row_to_annotation(row: sqlite3.Row) -> Annotation:
     )
 
 
+def build_item_id(content_type: ContentType, domain: str, filename: str) -> str:
+    """The one place an `item_id` is constructed.
+
+    Three disjoint namespaces. `builtin:` is reachable by a user upload
+    (`POST /knowledge/builtin` writes `knowledge/builtin/<domain>/<file>`), so
+    nothing else may share it — that is what `failure:` exists for.
+    """
+    if content_type is ContentType.EXTERNAL:
+        return f"external:{filename}"
+    return f"{content_type.value}:{domain}:{filename}"
+
+
 def _insert_trusted_defaults(
     conn: sqlite3.Connection,
     rows: Iterable[tuple[ContentType, str, str]],
@@ -123,11 +142,7 @@ def _insert_trusted_defaults(
     now = datetime.now(UTC).isoformat()
     new_count = 0
     for content_type, domain, filename in rows:
-        item_id = (
-            f"builtin:{domain}:{filename}"
-            if content_type is ContentType.BUILTIN
-            else f"external:{filename}"
-        )
+        item_id = build_item_id(content_type, domain, filename)
         result = conn.execute(
             "INSERT OR IGNORE INTO review_items "
             "(item_id, content_type, domain, filename, status, trusted_default, "
@@ -154,6 +169,84 @@ def _insert_trusted_defaults(
                 (item_id,),
             )
     return new_count
+
+
+_FAILURE_NAMESPACE_KEY = "failure_namespace_v1"
+
+
+def _migrate_failure_namespace(conn: sqlite3.Connection) -> int:
+    """One-shot: re-key shipped failure docs out of the `builtin:` namespace.
+
+    They used to register as `builtin:<domain>:<file>` — the namespace
+    `POST /knowledge/builtin` writes into. Because no file sits at
+    `knowledge/builtin/<domain>/<file>` for a failure doc, that route's
+    `if path.exists(): 409` guard never fired, so an upload of the same name
+    INSERT-OR-IGNOREd onto the shipped row and inherited its `approved` +
+    `trusted_default = 1`: trusted, unqueued, and labelled "ships with the
+    product" in the UI.
+
+    Carries `status`, `reviewed_at`, `reviewer_notes`, `priority` and every
+    annotation across, so an SME's decision on a failure case study survives
+    the re-key. `review_annotations.item_id` is an FK with ON DELETE CASCADE
+    but no ON UPDATE, and `_get_conn` turns foreign keys on, so the parent and
+    child updates have to land in one transaction with the check deferred.
+
+    Runs from `sync_builtin_registrations`, after the new-namespace rows are
+    inserted: an INSERT OR IGNORE will already have created the `failure:` row
+    as a trusted default, so this UPDATE would collide. Old rows are therefore
+    merged onto the new id rather than renamed — the old row's decision wins,
+    since it is the one a human made.
+    """
+    already = conn.execute(
+        "SELECT 1 FROM review_meta WHERE key = ?", (_FAILURE_NAMESPACE_KEY,)
+    ).fetchone()
+    if already is not None:
+        return 0
+
+    from openexecutive.knowledge.shipped_manifest import SHIPPED_BUILTIN_FILES
+
+    migrated = 0
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+    for rel in sorted(SHIPPED_BUILTIN_FILES):
+        path = PurePosixPath(rel)
+        if path.parts[0] != "failures":
+            continue
+        domain, filename = path.parent.name, path.name
+        old_id = f"builtin:{domain}:{filename}"
+        new_id = build_item_id(ContentType.FAILURE, domain, filename)
+
+        old = conn.execute(
+            "SELECT status, reviewed_at, reviewer_notes, priority "
+            "FROM review_items WHERE item_id = ?",
+            (old_id,),
+        ).fetchone()
+        if old is None:
+            continue
+
+        # Carry the human's decision onto the new row, then drop the old one.
+        conn.execute(
+            "UPDATE review_items SET status = ?, reviewed_at = ?, "
+            "reviewer_notes = ?, priority = ? WHERE item_id = ?",
+            (
+                old["status"],
+                old["reviewed_at"],
+                old["reviewer_notes"],
+                old["priority"],
+                new_id,
+            ),
+        )
+        conn.execute(
+            "UPDATE review_annotations SET item_id = ? WHERE item_id = ?",
+            (new_id, old_id),
+        )
+        conn.execute("DELETE FROM review_items WHERE item_id = ?", (old_id,))
+        migrated += 1
+
+    conn.execute(
+        "INSERT OR IGNORE INTO review_meta (key, value) VALUES (?, ?)",
+        (_FAILURE_NAMESPACE_KEY, datetime.now(UTC).isoformat()),
+    )
+    return migrated
 
 
 _TRUSTED_DEFAULTS_BACKFILL_KEY = "trusted_defaults_backfill_v1"
@@ -292,12 +385,22 @@ class ReviewStore:
         # product" — scanning marked those uploads trusted and auto-approved
         # them into retrieval. Skills are absent from the manifest by
         # construction (they have separate management).
+        # Entries under `failures/` register as FAILURE so they never occupy
+        # the `builtin:` namespace a user upload can reach.
         rows = [
-            (ContentType.BUILTIN, PurePosixPath(rel).parent.name, PurePosixPath(rel).name)
+            (
+                ContentType.FAILURE
+                if PurePosixPath(rel).parts[0] == "failures"
+                else ContentType.BUILTIN,
+                PurePosixPath(rel).parent.name,
+                PurePosixPath(rel).name,
+            )
             for rel in sorted(SHIPPED_BUILTIN_FILES)
         ]
         with _get_conn(db_path) as conn:
-            return _insert_trusted_defaults(conn, rows)
+            count = _insert_trusted_defaults(conn, rows)
+            _migrate_failure_namespace(conn)
+            return count
 
     @staticmethod
     def sync_external_registrations(
@@ -510,13 +613,20 @@ class ReviewStore:
             ).fetchall()
         return {row["domain"]: row["n"] for row in rows}
 
-    def get_withheld_filenames(self, content_type: ContentType) -> set[str]:
-        """Filenames that must not reach a specialist.
+    def get_withheld_keys(self, content_type: ContentType) -> set[tuple[str, str]]:
+        """(domain, filename) pairs that must not reach a specialist.
 
         `pending` *and* `rejected`. Pending means a human deliberately queued
         the item for curation, and the architecture contract is that the
         Executive never sees pending material — shipped content registers as
         an approved trusted default precisely so that gate can be real.
+
+        Keyed on the PAIR, not the bare filename. Filename alone was ambiguous
+        and user-reachable: `POST /knowledge/builtin` lets a caller choose any
+        `(domain, filename)`, so uploading a file named after a shipped doc in
+        some *other* domain silently withheld that shipped doc from every
+        specialist. It also meant the design leaned on "all shipped basenames
+        are unique", which only a test over the shipped tree ever checked.
 
         `needs_revision` is deliberately absent: `touch_modified` flips an
         item there on *any* content edit, so withholding it would make editing
@@ -524,24 +634,35 @@ class ReviewStore:
         """
         with _get_conn(self._db_path) as conn:
             rows = conn.execute(
-                "SELECT filename FROM review_items "
+                "SELECT domain, filename FROM review_items "
                 "WHERE content_type = ? AND status IN ('pending', 'rejected')",
                 (content_type.value,),
             ).fetchall()
-        return {row["filename"] for row in rows}
+        return {(row["domain"], row["filename"]) for row in rows}
 
     def get_withheld_source_ids(self) -> set[str]:
-        return self.get_withheld_filenames(ContentType.EXTERNAL)
-
-    def get_priority_map(self, content_type: ContentType) -> dict[str, str]:
-        """Map filename → priority for approved items of a given content type."""
+        """Withheld OER source ids. `source_id` is already unambiguous."""
         with _get_conn(self._db_path) as conn:
             rows = conn.execute(
-                "SELECT filename, priority FROM review_items "
+                "SELECT filename FROM review_items "
+                "WHERE content_type = ? AND status IN ('pending', 'rejected')",
+                (ContentType.EXTERNAL.value,),
+            ).fetchall()
+        return {row["filename"] for row in rows}
+
+    def get_priority_map(self, content_type: ContentType) -> dict[tuple[str, str], str]:
+        """Map (domain, filename) → priority for approved items of a type.
+
+        Same key as `get_withheld_keys`, and for the same reason: a bare
+        filename is ambiguous across domains and user-choosable.
+        """
+        with _get_conn(self._db_path) as conn:
+            rows = conn.execute(
+                "SELECT domain, filename, priority FROM review_items "
                 "WHERE content_type = ? AND status = 'approved'",
                 (content_type.value,),
             ).fetchall()
-        return {row["filename"]: row["priority"] for row in rows}
+        return {(row["domain"], row["filename"]): row["priority"] for row in rows}
 
     def list_items(
         self,

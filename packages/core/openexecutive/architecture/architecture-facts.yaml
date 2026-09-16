@@ -2278,10 +2278,28 @@ review:
     file in the knowledge UI silently delete it from retrieval. Approved
     items can still be promoted in priority.
 
-    The filter keys on bare `filename` (that is what Chroma metadata carries),
-    not `item_id`. All 81 built-in basenames are unique across domains and a
-    unit test pins that invariant — a duplicate basename would make a withheld
-    item in one domain silently suppress another domain's file.
+    The filter keys on the `(domain, filename)` PAIR that Chroma metadata
+    carries. Bare filename was both ambiguous and caller-choosable:
+    `POST /knowledge/builtin` accepts any `(domain, filename)`, so uploading a
+    file named after a shipped doc in a different domain silently withheld
+    that shipped doc from every specialist. `get_priority_map` uses the same
+    key for the same reason. The old design leaned on "all shipped basenames
+    are unique", which only a test over the shipped tree ever checked and
+    which nothing enforced at the write path.
+
+    IDENTITY IS NAMESPACED. `build_item_id` is the single constructor, with
+    three disjoint namespaces: `builtin:<domain>:<file>`,
+    `failure:<domain>:<file>`, `external:<source_id>`. Failure case studies
+    used to fold into `builtin:`, which is the namespace a user upload reaches
+    — and since no file sits at `knowledge/builtin/<domain>/<file>` for a
+    failure doc, `create_builtin_file`'s exists() guard never fired, so an
+    upload INSERT-OR-IGNOREd onto the shipped row and inherited `approved` +
+    `trusted_default = 1`. `_migrate_failure_namespace` (marker
+    `failure_namespace_v1`) re-keys existing rows, carrying status,
+    reviewed_at, notes and annotations across under `PRAGMA
+    defer_foreign_keys`. `create_builtin_file` also refuses outright to write
+    onto a `trusted_default = 1` row, so a future id-space change cannot
+    silently re-open it.
   curation: |
     Opt-in, per domain. `POST /review/curate {domain, action: start|stop}`
     moves a domain's untouched trusted defaults to `pending` (and back).
@@ -2304,7 +2322,14 @@ review:
   reset_and_slots: |
     `reset_all_state` wipes `review_annotations` + `review_items` (child
     first) and re-registers the shipped docs — built-in and any ingested OER
-    sources — so a factory reset no longer
+    sources. It then re-registers, as `pending`, every `.md` under
+    `knowledge/builtin/` the manifest does NOT claim: the reset does not
+    delete user-authored files or their Chroma chunks, so without this a doc
+    an SME had REJECTED came back retrievable with no review row at all —
+    un-suppressed and invisible in the queue. Conservative on purpose, since
+    a previously-approved upload returning for review is the safe direction,
+    and deleting the operator's files would be worse. This means a reset no
+    longer
     inherits the previous operator's approvals and rejections — a stale
     rejection would otherwise keep suppressing retrieval on the new box.
     `clients.slots._ensure_schemas` runs `sync_builtin_registrations` after

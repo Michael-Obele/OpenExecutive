@@ -189,7 +189,7 @@ def test_reset_clears_review_state_and_reregisters_defaults(
     stale = store.list_items(limit=1)[0]
     store.set_status(stale.item_id, ReviewStatus.REJECTED, "previous operator's call")
     store.add_annotation(stale.item_id, stale.domain, "stale correction")
-    assert store.get_withheld_filenames(rs_mod.ContentType.BUILTIN)
+    assert store.get_withheld_keys(rs_mod.ContentType.BUILTIN)
 
     with patch.object(ChromaDBStore, "delete_company_docs", lambda self: None), \
          patch.object(ChromaDBStore, "delete_documents", lambda self, **kw: None):
@@ -199,7 +199,7 @@ def test_reset_clears_review_state_and_reregisters_defaults(
     assert counts["rejected"] == 0
     assert counts["pending"] == 0
     assert counts["approved"] == counts["total"] > 0  # re-registered as defaults
-    assert store.get_withheld_filenames(rs_mod.ContentType.BUILTIN) == set()
+    assert store.get_withheld_keys(rs_mod.ContentType.BUILTIN) == set()
     assert store.list_annotations(active_only=False) == []
 
 
@@ -218,3 +218,70 @@ def test_reset_survives_a_db_without_review_tables(
         asyncio.run(fixture_loader.reset_all_state(settings_stub))
 
     assert rs_mod.ReviewStore(db_path=_isolate_dbs).count_by_status()["total"] > 0
+
+
+def test_reset_does_not_unsuppress_surviving_user_knowledge(
+    settings_stub: Any, _isolate_dbs: Path
+) -> None:
+    """A factory reset must not silently return rejected content to RAG.
+
+    The reset wipes `review_items` but does NOT delete user-authored files
+    under `knowledge/builtin/` or their indexed chunks — they live inside the
+    installed package. Without re-registration the rejection vanishes while
+    the content survives, so the doc becomes retrievable again with no review
+    row at all: un-suppressed, and invisible in the queue.
+    """
+    from openexecutive.knowledge import review_store as rs_mod
+    from openexecutive.knowledge.loader import BUILTIN_KNOWLEDGE_PATH
+    from openexecutive.knowledge.review_store import (
+        ContentType,
+        ReviewStatus,
+        ReviewStore,
+        build_item_id,
+    )
+
+    upload = BUILTIN_KNOWLEDGE_PATH / "hr" / "severance_terms_draft.md"
+    upload.write_text("# draft, legally unsound", encoding="utf-8")
+    item_id = build_item_id(ContentType.BUILTIN, "hr", upload.name)
+    try:
+        ReviewStore.initialize_db(_isolate_dbs)
+        ReviewStore.sync_builtin_registrations(_isolate_dbs)
+        store = ReviewStore(db_path=_isolate_dbs)
+        store.register(
+            item_id=item_id,
+            content_type=ContentType.BUILTIN,
+            domain="hr",
+            filename=upload.name,
+        )
+        store.set_status(item_id, ReviewStatus.REJECTED, "legally unsound")
+        assert ("hr", upload.name) in store.get_withheld_keys(ContentType.BUILTIN)
+
+        with patch.object(ChromaDBStore, "delete_company_docs", lambda self: None), \
+             patch.object(ChromaDBStore, "delete_documents", lambda self, **kw: None):
+            asyncio.run(fixture_loader.reset_all_state(settings_stub))
+
+        survivor = store.get_item(item_id)
+        assert survivor is not None, "surviving content must keep a review row"
+        assert survivor.status == ReviewStatus.PENDING
+        assert survivor.trusted_default is False
+        # Still withheld from retrieval, and visible in the queue.
+        assert ("hr", upload.name) in store.get_withheld_keys(ContentType.BUILTIN)
+        assert any(i.item_id == item_id for i in store.list_items(limit=500))
+        assert rs_mod  # module referenced for the isolation fixture
+    finally:
+        upload.unlink()
+
+
+def test_reset_does_not_requeue_shipped_docs(
+    settings_stub: Any, _isolate_dbs: Path
+) -> None:
+    """The re-registration must only sweep in content the manifest disowns."""
+    from openexecutive.knowledge.review_store import ReviewStore
+
+    with patch.object(ChromaDBStore, "delete_company_docs", lambda self: None), \
+         patch.object(ChromaDBStore, "delete_documents", lambda self, **kw: None):
+        asyncio.run(fixture_loader.reset_all_state(settings_stub))
+
+    counts = ReviewStore(db_path=_isolate_dbs).count_by_status()
+    assert counts["pending"] == 0, "shipped docs must come back as trusted defaults"
+    assert counts["approved"] == counts["total"] > 0

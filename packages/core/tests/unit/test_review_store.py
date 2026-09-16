@@ -99,11 +99,11 @@ def test_touch_modified_needs_revision_stays(store: ReviewStore) -> None:
 
 
 # ---------------------------------------------------------------------------
-# get_withheld_filenames
+# get_withheld_keys
 # ---------------------------------------------------------------------------
 
 
-def test_get_withheld_filenames_covers_rejected_and_pending(store: ReviewStore) -> None:
+def test_get_withheld_keys_covers_rejected_and_pending(store: ReviewStore) -> None:
     item_a = _register_builtin(store, filename="ratios.md")
     item_b = _register_builtin(store, filename="fundraising.md")
     _register_builtin(store, filename="modeling.md")  # left pending
@@ -111,15 +111,15 @@ def test_get_withheld_filenames_covers_rejected_and_pending(store: ReviewStore) 
     store.set_status(item_a.item_id, ReviewStatus.REJECTED)
     store.set_status(item_b.item_id, ReviewStatus.APPROVED)
 
-    withheld = store.get_withheld_filenames(ContentType.BUILTIN)
-    assert withheld == {"ratios.md", "modeling.md"}
-    assert "fundraising.md" not in withheld
+    withheld = store.get_withheld_keys(ContentType.BUILTIN)
+    assert withheld == {("finance", "ratios.md"), ("finance", "modeling.md")}
+    assert ("finance", "fundraising.md") not in withheld
 
 
-def test_get_withheld_filenames_empty_when_nothing_withheld(store: ReviewStore) -> None:
+def test_get_withheld_keys_empty_when_nothing_withheld(store: ReviewStore) -> None:
     item = _register_builtin(store)
     store.set_status(item.item_id, ReviewStatus.APPROVED)
-    assert store.get_withheld_filenames(ContentType.BUILTIN) == set()
+    assert store.get_withheld_keys(ContentType.BUILTIN) == set()
 
 
 def test_get_withheld_source_ids(store: ReviewStore) -> None:
@@ -152,8 +152,8 @@ def test_get_priority_map_only_approved(store: ReviewStore) -> None:
     # item_b stays pending — should not appear in priority map
 
     pmap = store.get_priority_map(ContentType.BUILTIN)
-    assert pmap.get("a.md") == "high"
-    assert "b.md" not in pmap
+    assert pmap.get(("finance", "a.md")) == "high"
+    assert ("finance", "b.md") not in pmap
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +285,7 @@ def test_sync_builtin_registers_trusted_defaults(tmp_path: Path) -> None:
     assert counts["approved"] == registered
     assert all(i.reviewed_at is None for i in store.list_items(limit=500))
     # Nothing is withheld, so the Executive can use all of it on day one.
-    assert store.get_withheld_filenames(ContentType.BUILTIN) == set()
+    assert store.get_withheld_keys(ContentType.BUILTIN) == set()
 
 
 def test_builtin_filenames_are_unique_across_domains() -> None:
@@ -482,15 +482,15 @@ def test_withheld_covers_pending_and_rejected_but_not_needs_revision(
     store.set_status(revising, ReviewStatus.APPROVED)
     store.touch_modified(revising)  # an edit → needs_revision
 
-    withheld = store.get_withheld_filenames(ContentType.BUILTIN)
+    withheld = store.get_withheld_keys(ContentType.BUILTIN)
 
-    assert "pending.md" in withheld
-    assert "rejected.md" in withheld
-    assert "approved.md" not in withheld
+    assert ("finance", "pending.md") in withheld
+    assert ("finance", "rejected.md") in withheld
+    assert ("finance", "approved.md") not in withheld
     # An edited-but-previously-vetted file stays available: withholding it
     # would make editing a file in the knowledge UI silently delete it.
     assert store.get_item(revising).status == ReviewStatus.NEEDS_REVISION  # type: ignore[union-attr]
-    assert "revising.md" not in withheld
+    assert ("finance", "revising.md") not in withheld
     assert pending in {i.item_id for i in store.list_items(status=ReviewStatus.PENDING)}
 
 
@@ -669,7 +669,7 @@ def test_backfill_keeps_annotated_shipped_docs_retrievable(tmp_path: Path) -> No
     ReviewStore.backfill_trusted_defaults(db)
 
     assert store.count_by_status()["pending"] == 0
-    assert store.get_withheld_filenames(ContentType.BUILTIN) == set()
+    assert store.get_withheld_keys(ContentType.BUILTIN) == set()
     # The correction survives alongside the doc it corrects.
     assert len(store.list_annotations(item_id=annotated)) == 1
 
@@ -751,3 +751,209 @@ def test_sync_ignores_an_unmanifested_file_in_the_builtin_tree() -> None:
         assert "finance/user_upload_probe.md" not in SHIPPED_BUILTIN_FILES
     finally:
         intruder.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Namespace separation: a user upload must never land on a shipped row
+# ---------------------------------------------------------------------------
+
+
+def _shipped_failure_pair() -> tuple[str, str]:
+    """A real (domain, filename) from the manifest's failures/ entries."""
+    from pathlib import PurePosixPath
+
+    from openexecutive.knowledge.shipped_manifest import SHIPPED_BUILTIN_FILES
+
+    for rel in sorted(SHIPPED_BUILTIN_FILES):
+        p = PurePosixPath(rel)
+        if p.parts[0] == "failures":
+            return p.parent.name, p.name
+    raise AssertionError("manifest has no failures/ entries")
+
+
+def test_failure_docs_do_not_occupy_the_upload_namespace(tmp_path: Path) -> None:
+    """The bug: a shipped failure doc used to own `builtin:<domain>:<file>`.
+
+    That is the id `POST /knowledge/builtin` writes to, and since no file sits
+    at `knowledge/builtin/<domain>/<file>` for a failure doc, that route's
+    `path.exists()` 409 could not fire — the upload INSERT-OR-IGNOREd onto the
+    shipped row and inherited `approved` + `trusted_default = 1`.
+    """
+    from openexecutive.knowledge.review_store import build_item_id
+
+    db = tmp_path / "r.db"
+    ReviewStore.initialize_db(db)
+    ReviewStore.sync_builtin_registrations(db)
+    store = ReviewStore(db_path=db)
+
+    domain, filename = _shipped_failure_pair()
+    upload_id = build_item_id(ContentType.BUILTIN, domain, filename)
+    shipped_id = build_item_id(ContentType.FAILURE, domain, filename)
+
+    assert upload_id != shipped_id
+    # The shipped doc is registered, trusted, under the FAILURE namespace.
+    shipped = store.get_item(shipped_id)
+    assert shipped is not None and shipped.trusted_default is True
+    # ...and the upload namespace is free.
+    assert store.get_item(upload_id) is None
+
+    # An upload of that exact name gets its own untrusted, withheld row.
+    store.register(
+        item_id=upload_id,
+        content_type=ContentType.BUILTIN,
+        domain=domain,
+        filename=filename,
+    )
+    upload = store.get_item(upload_id)
+    assert upload is not None
+    assert upload.trusted_default is False
+    assert upload.status == ReviewStatus.PENDING
+    # The shipped doc is untouched by the upload.
+    assert store.get_item(shipped_id).trusted_default is True  # type: ignore[union-attr]
+    assert store.get_item(shipped_id).status == ReviewStatus.APPROVED  # type: ignore[union-attr]
+
+
+def test_failure_namespace_migration_carries_the_sme_decision(tmp_path: Path) -> None:
+    """An existing DB has failure rows under the old `builtin:` id.
+
+    Re-keying them must not lose the reviewer's decision, notes, or
+    annotations — those are the only record of a human's judgement.
+    """
+    from openexecutive.knowledge.review_store import build_item_id
+
+    db = _legacy_db(tmp_path)
+    domain, filename = _shipped_failure_pair()
+    old_id = _seed_legacy_pending(db, filename, domain=domain)
+
+    ReviewStore.initialize_db(db)
+    store = ReviewStore(db_path=db)
+    store.set_status(old_id, ReviewStatus.REJECTED, "legally unsound")
+    store.add_annotation(old_id, domain, "our counsel disagrees")
+
+    ReviewStore.sync_builtin_registrations(db)  # runs the migration
+
+    new_id = build_item_id(ContentType.FAILURE, domain, filename)
+    assert store.get_item(old_id) is None, "old id must not linger"
+    migrated = store.get_item(new_id)
+    assert migrated is not None
+    assert migrated.status == ReviewStatus.REJECTED
+    assert migrated.reviewer_notes == "legally unsound"
+    anns = store.list_annotations(item_id=new_id)
+    assert [a.correction for a in anns] == ["our counsel disagrees"]
+
+    # Idempotent.
+    ReviewStore.sync_builtin_registrations(db)
+    assert store.get_item(new_id).status == ReviewStatus.REJECTED  # type: ignore[union-attr]
+
+
+def test_withheld_key_is_domain_qualified(store: ReviewStore) -> None:
+    """A bare filename was ambiguous AND user-choosable.
+
+    `POST /knowledge/builtin` lets a caller pick any (domain, filename), so
+    uploading a file named after a shipped doc in another domain silently
+    withheld that shipped doc from every specialist.
+
+    The withheld row deliberately sits in a domain that appears nowhere else
+    in this test, and the assertion is exact set equality — a key that dropped
+    or hardcoded the domain would still satisfy a mere `in` check.
+    """
+    store.register(
+        item_id="builtin:hr:product_strategy.md",
+        content_type=ContentType.BUILTIN,
+        domain="hr",
+        filename="product_strategy.md",
+    )
+    shipped = store.register(
+        item_id="builtin:product:product_strategy.md",
+        content_type=ContentType.BUILTIN,
+        domain="product",
+        filename="product_strategy.md",
+    )
+    store.set_status(shipped.item_id, ReviewStatus.APPROVED)
+
+    withheld = store.get_withheld_keys(ContentType.BUILTIN)
+
+    assert withheld == {("hr", "product_strategy.md")}
+    # The same basename in another domain is NOT suppressed.
+    assert ("product", "product_strategy.md") not in withheld
+
+
+def test_priority_map_key_is_domain_qualified(store: ReviewStore) -> None:
+    """Same ambiguity, same fix — a bare filename would collide across domains."""
+    a = store.register(
+        item_id="builtin:hr:handbook.md",
+        content_type=ContentType.BUILTIN,
+        domain="hr",
+        filename="handbook.md",
+    )
+    b = store.register(
+        item_id="builtin:legal:handbook.md",
+        content_type=ContentType.BUILTIN,
+        domain="legal",
+        filename="handbook.md",
+    )
+    store.set_status(a.item_id, ReviewStatus.APPROVED)
+    store.set_status(b.item_id, ReviewStatus.APPROVED)
+    store.set_priority(a.item_id, Priority.HIGH)
+
+    pmap = store.get_priority_map(ContentType.BUILTIN)
+
+    assert pmap[("hr", "handbook.md")] == "high"
+    assert pmap[("legal", "handbook.md")] == "normal"
+
+
+def test_legacy_upgrade_does_not_requeue_failure_docs(tmp_path: Path) -> None:
+    """The migration and the backfill have to compose correctly.
+
+    On a pre-#119 database every shipped row is `pending` under a `builtin:`
+    id. The migration copies that `pending` onto the new `failure:` row — so
+    on its own it would hand back 17 of the 81 backlog items this PR exists to
+    remove. `backfill_trusted_defaults`, which runs afterwards, promotes them
+    because they are `trusted_default = 1` with a NULL `reviewed_at`. Pinning
+    the pair: neither step is correct alone.
+    """
+    import sqlite3
+    from pathlib import PurePosixPath
+
+    from openexecutive.knowledge.review_store import build_item_id
+    from openexecutive.knowledge.shipped_manifest import SHIPPED_BUILTIN_FILES
+
+    db = tmp_path / "legacy.db"
+    ReviewStore.initialize_db(db)
+    ReviewStore.sync_builtin_registrations(db)
+
+    # Rewind to the pre-#119 world: no markers, everything pending, failure
+    # docs sitting in the `builtin:` namespace.
+    fails = [
+        PurePosixPath(r)
+        for r in sorted(SHIPPED_BUILTIN_FILES)
+        if PurePosixPath(r).parts[0] == "failures"
+    ]
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE review_items SET status='pending', reviewed_at=NULL")
+        conn.execute("DELETE FROM review_meta")
+        conn.execute("DELETE FROM review_items WHERE content_type='failure'")
+        for p in fails:
+            conn.execute(
+                "INSERT OR IGNORE INTO review_items (item_id, content_type, domain, "
+                "filename, status, trusted_default, registered_at, last_modified_at) "
+                "VALUES (?, 'builtin', ?, ?, 'pending', 1, '2025-01-01', '2025-01-01')",
+                (f"builtin:{p.parent.name}:{p.name}", p.parent.name, p.name),
+            )
+
+    store = ReviewStore(db_path=db)
+    assert store.count_by_status()["pending"] == store.count_by_status()["total"]
+
+    # The upgrade, in the order api/main.py runs it.
+    ReviewStore.initialize_db(db)
+    ReviewStore.sync_builtin_registrations(db)
+    ReviewStore.backfill_trusted_defaults(db)
+
+    counts = store.count_by_status()
+    assert counts["pending"] == 0, "the backlog must not come back"
+    assert counts["approved"] == counts["total"]
+    # Old ids are gone; the failure gate has nothing withheld.
+    d0, f0 = fails[0].parent.name, fails[0].name
+    assert store.get_item(f"builtin:{d0}:{f0}") is None
+    assert store.get_item(build_item_id(ContentType.FAILURE, d0, f0)) is not None
+    assert store.get_withheld_keys(ContentType.FAILURE) == set()

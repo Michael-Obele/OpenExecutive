@@ -613,6 +613,45 @@ async def unload_fixture(settings: Any) -> dict[str, Any]:
         return summary
 
 
+def _reregister_surviving_user_knowledge(db_path: Path) -> int:
+    """Register non-shipped knowledge files left on disk after a reset.
+
+    `reset_all_state` wipes `review_items`, but user-authored docs under
+    `knowledge/builtin/` (including `failures/`) and their indexed chunks are
+    not removed. Anything the shipped manifest does not list is the operator's
+    own content, so it goes back as `pending`: withheld from retrieval, and
+    listed in the review queue. Returns the number registered.
+    """
+    from openexecutive.knowledge.loader import BUILTIN_KNOWLEDGE_PATH
+    from openexecutive.knowledge.review_store import (
+        ContentType,
+        ReviewStore,
+        build_item_id,
+    )
+    from openexecutive.knowledge.shipped_manifest import SHIPPED_BUILTIN_FILES
+
+    store = ReviewStore(db_path=db_path)
+    registered = 0
+    for md in sorted(BUILTIN_KNOWLEDGE_PATH.rglob("*.md")):
+        rel = md.relative_to(BUILTIN_KNOWLEDGE_PATH).as_posix()
+        # Skills have separate management and are absent from the manifest by
+        # construction, so they must not be swept in here.
+        if rel.startswith("skills/") or rel in SHIPPED_BUILTIN_FILES:
+            continue
+        content_type = (
+            ContentType.FAILURE if rel.startswith("failures/") else ContentType.BUILTIN
+        )
+        domain, filename = md.parent.name, md.name
+        store.register(
+            item_id=build_item_id(content_type, domain, filename),
+            content_type=content_type,
+            domain=domain,
+            filename=filename,
+        )
+        registered += 1
+    return registered
+
+
 async def reset_all_state(
     settings: Any, *, app_state: Any | None = None
 ) -> dict[str, Any]:
@@ -778,6 +817,23 @@ async def reset_all_state(
                     ReviewStore.sync_external_registrations(ingested, _REVIEW_DB_PATH)
             except Exception:
                 logger.exception("reset: sync_external_registrations failed")
+
+            # The wipe above deleted every review decision, but this reset does
+            # NOT delete user-authored knowledge files or their Chroma chunks —
+            # they live inside the installed package and survive. Left alone,
+            # a document an SME had REJECTED would come back retrievable with
+            # no review row at all: un-suppressed, and invisible in the queue.
+            #
+            # So re-register everything in the tree that the manifest does not
+            # claim, as `pending` — withheld from retrieval AND visible for a
+            # fresh decision. Deliberately conservative: a previously-approved
+            # upload comes back needing review, which is the safe direction.
+            # Deleting the files instead would make a reset silently destroy
+            # the operator's own work.
+            try:
+                _reregister_surviving_user_knowledge(_REVIEW_DB_PATH)
+            except Exception:
+                logger.exception("reset: re-registering user knowledge failed")
 
         # 4. People (child tables first to satisfy FK ordering)
         from openexecutive.people import store as people_store

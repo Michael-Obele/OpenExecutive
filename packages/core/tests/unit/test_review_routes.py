@@ -79,7 +79,7 @@ def test_curate_start_queues_a_domain(client: TestClient, store: ReviewStore) ->
     assert res.status_code == 200
     assert res.json() == {"domain": "finance", "action": "start", "affected_count": 2}
     # Queued items are withheld from retrieval; other domains are untouched.
-    assert store.get_withheld_filenames(ContentType.BUILTIN) == {"a.md", "b.md"}
+    assert store.get_withheld_keys(ContentType.BUILTIN) == {("finance", "a.md"), ("finance", "b.md")}
 
 
 def test_curate_stop_restores_a_domain(client: TestClient, store: ReviewStore) -> None:
@@ -90,7 +90,7 @@ def test_curate_stop_restores_a_domain(client: TestClient, store: ReviewStore) -
 
     assert res.status_code == 200
     assert res.json()["affected_count"] == 1
-    assert store.get_withheld_filenames(ContentType.BUILTIN) == set()
+    assert store.get_withheld_keys(ContentType.BUILTIN) == set()
 
 
 def test_curate_requires_a_domain(client: TestClient, store: ReviewStore) -> None:

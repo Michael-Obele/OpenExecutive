@@ -30,7 +30,7 @@ def _isolate_audit(monkeypatch: pytest.MonkeyPatch) -> None:
 def fake_review_store() -> SimpleNamespace:
     """ReviewStore stub that returns empty sets — keep retrieval focused on the gate."""
     return SimpleNamespace(
-        get_withheld_filenames=lambda _ct: set(),
+        get_withheld_keys=lambda _ct: set(),
         get_withheld_source_ids=lambda: set(),
         get_priority_map=lambda _ct: {},
         list_annotations=lambda domains=None, active_only=True: [],
@@ -182,9 +182,9 @@ def _hit(filename: str, text: str, *, distance: float = 0.1) -> dict[str, Any]:
     }
 
 
-def _review_store(withheld: set[str]) -> SimpleNamespace:
+def _review_store(withheld: set[tuple[str, str]]) -> SimpleNamespace:
     return SimpleNamespace(
-        get_withheld_filenames=lambda _ct: withheld,
+        get_withheld_keys=lambda _ct: withheld,
         get_withheld_source_ids=lambda: set(),
         get_priority_map=lambda _ct: {},
         list_annotations=lambda domains=None, active_only=True: [],
@@ -200,7 +200,7 @@ def test_withheld_builtin_chunk_is_not_retrieved() -> None:
     out = retrieve(
         query="a real question about capital structure",
         store=store,
-        review_store=_review_store({"queued.md"}),
+        review_store=_review_store({("finance", "queued.md")}),
     )
     assert "TRUSTED CONTENT" in out
     assert "WITHHELD CONTENT" not in out
@@ -251,7 +251,7 @@ def test_retrieve_failures_honors_withheld_items() -> None:
     out = retrieve_failures(
         query="what went wrong with this rollout",
         store=store,
-        review_store=_review_store({"bad_case.md"}),
+        review_store=_review_store({("finance", "bad_case.md")}),
     )
 
     assert "USEFUL FAILURE STORY" in out

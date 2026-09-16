@@ -239,7 +239,7 @@ def retrieve(
     # Withheld = pending or rejected. Shipped content registers as an approved
     # trusted default, so anything pending was deliberately queued for
     # curation and must not reach a specialist until it is resolved.
-    withheld_builtin = rs.get_withheld_filenames(ContentType.BUILTIN)
+    withheld_builtin = rs.get_withheld_keys(ContentType.BUILTIN)
     withheld_external = rs.get_withheld_source_ids()
     priority_map = rs.get_priority_map(ContentType.BUILTIN)
 
@@ -263,13 +263,17 @@ def retrieve(
         filtered_builtin = [
             r
             for r in raw_builtin
-            if r["metadata"].get("filename") not in withheld_builtin
+            if (r["metadata"].get("domain"), r["metadata"].get("filename"))
+            not in withheld_builtin
             and r["metadata"].get("source_id") not in withheld_external
             and _passes_threshold(r, distance_threshold)
         ]
         filtered_builtin.sort(
             key=lambda r: PRIORITY_ORDER.get(
-                priority_map.get(r["metadata"].get("filename", ""), Priority.NORMAL.value),
+                priority_map.get(
+                    (r["metadata"].get("domain", ""), r["metadata"].get("filename", "")),
+                    Priority.NORMAL.value,
+                ),
                 1,
             )
         )
@@ -374,7 +378,12 @@ def retrieve(
         parts.append("### From executive knowledge base:")
         for r in builtin_results:
             filename = r["metadata"].get("filename", "unknown")
-            prio = priority_map.get(filename, Priority.NORMAL.value)
+            # Same (domain, filename) key the map is built on — a bare
+            # filename here would miss every entry and silently drop the
+            # priority label from every citation.
+            prio = priority_map.get(
+                (r["metadata"].get("domain", ""), filename), Priority.NORMAL.value
+            )
             prefix = "[verified - priority source] " if prio == Priority.HIGH.value else ""
             parts.append(f"[{filename}] {prefix}{r['text']}")
 
@@ -426,12 +435,14 @@ def retrieve_failures(
     # a larger distance means the match is too weak to be useful.
     threshold = settings.knowledge_distance_threshold
     rs = review_store or _default_review_store()
-    withheld = rs.get_withheld_filenames(ContentType.BUILTIN)
+    # FAILURE, not BUILTIN: failure case studies have their own id namespace
+    # so a user upload cannot collide with a shipped one.
+    withheld = rs.get_withheld_keys(ContentType.FAILURE)
     filtered = _dedupe_by_text(
         [
             r
             for r in raw
-            if r["metadata"].get("filename") not in withheld
+            if (r["metadata"].get("domain"), r["metadata"].get("filename")) not in withheld
             and r["distance"] <= threshold
         ]
     )

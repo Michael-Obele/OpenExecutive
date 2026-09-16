@@ -377,7 +377,7 @@ def test_search_company_bucket_is_never_review_filtered(
     from openexecutive.knowledge.review_store import ContentType
 
     _register(review_db, "strategy", "deck.pdf")
-    assert "deck.pdf" in review_db.get_withheld_filenames(ContentType.BUILTIN)
+    assert ("strategy", "deck.pdf") in review_db.get_withheld_keys(ContentType.BUILTIN)
 
     data = client.post("/knowledge/search", json={"query": "strategy"}).json()
 
