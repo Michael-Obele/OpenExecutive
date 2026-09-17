@@ -23,12 +23,18 @@ const BACKEND_SHARED_SECRET = process.env.BACKEND_SHARED_SECRET ?? "";
 // "5 minutes" in docs/auth.md; keep the two in step.
 const ROSTER_TTL_MS = 5 * 60 * 1000;
 
+// Give up on a roster fetch well before undici's ~300s default. Concurrent
+// callers share one in-flight request, so an unbounded hang would pin them all
+// and keep denying new roster-only sign-ins after the backend recovered.
+const ROSTER_FETCH_TIMEOUT_MS = 3000;
+
 // Both NextAuth callbacks are server-side (Node runtime), so the loader's
 // cache is per-server-instance.
 const loadRoster = createRosterLoader({
   baseUrl: BACKEND_BASE,
   sharedSecret: BACKEND_SHARED_SECRET,
   ttlMs: ROSTER_TTL_MS,
+  timeoutMs: ROSTER_FETCH_TIMEOUT_MS,
   // Wrapped rather than passed bare: `fetch` must keep its own receiver.
   fetchImpl: (input, init) => fetch(input, init),
   onWarn: (message) => console.warn(message),
@@ -148,21 +154,30 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       if (!auth?.user?.email) return false;
       const email = auth.user.email.toLowerCase();
       const decision = await checkEmailAllowed(email);
-      if (decideSessionAction(decision) !== "revoke") return true;
-      // Fire-and-forget audit so a mid-session eviction leaves a
-      // trail even if the user never re-attempts sign-in.
-      auditAuth(
-        "auth_logout",
-        `Session revoked: ${email} (${describeDenial(decision.source)})`,
-        email,
-        {
-          revoked: true,
-          reason: "not_in_allowlist",
-          source: decision.source,
-          roster_unavailable: false,
-        },
-      );
-      return false;
+      // Exhaustive on purpose: a `!== "revoke"` test would admit any future
+      // SessionAction, i.e. fail open. This way adding one is a build error.
+      switch (decideSessionAction(decision)) {
+        case "allow":
+        case "allow_roster_unknown":
+          return true;
+        case "revoke":
+          // Fire-and-forget audit so a mid-session eviction leaves a
+          // trail even if the user never re-attempts sign-in.
+          auditAuth(
+            "auth_logout",
+            `Session revoked: ${email} (${describeDenial(decision.source)})`,
+            email,
+            {
+              revoked: true,
+              reason: "not_in_allowlist",
+              source: decision.source,
+              // Always false on this branch; read off the decision anyway so
+              // it cannot silently desync from decideSessionAction.
+              roster_unavailable: decision.rosterUnknown,
+            },
+          );
+          return false;
+      }
     },
   },
   events: {

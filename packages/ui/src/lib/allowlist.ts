@@ -11,13 +11,17 @@
 //
 // No imports — not React, not next-auth — so `npm test` can exercise this
 // directly under `node --experimental-strip-types` (see
-// scripts/allowlist.test.mjs). That is also why the roster loader lives here
-// rather than in its own module: Node's ESM loader needs an explicit `.ts` on
-// a relative import, which TypeScript rejects without
-// `allowImportingTsExtensions`, so a second module could only share
-// `normalizeEmail` by duplicating it. The decision logic below is pure; the
-// loader at the bottom is the one piece with a socket, a clock and mutable
-// state. auth.ts keeps only the wiring and the audit calls.
+// scripts/allowlist.test.mjs).
+//
+// The roster loader lives here rather than in its own module even though the
+// decision logic below is pure and the loader is the one piece with a socket,
+// a clock and mutable state. Splitting them would need the loader to import
+// `normalizeEmail` at runtime, and Node's ESM loader requires an explicit
+// `.ts` on that relative import while TypeScript rejects it without
+// `allowImportingTsExtensions`. That flag does work (it is compatible with
+// this project's `noEmit`), so this is a preference, not a hard block: one
+// cohesive 260-line module beat adding a compiler option and the only
+// `.ts`-suffixed import in the codebase. Revisit if this file grows again.
 
 /** Where an allow/deny decision came from. Recorded in audit-log `details`. */
 export type AllowSource =
@@ -30,11 +34,16 @@ export type AllowSource =
   /** Missed ALLOWED_EMAILS; the roster was unreadable, so membership is unknown. */
   | "env_only_roster_unavailable";
 
+// `readonly` + the frozen ENV_HIT below are load-bearing, not decoration:
+// both decision functions return that one shared object by reference, so an
+// accidental `decision.allowed = false` in a caller would otherwise poison
+// every later env hit in the process — the exact #132 lockout class this
+// module exists to prevent. Frozen, the stray write throws instead.
 export type AllowDecision = {
-  allowed: boolean;
-  source: AllowSource;
+  readonly allowed: boolean;
+  readonly source: AllowSource;
   /** True only when the answer is "no" AND the roster could not be read. */
-  rosterUnknown: boolean;
+  readonly rosterUnknown: boolean;
 };
 
 export function normalizeEmail(email: string | null | undefined): string {
@@ -67,8 +76,12 @@ function matchesEnv(normalized: string, envAllowed: ReadonlySet<string>): boolea
   return normalized.length > 0 && envAllowed.has(normalized);
 }
 
-/** The allow decision for an env hit. One object literal, one place. */
-const ENV_HIT: AllowDecision = { allowed: true, source: "env", rosterUnknown: false };
+/** The allow decision for an env hit. One object literal, one place, frozen. */
+const ENV_HIT: AllowDecision = Object.freeze({
+  allowed: true,
+  source: "env",
+  rosterUnknown: false,
+} as const);
 
 /**
  * The union rule, as a pure function. `roster === null` means the roster could
@@ -147,10 +160,16 @@ export function describeDenial(source: AllowSource): string {
       return "not in ALLOWED_EMAILS or the people roster";
     case "env_only_roster_unavailable":
       return "not in ALLOWED_EMAILS; people roster unavailable";
-    default:
-      // Unreachable from either callback: `env` and `roster` are allow
-      // outcomes. Kept so the switch is total over AllowSource.
+    case "env":
+    case "roster":
+      // Unreachable from either callback: these are allow outcomes. The
+      // `never` assignment makes adding an AllowSource a build error here
+      // rather than a silent fall-through to a generic clause.
       return "not allowed";
+    default: {
+      const unhandled: never = source;
+      return unhandled;
+    }
   }
 }
 
@@ -162,6 +181,14 @@ export type RosterLoaderOptions = {
   baseUrl: string;
   sharedSecret: string;
   ttlMs: number;
+  /**
+   * Abandon a roster fetch after this long. Required because callers share one
+   * in-flight request: without it, undici only gives up at its default
+   * ~300s header timeout, so a hung backend would pin every joiner to the same
+   * doomed attempt and keep denying new roster-only sign-ins long after the
+   * backend recovered — the opposite of "a failure is not cached".
+   */
+  timeoutMs: number;
   fetchImpl: typeof fetch;
   now?: () => number;
   onWarn?: (message: string) => void;
@@ -186,7 +213,7 @@ export type RosterLoaderOptions = {
 export function createRosterLoader(
   opts: RosterLoaderOptions,
 ): () => Promise<ReadonlySet<string> | null> {
-  const { baseUrl, sharedSecret, ttlMs, fetchImpl } = opts;
+  const { baseUrl, sharedSecret, ttlMs, timeoutMs, fetchImpl } = opts;
   const now = opts.now ?? (() => Date.now());
   const warn = opts.onWarn ?? (() => {});
   let cache: { fetchedAt: number; emails: ReadonlySet<string> } | null = null;
@@ -200,6 +227,7 @@ export function createRosterLoader(
         headers,
         // Don't let a stale Next.js fetch cache gate access.
         cache: "no-store",
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (!res.ok) {
         warn(
@@ -244,7 +272,11 @@ export function createRosterLoader(
 
   return function loadRoster(): Promise<ReadonlySet<string> | null> {
     const at = now();
-    if (cache && at - cache.fetchedAt < ttlMs) return Promise.resolve(cache.emails);
+    // `age >= 0` matters: a backwards clock step makes the delta negative,
+    // which would otherwise read as "fresh" and serve an expired roster for
+    // up to another TTL.
+    const age = cache ? at - cache.fetchedAt : Infinity;
+    if (cache && age >= 0 && age < ttlMs) return Promise.resolve(cache.emails);
     // Coalesce concurrent misses onto one request. This is what keeps a page
     // load — `authorized` runs per gated request — from fanning out into N
     // backend calls, and it is why at most one fetch is ever in flight.

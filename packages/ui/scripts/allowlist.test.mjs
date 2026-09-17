@@ -218,6 +218,7 @@ test("the loader hits /auth/allowed-emails with the shared secret and no caching
     baseUrl: "http://api:8000",
     sharedSecret: "s3cret",
     ttlMs: 1000,
+    timeoutMs: 1000,
     fetchImpl,
   });
   assert.deepEqual([...(await load())], ["a@b.com"]);
@@ -232,6 +233,7 @@ test("the loader omits x-api-key when no shared secret is configured", async () 
     baseUrl: "http://api:8000",
     sharedSecret: "",
     ttlMs: 1000,
+    timeoutMs: 1000,
     fetchImpl,
   });
   await load();
@@ -245,6 +247,7 @@ test("a successful roster is cached for its TTL and refetched after it expires",
     baseUrl: "http://api:8000",
     sharedSecret: "",
     ttlMs: 1000,
+    timeoutMs: 1000,
     fetchImpl,
     now: () => clock,
   });
@@ -266,6 +269,7 @@ test("an HTTP error yields null, warns, and is not cached", async () => {
     baseUrl: "http://api:8000",
     sharedSecret: "",
     ttlMs: 60_000,
+    timeoutMs: 1000,
     fetchImpl,
     now: () => 0,
     onWarn: (m) => warnings.push(m),
@@ -282,6 +286,7 @@ test("a rejecting fetch yields null instead of throwing into NextAuth", async ()
     baseUrl: "http://api:8000",
     sharedSecret: "",
     ttlMs: 1000,
+    timeoutMs: 1000,
     fetchImpl: async () => {
       throw new Error("ECONNREFUSED");
     },
@@ -295,6 +300,7 @@ test("a non-array body yields null rather than an empty roster", async () => {
     baseUrl: "http://api:8000",
     sharedSecret: "",
     ttlMs: 1000,
+    timeoutMs: 1000,
     fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ detail: "nope" }) }),
   });
   assert.equal(await load(), null);
@@ -305,6 +311,7 @@ test("a row with a null email is skipped without nulling the whole roster", asyn
     baseUrl: "http://api:8000",
     sharedSecret: "",
     ttlMs: 1000,
+    timeoutMs: 1000,
     fetchImpl: async () =>
       okResponse([{ email: null, person_id: 1 }, { email: "Real@Corp.com", person_id: 2 }, {}]),
   });
@@ -316,6 +323,7 @@ test("a body that fails to parse as JSON yields null", async () => {
     baseUrl: "http://api:8000",
     sharedSecret: "",
     ttlMs: 1000,
+    timeoutMs: 1000,
     fetchImpl: async () => ({
       ok: true,
       status: 200,
@@ -340,6 +348,7 @@ test("at most one fetch is ever in flight, across cache misses and expiries", as
     baseUrl: "http://api:8000",
     sharedSecret: "",
     ttlMs: 1000,
+    timeoutMs: 1000,
     now: () => clock,
     fetchImpl: async () => {
       open += 1;
@@ -362,12 +371,16 @@ test("at most one fetch is ever in flight, across cache misses and expiries", as
   assert.deepEqual([...(await load())], ["p2@corp.com"], "the newest roster is what is cached");
 });
 
+// Companion to the TTL-straddling test above: this is the simple baseline
+// (one window, no expiry), that one is the TTL-boundary case. Neither
+// subsumes the other — keep both.
 test("concurrent misses share one in-flight fetch", async () => {
   let fetches = 0;
   const load = createRosterLoader({
     baseUrl: "http://api:8000",
     sharedSecret: "",
     ttlMs: 1000,
+    timeoutMs: 1000,
     now: () => 0,
     fetchImpl: async () => {
       fetches += 1;
@@ -386,6 +399,7 @@ test("a failed in-flight fetch is not retained, so the next caller retries", asy
     baseUrl: "http://api:8000",
     sharedSecret: "",
     ttlMs: 60_000,
+    timeoutMs: 1000,
     now: () => 0,
     fetchImpl: async () => {
       n += 1;
@@ -396,4 +410,82 @@ test("a failed in-flight fetch is not retained, so the next caller retries", asy
   assert.equal(await load(), null);
   assert.deepEqual([...(await load())], ["a@b.com"]);
   assert.equal(n, 2);
+});
+
+test("ENV_HIT cannot be mutated by a caller into a lockout", () => {
+  // Both decision functions return one shared object for an env hit, so an
+  // accidental write would poison every later env hit in the process — the
+  // #132 lockout class. Frozen, the write throws under ESM strict mode.
+  const env = set("op@corp.com");
+  const first = decideAllowed("op@corp.com", env, NONE);
+  assert.equal(Object.isFrozen(first), true);
+  assert.throws(() => {
+    first.allowed = false;
+  }, TypeError);
+  assert.equal(decideAllowed("op@corp.com", env, NONE).allowed, true);
+});
+
+test("a hung fetch is abandoned at the timeout instead of pinning joiners", async () => {
+  // Regression: callers share one in-flight request, so without a timeout a
+  // hung backend blocked every joiner until undici's ~300s default and kept
+  // denying roster-only sign-ins long after recovery.
+  //
+  // The signal is captured and asserted on in TEST scope, not inside the
+  // mock: anything thrown inside `fetchImpl` is swallowed by the loader's
+  // catch and degrades to `null`, so an in-mock assertion would let the
+  // test pass even with no timeout wired up at all.
+  let attempts = 0;
+  let signal;
+  const load = createRosterLoader({
+    baseUrl: "http://api:8000",
+    sharedSecret: "",
+    ttlMs: 60_000,
+    timeoutMs: 20,
+    now: () => 0,
+    fetchImpl: async (_url, init) => {
+      attempts += 1;
+      if (attempts === 1) {
+        signal = init.signal;
+        // Never resolves on its own — only the abort ends it. The ref'd
+        // timer is required: AbortSignal.timeout's own timer is UNREF'd, so
+        // without something holding the loop open the test would drain
+        // before the abort fires.
+        return new Promise((_resolve, reject) => {
+          const keepAlive = setTimeout(() => reject(new Error("never aborted")), 5000);
+          init.signal.addEventListener("abort", () => {
+            clearTimeout(keepAlive);
+            reject(init.signal.reason);
+          });
+        });
+      }
+      return { ok: true, status: 200, json: async () => [{ email: "a@b.com", person_id: 1 }] };
+    },
+  });
+
+  assert.equal(await load(), null, "the hung attempt degrades to unknown");
+  assert.ok(signal instanceof AbortSignal, "the loader must pass an abort signal");
+  assert.equal(signal.aborted, true, "and it must have fired");
+  assert.equal(signal.reason?.name, "TimeoutError", "aborted by the timeout, not something else");
+  // The failure was not cached, so the recovered backend is reachable at once.
+  assert.deepEqual([...(await load())], ["a@b.com"]);
+  assert.equal(attempts, 2);
+});
+
+test("a backwards clock step does not make an expired roster look fresh", async () => {
+  let clock = 10_000;
+  let n = 0;
+  const load = createRosterLoader({
+    baseUrl: "http://api:8000",
+    sharedSecret: "",
+    ttlMs: 1000,
+    timeoutMs: 1000,
+    now: () => clock,
+    fetchImpl: async () => {
+      n += 1;
+      return { ok: true, status: 200, json: async () => [{ email: `p${n}@corp.com`, person_id: n }] };
+    },
+  });
+  assert.deepEqual([...(await load())], ["p1@corp.com"]);
+  clock = 0; // NTP steps the clock backwards past the entry's fetchedAt
+  assert.deepEqual([...(await load())], ["p2@corp.com"], "refetched rather than served stale");
 });
