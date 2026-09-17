@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **The sign-in allow-list is now the union of `ALLOWED_EMAILS` and the People
+  roster, not the roster alone** (#132). The UI previously treated the roster
+  as authoritative as soon as it held one email, so any Person row with an
+  address silently disabled `ALLOWED_EMAILS` — a fixture load, which wipes
+  `people` and inserts its own addresses, could lock the configured operator
+  out of their own instance. **This widens access on upgrade:** every address
+  still sitting in `ALLOWED_EMAILS` regains sign-in even if that person is not
+  on the roster, so audit the env var before deploying. Removing someone now
+  means removing them from *both* the roster and `ALLOWED_EMAILS`. The
+  `authorized` callback's fail-open also narrows: it used to admit any valid
+  session whenever the roster fetch failed, and now admits only a session that
+  is not in `ALLOWED_EMAILS` and whose roster membership is unreadable.
 - `packages/ui`: force `lodash-es` to 4.18.1 via an npm `overrides` entry
   (GHSA-r5fr-rjxr-66jc code injection in `_.template`, GHSA-f23m-r3pf-42rh
   prototype pollution in `_.unset`/`_.omit`). The vulnerable 4.17.23 was pinned

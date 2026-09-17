@@ -2615,17 +2615,40 @@ auth:
       - `authorized` callback: re-runs on every middleware-gated request.
         A user removed from the roster mid-session (or one whose JWT
         predates the roster) is bounced on their next request rather
-        than coasting until JWT expiry. Fail-open on backend-fetch
-        errors so a brief outage doesn't sign everyone out.
-    Both callbacks share one helper (`checkEmailAllowed`). Allowlist is
-    two-tier:
-      1. Roster (authoritative): GET /auth/allowed-emails returns
-         every non-archived Person with a non-null email; sign-in /
-         re-validation succeeds iff the Google email matches a row.
-      2. Env fallback: ALLOWED_EMAILS comma-separated env var, used
-         only when the roster is empty (fresh-install bootstrap).
-         Once any Person has an email, the env var is ignored.
-    Roster fetch is cached for 5 minutes per Next.js server instance.
+        than coasting until JWT expiry. Fails open ONLY for a session
+        that is not in ALLOWED_EMAILS and whose roster membership is
+        currently unreadable; a definite miss (both lists readable,
+        neither matched) still revokes.
+    Both callbacks share one helper (`checkEmailAllowed`). The allowlist
+    is the UNION of two additive sources — neither overrides the other:
+      1. ALLOWED_EMAILS: comma-separated env var on the UI, parsed once
+         at module scope. Checked FIRST and a hit short-circuits, so the
+         roster is never fetched for a configured operator: they sign in
+         with the backend down, at no fetch latency. Revocable only by
+         editing the env and restarting.
+      2. Roster: GET /auth/allowed-emails returns every non-archived
+         Person with a non-null email. Consulted only on an env miss,
+         and purely additive.
+    Roster fetch is cached for 5 minutes per Next.js server instance
+    (ROSTER_TTL_MS in auth.ts) and concurrent misses coalesce onto one
+    in-flight request — `authorized` runs per gated request, so without
+    that a page load would fan out into N backend calls. A failed fetch
+    returns null ("unknown") and is deliberately not cached, so the next
+    caller retries instead of being pinned out for a TTL; a stale success
+    is not served past its TTL.
+    The old rule made the roster authoritative as soon as it held one
+    email, which was issue #132: anything that wrote a Person row —
+    including a fixture load, which wipes `people` and inserts its own
+    addresses — silently evicted the operator from their own instance.
+    Decision helpers are pure and live in packages/ui/src/lib/allowlist.ts
+    (parseAllowedEmails / decideAllowed / resolveAllowed /
+    createRosterLoader / describeDenial), unit-tested by
+    packages/ui/scripts/allowlist.test.mjs; auth.ts keeps only the
+    wiring, the audit calls and the NextAuth config. The decision's
+    `source` — env | roster | no_match | env_only_roster_unavailable —
+    is recorded in the audit-log `details`, and `decideSessionAction`
+    maps a decision to the `authorized` outcome (allow /
+    allow_roster_unknown / revoke).
   backend_gate: |
     BACKEND_SHARED_SECRET via x-api-key header gates every API route
     (see api.main._shared_secret_gate). The Next.js proxy at
