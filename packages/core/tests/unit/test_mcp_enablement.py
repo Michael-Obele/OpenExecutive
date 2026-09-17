@@ -8,15 +8,18 @@ whose only symptom was a healthcheck that never passed.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from openexecutive.api import main as main_mod
 from openexecutive.api.main import _start_mcp_gateway
 from openexecutive.config import Settings
 from openexecutive.orchestrator.mcp_gateway import configured_server_names
@@ -172,12 +175,53 @@ def test_missing_config_file_reads_as_no_servers(tmp_path: Path) -> None:
     assert configured_server_names(tmp_path / "absent.json") == []
 
 
-def test_unreadable_config_file_reads_as_no_servers(tmp_path: Path) -> None:
-    """A directory at the config path raises OSError rather than a JSON error."""
+def test_a_directory_at_the_config_path_reads_as_no_servers(tmp_path: Path) -> None:
     config = tmp_path / "mcp.json"
     config.mkdir()
 
     assert configured_server_names(config) == []
+
+
+def test_a_fifo_at_the_config_path_is_never_opened(tmp_path: Path) -> None:
+    """Reading a FIFO blocks forever. `is_file()` rejects it before the open,
+    so this test completing at all is the assertion."""
+    config = tmp_path / "mcp.json"
+    os.mkfifo(config)
+
+    assert configured_server_names(config) == []
+
+
+def test_an_oversized_config_reads_as_no_servers(tmp_path: Path) -> None:
+    config = tmp_path / "mcp.json"
+    config.write_text(" " * (1024 * 1024 + 1))
+
+    assert configured_server_names(config) == []
+
+
+def test_deeply_nested_json_reads_as_no_servers(tmp_path: Path) -> None:
+    """`json.loads` answers this with RecursionError, which is NOT a
+    ValueError — a narrower `except (OSError, ValueError)` lets it through and
+    it propagates out of the lifespan, killing the container (#122's own
+    failure mode)."""
+    config = tmp_path / "mcp.json"
+    depth = 100_000
+    config.write_text("[" * depth + "]" * depth)
+
+    assert configured_server_names(config) == []
+
+
+def test_a_stat_failure_reads_as_no_servers(tmp_path: Path) -> None:
+    """`Path.is_file` re-raises any OSError outside (ENOENT, ENOTDIR, EBADF,
+    ELOOP), so an EACCES on a parent directory whose ownership does not match
+    the container user reaches us. Injected rather than chmod-ed: the test
+    suite often runs as root, where chmod 000 does not deny traversal."""
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"gw": {}}}))
+
+    with patch.object(
+        Path, "is_file", side_effect=PermissionError(errno.EACCES, "denied")
+    ):
+        assert configured_server_names(config) == []
 
 
 # ---------------------------------------------------------------------------
@@ -290,9 +334,9 @@ def test_warning_names_the_config_file_as_the_cause_when_auto_enabled(
 def test_explicitly_enabled_is_not_reported_as_auto_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, oe_logs: list[str]
 ) -> None:
-    """The mirror of the test above, and the one that catches the trap: the
-    validator's own `self.mcp_enabled = True` lands in `model_fields_set`, so
-    reading that set downstream reports every auto-enable as explicit."""
+    """The mirror of the test above. Note it is that one, not this one, that
+    pins the `model_fields_set` trap — this case sets MCP_ENABLED=true, so it
+    passes either way."""
     _stub_gateway(monkeypatch, None)
     settings = _mcp_settings(tmp_path, monkeypatch, json.dumps({"mcpServers": {}}))
     assert settings.mcp_auto_enabled is False
@@ -343,3 +387,152 @@ def test_mcp_disabled_starts_nothing(
     assert task is None
     assert app.state.mcp_gateway is None
     gateway.start.assert_not_awaited()
+
+
+def test_settings_survive_a_config_path_it_cannot_stat(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`Path.is_file` re-raises an EACCES on a parent directory, and this probe
+    runs inside a model validator — so it would come out of `Settings()`
+    itself. `api/main.py` builds the app at module level, making that an
+    import-time crash rather than a degraded boot."""
+    with patch.object(
+        Path, "is_file", side_effect=PermissionError(errno.EACCES, "denied")
+    ):
+        settings = _settings(
+            monkeypatch, MCP_SERVERS_CONFIG_PATH="/restricted/mcp_servers.json"
+        )
+
+    assert settings.mcp_enabled is False
+    assert settings.mcp_auto_enabled is False
+
+
+def test_a_directory_at_the_config_path_does_not_enable_mcp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "mcp_servers.json"
+    config.mkdir()
+
+    settings = _settings(monkeypatch, MCP_SERVERS_CONFIG_PATH=str(config))
+
+    assert settings.mcp_enabled is False
+
+
+def test_an_anyio_exception_group_is_contained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, oe_logs: list[str]
+) -> None:
+    """The shape #122's traceback actually had. anyio wraps a task group's
+    failures in `BaseExceptionGroup` as soon as one is a `BaseException` such
+    as `CancelledError`, and that group is NOT an `Exception` — so a plain
+    `except Exception` lets through the one shape this guard exists for."""
+    gateway, set_active = _stub_gateway(
+        monkeypatch,
+        BaseExceptionGroup(
+            "unhandled errors in a TaskGroup",
+            [
+                RuntimeError(
+                    "Attempted to exit cancel scope in a different task than "
+                    "it was entered in"
+                ),
+                asyncio.CancelledError(),
+            ],
+        ),
+    )
+    settings = _mcp_settings(
+        tmp_path, monkeypatch, json.dumps({"mcpServers": {"google_workspace": {}}})
+    )
+    app = _FakeApp()
+
+    task = asyncio.run(_start_mcp_gateway(app, settings))  # type: ignore[arg-type]
+
+    assert task is None
+    assert app.state.mcp_gateway is None
+    set_active.assert_not_called()
+    gateway.close.assert_awaited_once()
+    assert "google_workspace" in "\n".join(oe_logs)
+
+
+def test_a_teardown_that_also_fails_is_contained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, oe_logs: list[str]
+) -> None:
+    """`close()` runs from inside the `except` block, so anything it raises
+    replaces the actionable log with the crash that log exists to prevent —
+    the worst outcome, because the operator sees the right message and the
+    container dies anyway."""
+    gateway, _ = _stub_gateway(monkeypatch, RuntimeError("start failed"))
+    gateway.close = AsyncMock(
+        side_effect=BaseExceptionGroup("g", [asyncio.CancelledError()])
+    )
+    settings = _mcp_settings(
+        tmp_path, monkeypatch, json.dumps({"mcpServers": {"gw": {}}})
+    )
+
+    task = asyncio.run(_start_mcp_gateway(_FakeApp(), settings))  # type: ignore[arg-type]
+
+    assert task is None
+    assert "did not finish cleanly" in "\n".join(oe_logs)
+
+
+def test_a_silent_child_times_out_instead_of_hanging_the_boot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, oe_logs: list[str]
+) -> None:
+    """`MCPGateway.start` builds `ClientSession` with no
+    `read_timeout_seconds`, so `initialize()` waits forever on a child that is
+    alive but silent. An unbounded wait here means the lifespan never yields
+    and the healthcheck never passes — #122's symptom, which no `except` can
+    see."""
+    async def _never_returns(_path: Path) -> None:
+        await asyncio.Event().wait()
+
+    gateway, set_active = _stub_gateway(monkeypatch, None)
+    gateway.start = AsyncMock(side_effect=_never_returns)
+    monkeypatch.setattr(main_mod, "_MCP_START_TIMEOUT_S", 0.05)
+    settings = _mcp_settings(
+        tmp_path, monkeypatch, json.dumps({"mcpServers": {"gw": {}}})
+    )
+    app = _FakeApp()
+
+    task = asyncio.run(_start_mcp_gateway(app, settings))  # type: ignore[arg-type]
+
+    assert task is None
+    assert app.state.mcp_gateway is None
+    set_active.assert_not_called()
+    assert "failed to start within" in "\n".join(oe_logs)
+
+
+def test_a_real_cancellation_is_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`except BaseException` must not eat the lifespan's own cancellation —
+    a bare `CancelledError` in our frame means shut down, not degrade."""
+    _stub_gateway(monkeypatch, asyncio.CancelledError())
+    settings = _mcp_settings(
+        tmp_path, monkeypatch, json.dumps({"mcpServers": {"gw": {}}})
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(_start_mcp_gateway(_FakeApp(), settings))  # type: ignore[arg-type]
+
+
+def test_the_no_servers_remedy_tracks_why_mcp_was_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, oe_logs: list[str]
+) -> None:
+    """With MCP_ENABLED=true and a path that is not a file, the old single
+    message said the file "defines no servers" and told the operator to set
+    MCP_ENABLED=false "to stop the file from enabling MCP" — in the same
+    sentence as "MCP_ENABLED was set explicitly"."""
+    _stub_gateway(monkeypatch, None)
+    settings = _settings(
+        monkeypatch,
+        MCP_ENABLED="true",
+        MCP_SERVERS_CONFIG_PATH=str(tmp_path / "typo.json"),
+    )
+
+    asyncio.run(_start_mcp_gateway(_FakeApp(), settings))  # type: ignore[arg-type]
+
+    logged = "\n".join(oe_logs)
+    assert "is not a readable file" in logged
+    assert "MCP_SERVERS_CONFIG_PATH" in logged
+    assert "stop the file from enabling MCP" not in logged
+    assert "defines no servers" not in logged
+

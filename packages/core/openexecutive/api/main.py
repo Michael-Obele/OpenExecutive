@@ -147,6 +147,43 @@ _UNAUTHENTICATED_PATHS: frozenset[str] = frozenset(
 )
 
 
+# How long the MCP gateway gets to come up. The child is
+# `uvx --from git+https://…/extensible-mcp`, which resolves and may clone that
+# repo on a cold start, so this is generous; what it must not be is unbounded.
+# `MCPGateway.start` builds `ClientSession` with no `read_timeout_seconds`, so
+# `initialize()` waits forever on a child that is alive but silent — and a
+# lifespan that never yields is a healthcheck that never passes, which is
+# #122's symptom with none of its traceback. A dead child is already fine
+# (the session's receive loop fails every pending request on close); it is the
+# silent one that needs a clock.
+_MCP_START_TIMEOUT_S = 120.0
+# Tearing down a gateway that just failed walks the same stdio machinery that
+# failed, so it gets a clock too.
+_MCP_CLOSE_TIMEOUT_S = 10.0
+
+
+async def _close_mcp_gateway_quietly(gateway: Any, log: logging.Logger) -> None:
+    """Reap a gateway that failed to start. Never raises, never hangs.
+
+    `MCPGateway.close` suppresses `Exception` around each step, which is not
+    enough here: anyio raises `BaseExceptionGroup` as soon as one sub-exception
+    is a `BaseException` such as `CancelledError`, and that is not an
+    `Exception`. Since this runs from inside an `except` block, anything it
+    raises replaces the actionable log we just wrote with the crash that log
+    exists to prevent.
+    """
+    try:
+        await asyncio.wait_for(gateway.close(), timeout=_MCP_CLOSE_TIMEOUT_S)
+    except asyncio.CancelledError:
+        raise
+    except BaseException:
+        log.warning(
+            "MCP gateway teardown after a failed start did not finish cleanly; "
+            "continuing shutdown of the failed gateway anyway",
+            exc_info=True,
+        )
+
+
 async def _start_mcp_gateway(
     app: FastAPI, settings: Settings
 ) -> asyncio.Task[None] | None:
@@ -155,17 +192,26 @@ async def _start_mcp_gateway(
     Sets ``app.state.mcp_gateway`` — the gateway on success, ``None`` otherwise
     — and returns the email-poller task that rides on it, or ``None``.
 
-    Never raises. The gateway spawns extensible-mcp as a subprocess, and a
-    failure there used to propagate out of the lifespan and kill the container;
-    under ``restart: unless-stopped`` that is a crash loop whose only outward
-    symptom is a healthcheck that never passes (#122). Booting without MCP
-    costs the Gmail/Calendar/Drive tool surface and the email poller; refusing
-    to boot costs everything, so degrade and log loudly enough to alert on.
+    Never raises and never blocks indefinitely. The gateway spawns
+    extensible-mcp as a subprocess, and a failure there used to propagate out
+    of the lifespan and kill the container; under ``restart: unless-stopped``
+    that is a crash loop whose only outward symptom is a healthcheck that never
+    passes (#122). Booting without MCP costs the Gmail/Calendar/Drive tool
+    surface and the email poller; refusing to boot costs everything, so degrade
+    and log loudly enough to alert on.
+
+    ``except BaseException`` rather than ``except Exception``, with real
+    cancellation re-raised first: the failure in #122 surfaced from anyio, and
+    anyio wraps a task group's failures in ``BaseExceptionGroup`` as soon as one
+    of them is a ``BaseException`` such as ``CancelledError``. That group is not
+    an ``Exception``, so ``except Exception`` would let through the single
+    exception shape this function exists to contain.
     """
     app.state.mcp_gateway = None
     if not settings.mcp_enabled:
         return None
 
+    from openexecutive.config import mcp_config_file_present
     from openexecutive.orchestrator.mcp_gateway import (
         MCPGateway,
         configured_server_names,
@@ -177,33 +223,46 @@ async def _start_mcp_gateway(
     servers = configured_server_names(config_path)
     # With MCP_ENABLED unset it is the config file's presence that turned MCP
     # on (config._resolve_mcp), so an operator can arrive here without having
-    # asked for MCP at all. Naming which it was is the fact the original
-    # traceback never carried.
+    # asked for MCP. Naming which it was is the fact the original traceback
+    # never carried — and the remedy has to track it, or we tell someone who
+    # set MCP_ENABLED=true to unset the file that enabled MCP.
+    auto = settings.mcp_auto_enabled
     why = (
         "auto-enabled by the presence of the config file"
-        if settings.mcp_auto_enabled
+        if auto
         else "MCP_ENABLED was set explicitly"
     )
 
     if not servers:
         log.warning(
-            "MCP is on (%s) but %s defines no servers under 'mcpServers'; "
-            "starting without MCP tools. Add a server to that file, or set "
-            "MCP_ENABLED=false to stop the file from enabling MCP.",
-            why, config_path,
+            "MCP is on (%s) but %s %s; starting without MCP tools. %s.",
+            why,
+            config_path,
+            "defines no servers under 'mcpServers'"
+            if mcp_config_file_present(config_path)
+            else "is not a readable file",
+            "Add a server to that file, or set MCP_ENABLED=false so its "
+            "presence stops enabling MCP"
+            if auto
+            else "Point MCP_SERVERS_CONFIG_PATH at a config that defines a "
+            "server, or set MCP_ENABLED=false",
         )
         return None
 
     gateway = MCPGateway()
     try:
-        await gateway.start(config_path)
-    except Exception:
-        log.exception(
-            "MCP gateway failed to start; continuing WITHOUT MCP tools and "
-            "without the email poller. config=%s servers=[%s] (%s)",
-            config_path, ", ".join(servers), why,
+        await asyncio.wait_for(
+            gateway.start(config_path), timeout=_MCP_START_TIMEOUT_S
         )
-        await gateway.close()
+    except asyncio.CancelledError:
+        raise
+    except BaseException:
+        log.exception(
+            "MCP gateway failed to start within %.0fs; continuing WITHOUT MCP "
+            "tools and without the email poller. config=%s servers=[%s] (%s)",
+            _MCP_START_TIMEOUT_S, config_path, ", ".join(servers), why,
+        )
+        await _close_mcp_gateway_quietly(gateway, log)
         return None
 
     app.state.mcp_gateway = gateway
