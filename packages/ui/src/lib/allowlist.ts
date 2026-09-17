@@ -9,9 +9,15 @@
 // access. Under the union that cannot happen: an env entry is revocable only
 // by editing the env.
 //
-// No imports here (not React, not next-auth) so `npm test` can exercise this
-// directly under `node --experimental-strip-types` — see
-// scripts/allowlist.test.mjs. auth.ts keeps only the wiring and audit calls.
+// No imports — not React, not next-auth — so `npm test` can exercise this
+// directly under `node --experimental-strip-types` (see
+// scripts/allowlist.test.mjs). That is also why the roster loader lives here
+// rather than in its own module: Node's ESM loader needs an explicit `.ts` on
+// a relative import, which TypeScript rejects without
+// `allowImportingTsExtensions`, so a second module could only share
+// `normalizeEmail` by duplicating it. The decision logic below is pure; the
+// loader at the bottom is the one piece with a socket, a clock and mutable
+// state. auth.ts keeps only the wiring and the audit calls.
 
 /** Where an allow/deny decision came from. Recorded in audit-log `details`. */
 export type AllowSource =
@@ -19,8 +25,8 @@ export type AllowSource =
   | "env"
   /** Missed ALLOWED_EMAILS, matched the People roster. */
   | "roster"
-  /** Definite miss: both lists were readable and neither had the email. */
-  | "env_and_roster"
+  /** Definite miss: both lists were readable and neither held the email. */
+  | "no_match"
   /** Missed ALLOWED_EMAILS; the roster was unreadable, so membership is unknown. */
   | "env_only_roster_unavailable";
 
@@ -52,11 +58,24 @@ export function parseAllowedEmails(
 }
 
 /**
+ * The one env-match rule, shared by `decideAllowed` and `resolveAllowed` so the
+ * two can never drift. The emptiness guard matters because this is exported
+ * surface: a caller can hand in a set built by hand rather than by
+ * `parseAllowedEmails`, and `""` must never match `""`.
+ */
+function matchesEnv(normalized: string, envAllowed: ReadonlySet<string>): boolean {
+  return normalized.length > 0 && envAllowed.has(normalized);
+}
+
+/** The allow decision for an env hit. One object literal, one place. */
+const ENV_HIT: AllowDecision = { allowed: true, source: "env", rosterUnknown: false };
+
+/**
  * The union rule, as a pure function. `roster === null` means the roster could
  * not be read; an empty set means it was read and is genuinely empty.
  *
  * Note that an env hit yields `rosterUnknown: false` even when the roster is
- * unreadable — the decision never depended on the roster, so there is nothing
+ * unreadable — the decision never consulted the roster, so there is nothing
  * unknown about it.
  */
 export function decideAllowed(
@@ -65,9 +84,7 @@ export function decideAllowed(
   roster: ReadonlySet<string> | null,
 ): AllowDecision {
   const normalized = normalizeEmail(email);
-  if (normalized.length > 0 && envAllowed.has(normalized)) {
-    return { allowed: true, source: "env", rosterUnknown: false };
-  }
+  if (matchesEnv(normalized, envAllowed)) return ENV_HIT;
   if (roster === null) {
     return {
       allowed: false,
@@ -80,7 +97,7 @@ export function decideAllowed(
   }
   // Both lists readable and neither matched — a definite no. An empty roster
   // lands here too, so it revokes rather than failing open.
-  return { allowed: false, source: "env_and_roster", rosterUnknown: false };
+  return { allowed: false, source: "no_match", rosterUnknown: false };
 }
 
 /**
@@ -98,24 +115,48 @@ export async function resolveAllowed(
   loadRoster: () => Promise<ReadonlySet<string> | null>,
 ): Promise<AllowDecision> {
   const normalized = normalizeEmail(email);
-  if (normalized.length > 0 && envAllowed.has(normalized)) {
-    return { allowed: true, source: "env", rosterUnknown: false };
-  }
+  if (matchesEnv(normalized, envAllowed)) return ENV_HIT;
   return decideAllowed(normalized, envAllowed, await loadRoster());
+}
+
+/**
+ * What the `authorized` callback should do with a decision about an existing
+ * session. Split out from auth.ts because auth.ts calls `NextAuth()` at module
+ * scope and cannot be imported by the test harness — and this ordering is the
+ * security-relevant part: `allowed` is consulted BEFORE `rosterUnknown`, so
+ * env and roster members never route through the fail-open branch.
+ */
+export type SessionAction =
+  /** On the allowlist right now. */
+  | "allow"
+  /** Not on it, but the roster is unreadable — keep the already-vetted session. */
+  | "allow_roster_unknown"
+  /** Definite miss. Bounce them on this request. */
+  | "revoke";
+
+export function decideSessionAction(decision: AllowDecision): SessionAction {
+  if (decision.allowed) return "allow";
+  if (decision.rosterUnknown) return "allow_roster_unknown";
+  return "revoke";
 }
 
 /** Human clause for audit summaries. Mirrored in docs/auth.md's Debugging table. */
 export function describeDenial(source: AllowSource): string {
   switch (source) {
-    case "env_and_roster":
+    case "no_match":
       return "not in ALLOWED_EMAILS or the people roster";
     case "env_only_roster_unavailable":
       return "not in ALLOWED_EMAILS; people roster unavailable";
     default:
-      // Unreachable: `env` and `roster` are allow outcomes.
+      // Unreachable from either callback: `env` and `roster` are allow
+      // outcomes. Kept so the switch is total over AllowSource.
       return "not allowed";
   }
 }
+
+// --------------------------------------------------------------------------
+// Roster fetching: the one impure part of this module.
+// --------------------------------------------------------------------------
 
 export type RosterLoaderOptions = {
   baseUrl: string;
@@ -127,15 +168,20 @@ export type RosterLoaderOptions = {
 };
 
 /**
- * Build a cached loader for GET /auth/allowed-emails. The cache lives in the
- * returned closure (one per Next.js server instance — both NextAuth callbacks
- * run in the Node runtime), which keeps sign-in from hammering the backend and
- * bounds sign-in latency when the backend is momentarily slow.
+ * Build a cached loader for GET /auth/allowed-emails. The cache and the
+ * in-flight promise live in the returned closure, so there is one per Next.js
+ * server instance.
+ *
+ * This is called from the `authorized` callback, which the middleware runs on
+ * essentially every non-asset request — not just at sign-in. So the cache is
+ * what keeps a page load from becoming N backend calls, and concurrent callers
+ * share a single in-flight fetch rather than each opening their own.
  *
  * Returns `null` on any failure, which callers read as "roster unknown". A
- * failure is deliberately NOT cached, so the next attempt retries; and a stale
- * success is deliberately NOT served past its TTL, because "serve stale on
- * refresh failure" is a different revocation contract than the one documented.
+ * failure is deliberately NOT cached, so the next attempt retries rather than
+ * pinning a roster-only user out for a TTL after a blip; and a stale success is
+ * deliberately NOT served past its TTL, because "serve stale on refresh
+ * failure" is a different revocation contract than the one docs/auth.md states.
  */
 export function createRosterLoader(
   opts: RosterLoaderOptions,
@@ -144,16 +190,15 @@ export function createRosterLoader(
   const now = opts.now ?? (() => Date.now());
   const warn = opts.onWarn ?? (() => {});
   let cache: { fetchedAt: number; emails: ReadonlySet<string> } | null = null;
+  let inFlight: Promise<ReadonlySet<string> | null> | null = null;
 
-  return async function loadRoster(): Promise<ReadonlySet<string> | null> {
-    const at = now();
-    if (cache && at - cache.fetchedAt < ttlMs) return cache.emails;
+  async function fetchRoster(at: number): Promise<ReadonlySet<string> | null> {
     try {
       const headers: Record<string, string> = {};
       if (sharedSecret) headers["x-api-key"] = sharedSecret;
       const res = await fetchImpl(`${baseUrl}/auth/allowed-emails`, {
         headers,
-        // Sign-in is rare; don't let stale Next.js fetch caches gate access.
+        // Don't let a stale Next.js fetch cache gate access.
         cache: "no-store",
       });
       if (!res.ok) {
@@ -167,7 +212,9 @@ export function createRosterLoader(
       // rather than throwing into NextAuth's callback.
       const body = (await res.json()) as unknown;
       if (!Array.isArray(body)) {
-        warn(`[auth] roster fetch returned a non-array body; treating the roster as unavailable`);
+        warn(
+          `[auth] roster fetch returned a non-array body; treating the roster as unavailable`,
+        );
         return null;
       }
       const emails: ReadonlySet<string> = new Set(
@@ -177,6 +224,13 @@ export function createRosterLoader(
           .map((r) => normalizeEmail(r.email))
           .filter((e) => e.length > 0),
       );
+      // `at` is the PRE-fetch timestamp, so the effective TTL is shortened by
+      // the fetch duration — conservative, and deliberate. Writing it
+      // unconditionally is safe only because `loadRoster` keeps at most one
+      // fetch in flight: without that, an earlier-started but slower fetch
+      // could resolve last, clobber a fresher roster and stamp it with the
+      // older `fetchedAt`, keeping an archived Person admitted for up to an
+      // extra TTL window.
       cache = { fetchedAt: at, emails };
       return emails;
     } catch (err) {
@@ -186,5 +240,21 @@ export function createRosterLoader(
       );
       return null;
     }
+  }
+
+  return function loadRoster(): Promise<ReadonlySet<string> | null> {
+    const at = now();
+    if (cache && at - cache.fetchedAt < ttlMs) return Promise.resolve(cache.emails);
+    // Coalesce concurrent misses onto one request. This is what keeps a page
+    // load — `authorized` runs per gated request — from fanning out into N
+    // backend calls, and it is why at most one fetch is ever in flight.
+    // Cleared in `finally`, so a failure is not retained and the next caller
+    // retries rather than being pinned out for a TTL.
+    if (inFlight) return inFlight;
+    const pending = fetchRoster(at).finally(() => {
+      if (inFlight === pending) inFlight = null;
+    });
+    inFlight = pending;
+    return pending;
   };
 }

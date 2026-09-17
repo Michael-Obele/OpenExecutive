@@ -2,6 +2,7 @@ import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
 import {
   createRosterLoader,
+  decideSessionAction,
   describeDenial,
   parseAllowedEmails,
   resolveAllowed,
@@ -16,14 +17,18 @@ const ENV_ALLOWED = parseAllowedEmails(process.env.ALLOWED_EMAILS);
 const BACKEND_BASE = process.env.BACKEND_BASE_URL ?? "http://localhost:8000";
 const BACKEND_SHARED_SECRET = process.env.BACKEND_SHARED_SECRET ?? "";
 
-// 5-minute cache. Cheap insurance against hammering the backend on every
-// sign-in attempt, and it keeps sign-in latency bounded if the backend is
-// momentarily slow. Both NextAuth callbacks are server-side (Node runtime), so
-// the loader's cache is per-server-instance.
+// How long a fetched roster is trusted. `authorized` runs on nearly every
+// gated request, so this is what keeps one page load from becoming N backend
+// calls — and it bounds how long an archived Person stays admitted. Quoted as
+// "5 minutes" in docs/auth.md; keep the two in step.
+const ROSTER_TTL_MS = 5 * 60 * 1000;
+
+// Both NextAuth callbacks are server-side (Node runtime), so the loader's
+// cache is per-server-instance.
 const loadRoster = createRosterLoader({
   baseUrl: BACKEND_BASE,
   sharedSecret: BACKEND_SHARED_SECRET,
-  ttlMs: 5 * 60 * 1000,
+  ttlMs: ROSTER_TTL_MS,
   // Wrapped rather than passed bare: `fetch` must keep its own receiver.
   fetchImpl: (input, init) => fetch(input, init),
   onWarn: (message) => console.warn(message),
@@ -134,28 +139,26 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     // until their JWT expires.
     //
     // Fails open ONLY for a session that is not in ALLOWED_EMAILS and whose
-    // roster membership is currently unreadable (`rosterUnknown`), so a brief
-    // backend hiccup doesn't sign out everyone with a valid session — the
-    // strict `signIn` gate already vetted them once. A *definite* miss (both
-    // lists readable, neither matched) still revokes. `allowed` is checked
-    // first so env and roster members never route through the fail-open
-    // branch at all.
+    // roster membership is currently unreadable, so a brief backend hiccup
+    // doesn't sign out everyone with a valid session — the strict `signIn`
+    // gate already vetted them once. A *definite* miss (both lists readable,
+    // neither matched) still revokes. `decideSessionAction` owns that
+    // ordering so it can be tested without importing this module.
     authorized: async ({ auth }) => {
       if (!auth?.user?.email) return false;
       const email = auth.user.email.toLowerCase();
-      const { allowed, source, rosterUnknown } = await checkEmailAllowed(email);
-      if (allowed) return true;
-      if (rosterUnknown) return true;
+      const decision = await checkEmailAllowed(email);
+      if (decideSessionAction(decision) !== "revoke") return true;
       // Fire-and-forget audit so a mid-session eviction leaves a
       // trail even if the user never re-attempts sign-in.
       auditAuth(
         "auth_logout",
-        `Session revoked: ${email} (${describeDenial(source)})`,
+        `Session revoked: ${email} (${describeDenial(decision.source)})`,
         email,
         {
           revoked: true,
           reason: "not_in_allowlist",
-          source,
+          source: decision.source,
           roster_unavailable: false,
         },
       );

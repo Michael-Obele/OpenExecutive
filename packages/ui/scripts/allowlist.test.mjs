@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   createRosterLoader,
   decideAllowed,
+  decideSessionAction,
   describeDenial,
   normalizeEmail,
   parseAllowedEmails,
@@ -55,7 +56,7 @@ test("an email in neither list is denied, with both lists readable", () => {
   const decision = decideAllowed("stranger@evil.com", set("op@corp.com"), set("teammate@corp.com"));
   assert.deepEqual(decision, {
     allowed: false,
-    source: "env_and_roster",
+    source: "no_match",
     rosterUnknown: false,
   });
 });
@@ -64,7 +65,7 @@ test("an empty but readable roster revokes rather than failing open", () => {
   const decision = decideAllowed("stranger@evil.com", NONE, NONE);
   assert.deepEqual(decision, {
     allowed: false,
-    source: "env_and_roster",
+    source: "no_match",
     rosterUnknown: false,
   });
 });
@@ -129,9 +130,71 @@ test("an ALLOWED_EMAILS miss fetches the roster exactly once", async () => {
   assert.equal(calls, 1);
 });
 
-test("resolveAllowed normalizes before matching either list", async () => {
+test("resolveAllowed normalizes before matching the env list", async () => {
   const decision = await resolveAllowed("  Op@Corp.com ", set("op@corp.com"), async () => NONE);
   assert.equal(decision.allowed, true);
+});
+
+test("resolveAllowed normalizes before matching the roster too", async () => {
+  const decision = await resolveAllowed("  Op@Corp.com ", NONE, async () => set("op@corp.com"));
+  assert.deepEqual(decision, { allowed: true, source: "roster", rosterUnknown: false });
+});
+
+test("resolveAllowed surfaces an unreadable roster as unknown, not a denial", async () => {
+  // The fail-open cell of the table, exercised through the real call path the
+  // NextAuth callbacks use rather than only through decideAllowed.
+  const decision = await resolveAllowed("teammate@corp.com", set("op@corp.com"), async () => null);
+  assert.deepEqual(decision, {
+    allowed: false,
+    source: "env_only_roster_unavailable",
+    rosterUnknown: true,
+  });
+});
+
+// --- describeDenial ---------------------------------------------------------
+
+test("denial clauses read as audit summaries and match docs/auth.md", () => {
+  assert.equal(describeDenial("no_match"), "not in ALLOWED_EMAILS or the people roster");
+  assert.equal(
+    describeDenial("env_only_roster_unavailable"),
+    "not in ALLOWED_EMAILS; people roster unavailable",
+  );
+});
+
+// --- decideSessionAction: what `authorized` does with a decision -----------
+
+test("a definite allow keeps the session, whichever list matched", () => {
+  assert.equal(decideSessionAction({ allowed: true, source: "env", rosterUnknown: false }), "allow");
+  assert.equal(decideSessionAction({ allowed: true, source: "roster", rosterUnknown: false }), "allow");
+});
+
+test("a definite miss revokes the session", () => {
+  assert.equal(
+    decideSessionAction({ allowed: false, source: "no_match", rosterUnknown: false }),
+    "revoke",
+  );
+});
+
+test("an unreadable roster keeps an already-vetted session", () => {
+  assert.equal(
+    decideSessionAction({
+      allowed: false,
+      source: "env_only_roster_unavailable",
+      rosterUnknown: true,
+    }),
+    "allow_roster_unknown",
+  );
+});
+
+test("allowed is honored before rosterUnknown, so a member never hits fail-open", () => {
+  // Guards the ordering the old code got wrong: it returned true on any
+  // roster-fetch error BEFORE consulting the decision, so an evicted user
+  // could coast. `allowed` must win first, and an allow must never be
+  // reported as a fail-open.
+  assert.equal(
+    decideSessionAction({ allowed: true, source: "env", rosterUnknown: true }),
+    "allow",
+  );
 });
 
 // --- createRosterLoader -----------------------------------------------------
@@ -264,12 +327,73 @@ test("a body that fails to parse as JSON yields null", async () => {
   assert.equal(await load(), null);
 });
 
-// --- describeDenial ---------------------------------------------------------
+test("at most one fetch is ever in flight, across cache misses and expiries", async () => {
+  // This is the invariant that makes an out-of-order resolve impossible: an
+  // earlier-started but slower fetch can never land after a newer one and
+  // clobber a fresher roster, because a second fetch never starts while the
+  // first is pending. Without it, the cache write would need its own guard.
+  let clock = 0;
+  let open = 0;
+  let peak = 0;
+  let n = 0;
+  const load = createRosterLoader({
+    baseUrl: "http://api:8000",
+    sharedSecret: "",
+    ttlMs: 1000,
+    now: () => clock,
+    fetchImpl: async () => {
+      open += 1;
+      peak = Math.max(peak, open);
+      await new Promise((r) => setTimeout(r, 5));
+      open -= 1;
+      n += 1;
+      return { ok: true, status: 200, json: async () => [{ email: `p${n}@corp.com`, person_id: n }] };
+    },
+  });
 
-test("denial clauses read as audit summaries and match docs/auth.md", () => {
-  assert.equal(describeDenial("env_and_roster"), "not in ALLOWED_EMAILS or the people roster");
-  assert.equal(
-    describeDenial("env_only_roster_unavailable"),
-    "not in ALLOWED_EMAILS; people roster unavailable",
-  );
+  // A burst of misses, then a burst straddling the TTL expiry.
+  await Promise.all([load(), load(), load()]);
+  clock = 1000;
+  await Promise.all([load(), load(), load()]);
+  assert.equal(peak, 1, "never more than one concurrent backend fetch");
+  assert.equal(n, 2, "one fetch per TTL window, not per caller");
+
+  clock = 1500;
+  assert.deepEqual([...(await load())], ["p2@corp.com"], "the newest roster is what is cached");
+});
+
+test("concurrent misses share one in-flight fetch", async () => {
+  let fetches = 0;
+  const load = createRosterLoader({
+    baseUrl: "http://api:8000",
+    sharedSecret: "",
+    ttlMs: 1000,
+    now: () => 0,
+    fetchImpl: async () => {
+      fetches += 1;
+      await new Promise((r) => setTimeout(r, 5));
+      return { ok: true, status: 200, json: async () => [{ email: "a@b.com", person_id: 1 }] };
+    },
+  });
+  const results = await Promise.all([load(), load(), load(), load(), load()]);
+  assert.equal(fetches, 1, "five concurrent callers, one backend call");
+  for (const r of results) assert.deepEqual([...r], ["a@b.com"]);
+});
+
+test("a failed in-flight fetch is not retained, so the next caller retries", async () => {
+  let n = 0;
+  const load = createRosterLoader({
+    baseUrl: "http://api:8000",
+    sharedSecret: "",
+    ttlMs: 60_000,
+    now: () => 0,
+    fetchImpl: async () => {
+      n += 1;
+      if (n === 1) throw new Error("ECONNREFUSED");
+      return { ok: true, status: 200, json: async () => [{ email: "a@b.com", person_id: 1 }] };
+    },
+  });
+  assert.equal(await load(), null);
+  assert.deepEqual([...(await load())], ["a@b.com"]);
+  assert.equal(n, 2);
 });

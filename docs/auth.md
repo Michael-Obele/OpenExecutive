@@ -213,7 +213,7 @@ If `AUTH_GOOGLE_SECRET` is leaked, regenerate in Google Cloud Console (Clients â
 | `OAuth client was not found` / `invalid_client` | `AUTH_GOOGLE_ID` typo, swapped with `AUTH_GOOGLE_SECRET`, or the client lives in a different GCP project |
 | `redirect_uri_mismatch` | The Authorized redirect URI in Google Console doesn't exactly match `<origin>/api/auth/callback/google`. Wait 5 min for Google to propagate after edits |
 | Browser tries to load `0.0.0.0` after sign-in | `AUTH_URL` not set on the UI |
-| `AccessDenied` page after Google login | Email is in neither `ALLOWED_EMAILS` nor the People roster (the two are unioned), or Google returned `email_verified !== true`. Check the `auth_login` audit row's `source`: `env_and_roster` = genuinely not listed; `env_only_roster_unavailable` = the roster fetch failed and the email isn't in the env list |
+| `AccessDenied` page after Google login | Email is in neither `ALLOWED_EMAILS` nor the People roster (the two are unioned), or Google returned `email_verified !== true`. Check the `auth_login` audit row's `source`: `no_match` = checked against both lists and genuinely not on either; `env_only_roster_unavailable` = the roster fetch failed and the email isn't in the env list |
 | A removed teammate can still sign in | Their email is still in `ALLOWED_EMAILS`. The roster is additive, so archiving the Person alone doesn't revoke access |
 | API returns `401` for every request | UI and API have different `BACKEND_SHARED_SECRET` values (very common after rotating in two separate terminal sessions) |
 | API refuses to start with `RuntimeError: BACKEND_SHARED_SECRET is required` | `OE_PUBLIC_DEPLOYMENT` is set and the secret is missing. Set it; the next restart will boot |
