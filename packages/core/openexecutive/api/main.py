@@ -272,6 +272,11 @@ async def _start_mcp_gateway(
     return asyncio.create_task(run_email_poller(gateway))
 
 
+# How long the lifespan waits for the Slack socket to cancel its pending
+# connect and close cleanly before abandoning it. Named so tests can shrink it.
+SLACK_SHUTDOWN_TIMEOUT_S = 10.0
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from openexecutive.alerts.store import initialize_db as initialize_alerts_db
@@ -520,6 +525,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         catalog_refresh_task = asyncio.create_task(run_catalog_refresher(settings))
     discord_bot: Any = None
     discord_bot_task: asyncio.Task[None] | None = None
+    slack_handler: Any = None
+    slack_connect_task: asyncio.Task[None] | None = None
 
     email_poller_task = await _start_mcp_gateway(app, settings)
 
@@ -576,6 +583,60 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 discord_bot = None
                 discord_bot_task = None
 
+    # Slack Socket Mode listener. Embedded for the same reason as Discord
+    # above: the bot reads the same SQLite + ChromaDB under /data, and that
+    # volume attaches to a single instance. Before this, `make dev` started
+    # only uvicorn + the UI, so Slack silently never listened unless someone
+    # ran `python -m openexecutive.integrations.slack_bot` by hand (#131).
+    #
+    # Requires BOTH tokens: the bot token authenticates the Web API calls,
+    # the app-level token opens the Socket Mode connection.
+    if settings.slack_bot_token and settings.slack_app_token:
+        _slack_log = logging.getLogger("openexecutive")
+        try:
+            # Imported inside the try, not above it: slack_bolt is itself
+            # imported lazily inside create_slack_app, so a missing dependency
+            # surfaces from the await rather than from this line — but keeping
+            # the import here means a future third-party import added to
+            # slack_bot.py degrades to "continue without Slack" instead of
+            # failing the whole boot.
+            from openexecutive.integrations.slack_bot import create_slack_app
+
+            _, slack_handler = await create_slack_app()
+
+            # connect_async() does NOT fail fast: on a bad app token or an
+            # unreachable Slack it retries internally and never returns, so
+            # awaiting it here would hang boot forever. Run it as a
+            # background task, like the Discord bot above. Unlike Discord's
+            # callback this one also logs on success: "listener connected"
+            # is the operator's confirmation that `make dev` really did
+            # bring Slack up, which is the whole point of #131.
+            slack_connect_task = asyncio.create_task(
+                slack_handler.connect_async()
+            )
+
+            def _on_slack_connect_done(task: asyncio.Task[None]) -> None:
+                if task.cancelled():
+                    return
+                exc = task.exception()
+                if exc is not None:
+                    _slack_log.error(
+                        "Slack socket mode connect failed", exc_info=exc
+                    )
+                else:
+                    _slack_log.info("Slack socket mode listener connected")
+
+            slack_connect_task.add_done_callback(_on_slack_connect_done)
+        except Exception:
+            # Covers a missing slack_bolt, a malformed token, and any
+            # failure building the app. Nothing to release here: the
+            # handler is only bound by the tuple unpack above, so it is
+            # still None on this path. A connect_async() that fails later
+            # lands in the task and is released by the shutdown block.
+            _slack_log.exception(
+                "Failed to start Slack bot; continuing without it"
+            )
+
     # Run the MCP Streamable-HTTP session manager for the life of the app.
     # Mounting the sub-app does NOT run its lifespan, so without this every
     # /mcp request 500s. The session manager was created when create_app()
@@ -612,6 +673,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     asyncio.CancelledError, Exception
                 ):
                     await discord_bot_task
+
+    # Close the Slack socket before tearing down the gateway/poller/scheduler
+    # that its handlers call into. Cancelling the pending connect and closing
+    # the client are bounded together under ONE deadline — the same shape as
+    # the Discord shutdown above — so neither step can hang the lifespan.
+    if slack_handler is not None or slack_connect_task is not None:
+        async def _shutdown_slack() -> None:
+            if slack_connect_task is not None and not slack_connect_task.done():
+                slack_connect_task.cancel()
+                # asyncio.wait(), not `suppress(CancelledError): await task`.
+                # wait_for enforces its deadline BY cancelling us, so
+                # suppressing CancelledError here would swallow that signal
+                # and the 10s bound would never fire. wait() reports the
+                # task's outcome without re-raising it, and still propagates
+                # a cancellation aimed at this coroutine.
+                await asyncio.wait([slack_connect_task])
+            if slack_handler is not None:
+                # close_async() disconnects and shuts down the client's
+                # monitor, message processor and worker pool. CancelledError
+                # is not an Exception subclass, so this suppress() does not
+                # swallow the deadline either.
+                with contextlib.suppress(Exception):
+                    await slack_handler.close_async()
+
+        try:
+            await asyncio.wait_for(
+                _shutdown_slack(), timeout=SLACK_SHUTDOWN_TIMEOUT_S
+            )
+        except TimeoutError:
+            logging.getLogger("openexecutive").warning(
+                "Slack shutdown exceeded %.0fs; abandoning the socket",
+                SLACK_SHUTDOWN_TIMEOUT_S,
+            )
+            if slack_connect_task is not None and not slack_connect_task.done():
+                slack_connect_task.cancel()
 
     if email_poller_task is not None:
         email_poller_task.cancel()
