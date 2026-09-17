@@ -20,7 +20,10 @@ os.environ.setdefault("ANTHROPIC_API_KEY", "sk-test-not-used")
 import pytest  # noqa: E402
 
 from openexecutive.providers import registry as registry_mod  # noqa: E402
-from openexecutive.providers.anthropic_provider import AnthropicProvider  # noqa: E402
+from openexecutive.providers.anthropic_provider import (  # noqa: E402
+    AnthropicProvider,
+    configured_async_client,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -178,3 +181,51 @@ def test_surrounding_whitespace_is_trimmed(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "  wrkspc_123  ")
 
     assert get_settings().anthropic_workspace_id == "wrkspc_123"
+
+
+# ── callers outside the request path ──────────────────────────────────────
+
+
+def test_configured_client_carries_the_workspace_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The eval runner and its judges build their own client rather than going
+    through the registry. Without this factory they would 400 on every judge
+    call for an organisation-scoped key, with chat working fine — the same bug
+    surviving in the one place nobody looks."""
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_evals")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    client = configured_async_client()
+
+    assert dict(client.default_headers)["anthropic-workspace-id"] == "wrkspc_evals"
+
+
+def test_configured_client_sends_no_header_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    client = configured_async_client()
+
+    assert "anthropic-workspace-id" not in dict(client.default_headers)
+
+
+def test_configured_client_keeps_an_explicit_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`executive_quality_judge` passes its own key through."""
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_evals")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-from-env")
+
+    client = configured_async_client(api_key="sk-explicit")
+
+    assert client.api_key == "sk-explicit"
+    assert dict(client.default_headers)["anthropic-workspace-id"] == "wrkspc_evals"
+
+
+def test_provider_does_not_resolve_a_workspace_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provider stays explicit. Only the registry decides what it gets, so
+    a stray env var cannot change what a directly-constructed provider sends."""
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_ambient")
+
+    provider = AnthropicProvider(api_key="sk-test")
+
+    assert "anthropic-workspace-id" not in _headers(provider)
