@@ -28,7 +28,7 @@ from openexecutive.knowledge.retriever import retrieve
 from openexecutive.knowledge.store import ChromaDBStore
 from openexecutive.memory.company_profile import CompanyProfile
 from openexecutive.onboarding.profile_builder import load_or_create_profile
-from openexecutive.orchestrator.router import route_to_specialist
+from openexecutive.orchestrator.router import SPECIALIST_REGISTRY, route_to_specialist
 from openexecutive.workflows.base import (
     Workflow,
     WorkflowEvent,
@@ -143,6 +143,27 @@ class DynamicWorkflow(Workflow):
     ) -> AsyncIterator[WorkflowEvent]:
         values = inputs.model_dump()
 
+        # --- pre-flight ---
+        # Definitions are validated on create/update, not on load, so a stored
+        # definition can outlive a specialist (the `talent` key was removed).
+        # `route_to_specialist` would return the string "Unknown specialist: …"
+        # as a step's OUTPUT — or, via a synthesis step's own `specialist`, as
+        # the whole artifact. Check every step up front so the run fails
+        # before any approval gate is raised or any specialist call is paid for.
+        stale = _stale_specialist_steps(self._defn)
+        if stale:
+            yield WorkflowEvent(
+                type="error",
+                message=(
+                    "workflow names a specialist that no longer exists — "
+                    + "; ".join(
+                        f"step {sid!r} uses {name!r}" for sid, name in stale
+                    )
+                    + " — edit the workflow to use a current specialist"
+                ),
+            )
+            return
+
         # --- context ---
         yield WorkflowEvent(
             type="step_start", step_id=_CONTEXT_STEP_ID, step_title="Load context"
@@ -235,6 +256,21 @@ class DynamicWorkflow(Workflow):
 # ---------------------------------------------------------------------------
 # Internal helpers (mirror the private helpers in the hand-written workflows)
 # ---------------------------------------------------------------------------
+
+
+def _stale_specialist_steps(defn: DynamicWorkflowDef) -> list[tuple[str, str]]:
+    """(step_id, specialist) for every step that would consult a specialist
+    missing from the live registry. A synthesis step only consults one when it
+    has `instructions`."""
+    stale: list[tuple[str, str]] = []
+    for step in defn.steps:
+        if isinstance(step, ApprovalGateStepSpec):
+            continue
+        if isinstance(step, SynthesisStepSpec) and not step.instructions:
+            continue
+        if step.specialist not in SPECIALIST_REGISTRY:
+            stale.append((step.id, step.specialist))
+    return stale
 
 
 async def _synthesize(

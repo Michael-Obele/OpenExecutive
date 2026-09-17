@@ -40,8 +40,6 @@ from openexecutive.api.routes import (
     scheduled,
     sessions,
     skills,
-    staff_onboarding,
-    talent,
     today,
     watchlist,
     workflows,
@@ -253,21 +251,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from openexecutive.people.store import initialize_db as initialize_people_db
     initialize_people_db()
 
-    # Talent / executive-search core (clients, engagements, candidates).
-    # Self-contained tables in the same DB; no FK ordering constraint with
-    # the other subsystems.
-    from openexecutive.talent.store import initialize_db as initialize_talent_db
-    initialize_talent_db()
-
-    # Staff-onboarding framework (templates, plans, tasks). Self-contained tables
-    # in the same DB; no FK ordering constraint with the other subsystems.
-    from openexecutive.staff_onboarding.store import (
-        initialize_db as initialize_staff_onboarding_db,
-    )
-    initialize_staff_onboarding_db()
-    # Seed default onboarding templates (idempotent — operator edits are kept).
-    from openexecutive.staff_onboarding.seed import seed_default_templates
-    seed_default_templates()
+    # One-shot cleanup of reminders the removed talent / staff-onboarding
+    # workflows left pending on the principal's DM channel (see the function's
+    # docstring for the removal schedule). Runs after `initialize_db()` so the
+    # `app_migrations` table exists.
+    from openexecutive.memory.episodic import cancel_orphaned_talent_reminders
+    try:
+        _swept = cancel_orphaned_talent_reminders()
+    except Exception:
+        # Best-effort data cleanup — a locked DB must not block boot.
+        logging.getLogger("openexecutive").exception("orphaned-reminder sweep failed")
+    else:
+        if _swept:
+            logging.getLogger("openexecutive").info(
+                "cancelled %d orphaned talent/onboarding reminder(s) on startup", _swept
+            )
 
     # Departments: persistent state layer over the 8 specialist agents. Init
     # AFTER episodic_db so the additive ALTERs (department column on decisions,
@@ -615,8 +613,6 @@ def create_app() -> FastAPI:
     app.include_router(audit.router, tags=["audit"])
     app.include_router(departments.router, tags=["departments"])
     app.include_router(people.router, tags=["people"])
-    app.include_router(talent.router, tags=["talent"])
-    app.include_router(staff_onboarding.router, tags=["staff-onboarding"])
     app.include_router(today.router, tags=["today"])
     app.include_router(scheduled.router, tags=["scheduled"])
     app.include_router(watchlist.router, tags=["watchlist"])
