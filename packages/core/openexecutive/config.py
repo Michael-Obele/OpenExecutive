@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     # registry raises an actionable error if a Claude model is requested
     # while this is unset.
     anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY")
+    # Required only for a key issued at the ORGANISATION level rather than
+    # inside a workspace: Anthropic rejects those calls with HTTP 400 unless
+    # the request carries an `anthropic-workspace-id` header (#128). A
+    # workspace-scoped key needs no value here.
+    anthropic_workspace_id: str | None = Field(None, alias="ANTHROPIC_WORKSPACE_ID")
 
     default_model: str = Field("claude-sonnet-5", alias="DEFAULT_MODEL")
     deep_reasoning_model: str = Field("claude-opus-5", alias="DEEP_REASONING_MODEL")

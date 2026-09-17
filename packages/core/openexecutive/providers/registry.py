@@ -287,7 +287,10 @@ def _anthropic() -> AnthropicProvider:
                     "at a configured local model."
                 ),
             )
-        _anthropic_provider = AnthropicProvider(api_key=api_key)
+        _anthropic_provider = AnthropicProvider(
+            api_key=api_key,
+            workspace_id=getattr(settings, "anthropic_workspace_id", None),
+        )
     return _anthropic_provider
 
 

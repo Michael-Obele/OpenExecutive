@@ -14,10 +14,22 @@ class AnthropicProvider:
     is async-safe and pools its own httpx connections.
     """
 
-    def __init__(self, *, api_key: str, timeout: float | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        timeout: float | None = None,
+        workspace_id: str | None = None,
+    ) -> None:
         kwargs: dict[str, Any] = {"api_key": api_key}
         if timeout is not None:
             kwargs["timeout"] = timeout
+        if workspace_id:
+            # An organisation-scoped key carries no workspace of its own, so
+            # Anthropic 400s every call without this header. Set as a default
+            # header rather than per-request: it applies to create and stream
+            # alike, and every Claude call in the app comes through here.
+            kwargs["default_headers"] = {"anthropic-workspace-id": workspace_id}
         self._client = anthropic.AsyncAnthropic(**kwargs)
 
     def messages_create(self, **kwargs: Any) -> Awaitable[Any]:
