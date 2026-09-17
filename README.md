@@ -256,6 +256,7 @@ the app refuses to start.
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `ANTHROPIC_API_KEY` | Yes¹ | — | Anthropic API key |
+| `ANTHROPIC_WORKSPACE_ID` | No | — | Required only for an organisation-scoped Anthropic key; sent as the `anthropic-workspace-id` header. Workspace-scoped keys need no value |
 | `DEFAULT_MODEL` | No | `claude-sonnet-5` | Executive + most specialists |
 | `DEEP_REASONING_MODEL` | No | `claude-opus-5` | CSO, CFO, GC, Board |
 | `VECTOR_STORE_PATH` | No | `./chroma_db` | ChromaDB directory |

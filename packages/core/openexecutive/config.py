@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -20,6 +21,14 @@ while _ROOT.parent != _ROOT:
 if not _FOUND_ENV:
     _ROOT = Path.cwd()
 _ENV_FILE = _ROOT / ".env"
+
+
+# An Anthropic workspace id is an opaque token. Pinning it to a token charset
+# is not about their format but about ours: a stray quote, space, control
+# character or non-ASCII byte from a .env line becomes an illegal header value,
+# which httpx/h11 reject as a *connection* error at the first Claude call —
+# two silent retries later, and nowhere near the setting that caused it.
+_WORKSPACE_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _blank_or_comment(v: Any) -> bool:
@@ -88,6 +97,11 @@ class Settings(BaseSettings):
     # registry raises an actionable error if a Claude model is requested
     # while this is unset.
     anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY")
+    # Required only for a key issued at the ORGANISATION level rather than
+    # inside a workspace: Anthropic rejects those calls with HTTP 400 unless
+    # the request carries an `anthropic-workspace-id` header (#128). A
+    # workspace-scoped key needs no value here.
+    anthropic_workspace_id: str | None = Field(None, alias="ANTHROPIC_WORKSPACE_ID")
 
     default_model: str = Field("claude-sonnet-5", alias="DEFAULT_MODEL")
     deep_reasoning_model: str = Field("claude-opus-5", alias="DEEP_REASONING_MODEL")
@@ -168,6 +182,29 @@ class Settings(BaseSettings):
     openrouter_catalog_refresh_s: float = Field(
         _DEFAULT_OPENROUTER_CATALOG_REFRESH_S, alias="OPENROUTER_CATALOG_REFRESH_S"
     )
+
+    @field_validator("anthropic_workspace_id", mode="before")
+    @classmethod
+    def _parse_anthropic_workspace_id(cls, v: Any) -> Any:
+        """Reject at boot what would otherwise 400 on the first Claude call.
+
+        `ANTHROPIC_WORKSPACE_ID=` with a trailing `# comment` parses the
+        comment as the VALUE (dotenv, verified), and that string is a legal
+        header — so an install that needs no workspace at all would start
+        sending one and fail every call with the very error this setting
+        exists to fix.
+        """
+        if _blank_or_comment(v):
+            return None
+        if isinstance(v, str):
+            v = v.strip()
+            if not _WORKSPACE_ID_RE.match(v):
+                raise ValueError(
+                    "ANTHROPIC_WORKSPACE_ID must be a bare workspace id "
+                    "(letters, digits, '.', '_', '-') with no quotes, spaces "
+                    f"or trailing comment; got {v!r}"
+                )
+        return v
 
     @field_validator("openrouter_catalog_providers", mode="before")
     @classmethod
