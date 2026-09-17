@@ -2919,6 +2919,97 @@ integrations:
     INVARIANT: anything the subprocess needs from the environment must be added
     to _FORWARDED_ENV_VARS — parent env is otherwise invisible to it.
 
+    Enablement (config._resolve_mcp): MCP_ENABLED left unset is INFERRED from
+    the presence of mcp_servers_config_path, so dropping an mcp_servers.json
+    next to profile.yaml turns MCP on with no further configuration. An
+    EXPLICIT setting wins in both directions — MCP_ENABLED=false keeps MCP off
+    with the file still in place. This needs care: the validator used to test
+    `not self.mcp_enabled`, which cannot distinguish "never set" from "set to
+    false", so the file's presence silently overrode an operator who had asked
+    for MCP to be off (#122; the trap is easy to fall into because
+    docs/deployment.md lists /data/company/mcp_servers.json under persistent
+    state, so shipping the file there is the expected setup). It now reads
+    INVARIANT: probe the config path through config.mcp_config_file_present,
+    never Path.exists/is_file directly. Those re-raise any OSError outside
+    (ENOENT, ENOTDIR, EBADF, ELOOP), so an EACCES on a parent directory whose
+    ownership does not match the container user propagates — and from inside
+    this validator that is out of Settings() itself, which api/main.py calls at
+    module level, making it an IMPORT-time crash rather than a degraded boot.
+    The helper tests is_file, so a directory at the config path counts as
+    absent too; it used to be enough to auto-enable MCP.
+    The check reads
+    model_fields_set — the field names the env/init actually supplied — and
+    stores that on the private attr Settings._mcp_enabled_explicit, which the
+    read-only Settings.mcp_auto_enabled property reads. Private attr, not a
+    field: it is derived on every load, so an env var for it could only ever be
+    discarded, and a field with an alias would advertise a knob that does not
+    exist.
+    INVARIANT: read model_fields_set BEFORE assigning mcp_enabled. Pydantic
+    adds a field to that set on assignment too, so after the auto-enable the
+    set no longer distinguishes the two cases; anything downstream that wants
+    to know "was this explicit?" reads mcp_auto_enabled, never
+    model_fields_set.
+
+    Startup is BEST-EFFORT, in api.main._start_mcp_gateway (extracted from the
+    lifespan so it is unit-testable). It never raises. Two checks run before
+    the subprocess is spawned: MCP off is a no-op, and a config that defines no
+    servers under mcpServers is logged at WARNING and skipped — gateway not
+    started. That empty-config case is why the crash existed: extensible-mcp's
+    load_config ends with ValueError("Config must define at least one server in
+    'mcpServers'") and the child exits, so the only thing reaching us is anyio's
+    "Attempted to exit cancel scope in a different task than it was entered in"
+    from stdio_client unwinding a subprocess that had already gone — a
+    traceback that names nothing about configuration. configured_server_names()
+    (mcp_gateway) reads the names up front for that check and for the log; it
+    returns [] for a missing, unreadable, oversized, non-object, or serverless
+    config. INVARIANT: it NEVER raises, and its except is deliberately broad.
+    It reads an operator-owned path during startup, where an exception is the
+    crash loop rather than a bug report, and the narrow catch it started with
+    had two holes: Path.is_file/exists re-raise any OSError outside (ENOENT,
+    ENOTDIR, EBADF, ELOOP), so an EACCES on a parent directory whose ownership
+    does not match the container user propagates — and with an explicit
+    MCP_ENABLED=true this is the FIRST stat of the path, because _resolve_mcp
+    short-circuits its own exists() check; and json.loads answers
+    deeply-nested input with RecursionError, which is not a ValueError. It
+    tests is_file() rather than exists() so a directory or a symlink to a FIFO
+    at that path is never opened, and caps the read at _MAX_CONFIG_BYTES
+    (1 MiB) so a symlink to something huge cannot stall the boot.
+    A gateway that fails anyway is logged at ERROR via logger.exception with the
+    config path, the server names, and whether the config file or an explicit
+    MCP_ENABLED turned MCP on, then close()d; app.state.mcp_gateway stays None,
+    set_active_gateway is NOT called, and the email poller (which rides on the
+    gateway) is not started. The API then boots without MCP tools.
+    INVARIANT: an MCP failure must never propagate out of the lifespan. It used
+    to, which kills the container — under `restart: unless-stopped` that is a
+    crash loop whose only outward symptom is a healthcheck that never passes
+    (#122 hit 15 restarts). Losing the Gmail/Calendar/Drive surface and the
+    email poller beats losing the whole API. Same degradation pattern as the
+    Discord bot block in the lifespan.
+    INVARIANT: catch BaseException there, not Exception, with a bare
+    asyncio.CancelledError re-raised first. The #122 failure surfaced from
+    anyio, and anyio wraps a task group's failures in BaseExceptionGroup as
+    soon as one of them is a BaseException such as CancelledError.
+    BaseExceptionGroup is NOT an Exception subclass, so `except Exception`
+    lets through the exact shape the guard exists for. The re-raise keeps the
+    lifespan's own cancellation (a bare CancelledError in our frame) meaning
+    shut down rather than degrade.
+    INVARIANT: the teardown after a failed start is itself contained and
+    bounded (_close_mcp_gateway_quietly, _MCP_CLOSE_TIMEOUT_S=10s). It runs
+    from inside the except block, so anything it raises replaces the
+    actionable log with the crash that log prevents — the operator then reads
+    the right message and the container dies anyway. MCPGateway.close's own
+    contextlib.suppress(Exception) does not cover the BaseExceptionGroup case.
+    INVARIANT: the start is bounded (_MCP_START_TIMEOUT_S=120s, generous
+    because the child is `uvx --from git+…` and may clone extensible-mcp on a
+    cold start). MCPGateway.start builds ClientSession with no
+    read_timeout_seconds, so initialize() waits forever on a child that is
+    ALIVE BUT SILENT — a slow or unreachable network on that clone, for
+    instance. No try/except can see that: the lifespan simply never yields, so
+    the healthcheck never passes, which is #122's symptom with none of its
+    traceback. A DEAD child was always fine (BaseSession's receive loop fails
+    every pending request with CONNECTION_CLOSED, so initialize() raises
+    McpError); only the silent one needed a clock.
+
     Egress gating: MCPGateway.call_tool intercepts three tool families before
     delegating to the MCP subprocess. All three resolve the allow-list from the
     shared _roster_allow_set() helper (People roster emails + the exec address):
