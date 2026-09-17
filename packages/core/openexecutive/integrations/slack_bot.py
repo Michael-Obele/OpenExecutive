@@ -17,6 +17,13 @@ logger = logging.getLogger(__name__)
 # without thread auto-continuation.
 _bot_user_id: str | None = None
 
+# Preserves the concurrency ceiling the sync adapter had. That ceiling was
+# Bolt's own listener_executor — ThreadPoolExecutor(max_workers=5)
+# (slack_bolt/app/app.py) — which ran the handler bodies. The socket client's
+# `concurrency=10` pool only did dispatch+ack, which returns immediately, so
+# 5 (not 10) was the real cap on concurrent executive.chat() calls.
+_MAX_CONCURRENT_HANDLERS = 5
+
 
 def _replies_contain_bot_message(messages: list[dict], bot_user_id: str | None) -> bool:
     """True iff any message in the thread was posted by this bot.
@@ -80,9 +87,23 @@ def _replies_to_gate_history(
     return out
 
 
-def create_slack_app():
-    from slack_bolt import App
-    from slack_bolt.adapter.socket_mode import SocketModeHandler
+async def create_slack_app():
+    """Build the async Bolt app and its Socket Mode handler.
+
+    Async Bolt (not the sync ``App``) so every handler awaits on the caller's
+    event loop. That matters because the app is started from the FastAPI
+    lifespan: the MCP gateway's anyio task group and stdio subprocess, the
+    shared ``AsyncAnthropic`` client and the SSE subscriber queues are all
+    bound to the uvicorn loop, and driving them from a throwaway
+    ``asyncio.run`` loop on a Bolt worker thread would corrupt or hang them.
+    Every other inbound adapter (discord, telegram, google_chat) already
+    awaits on the request loop; this brings Slack in line.
+
+    Imports stay deferred inside the factory so the module imports cleanly
+    where slack_bolt is absent — the helper unit tests rely on that.
+    """
+    from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+    from slack_bolt.async_app import AsyncApp
 
     from openexecutive.config import get_settings
 
@@ -93,7 +114,7 @@ def create_slack_app():
             "SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set to run the Slack bot"
         )
 
-    app = App(token=settings.slack_bot_token)
+    app = AsyncApp(token=settings.slack_bot_token)
 
     # Resolve and cache the bot's own user_id once at startup. Failure
     # here disables thread auto-continuation but does NOT prevent the
@@ -101,7 +122,7 @@ def create_slack_app():
     # depend on this value.
     global _bot_user_id
     try:
-        auth = app.client.auth_test()
+        auth = await app.client.auth_test()
         _bot_user_id = str(auth.get("user_id") or "") or None
         logger.info("Slack bot_user_id resolved to %s", _bot_user_id)
     except Exception:
@@ -111,11 +132,18 @@ def create_slack_app():
         )
         _bot_user_id = None
 
+    # The async client ensure_future()s every inbound envelope with no cap,
+    # so without this a burst of Slack traffic fans out into unbounded
+    # concurrent executive.chat() calls. The sync adapter was bounded (see
+    # _MAX_CONCURRENT_HANDLERS); keep it bounded.
+    # Created here (not at module scope) so it binds to the loop that runs it.
+    inflight = asyncio.Semaphore(_MAX_CONCURRENT_HANDLERS)
+
     def _clean_message(text: str) -> str:
         text = re.sub(r"<@\w+>", "", text)
         return text.strip()
 
-    def _handle_message_sync(
+    async def _handle_message(
         event: dict, say, client=None, mode: str = "mention"
     ) -> None:
         """Process one inbound Slack message.
@@ -153,14 +181,23 @@ def create_slack_app():
         thread_replies: list[dict] | None = None
         if is_threaded_reply:
             try:
-                # 5s timeout: this call sits on the user-facing TTFB path
-                # (sync handler runs before executive.chat). Default urllib
-                # timeout is ~30s; a Slack API hang would freeze a Bolt
-                # worker for that long.
-                replies_resp = client.conversations_replies(
-                    channel=event.get("channel", ""),
-                    ts=str(thread_ts),
-                    limit=200,
+                # 5s bound: this call sits on the user-facing TTFB path (it
+                # runs before executive.chat). Enforced with wait_for, not the
+                # `timeout=` kwarg — AsyncWebClient has no such parameter, so
+                # that value was silently forwarded as a query string and the
+                # real ceiling stayed the client default of 30s. A timeout is
+                # caught below and degrades to thread_replies=None — which
+                # for mode="thread_continuation" trips the bot-presence guard
+                # and drops the message. That is the intended trade: a slow
+                # Slack API should cost one missed continuation, not a stalled
+                # event loop. Mentions and DMs are unaffected (they do not
+                # depend on thread_replies to decide whether to reply).
+                replies_resp = await asyncio.wait_for(
+                    client.conversations_replies(
+                        channel=event.get("channel", ""),
+                        ts=str(thread_ts),
+                        limit=200,
+                    ),
                     timeout=5,
                 )
                 thread_replies = replies_resp.get("messages", []) or []
@@ -184,8 +221,13 @@ def create_slack_app():
         ):
             return
 
+        # Audit writes go off-loop too: log_event opens SQLite with a 5s
+        # busy timeout, and the scheduler, resumer and email poller all write
+        # the same DB — under contention an inline call would stall the whole
+        # application event loop for that long.
         from openexecutive.audit import log_event as audit_log
-        audit_log(
+        await asyncio.to_thread(
+            audit_log,
             "integration_inbound",
             f"Inbound slack from user={slack_user_id} channel={event.get('channel', '')}: {cleaned[:160]}",
             actor="slack",
@@ -206,10 +248,13 @@ def create_slack_app():
         # without a matching slack_user_id on a non-archived Person row.
         from openexecutive.people.store import find_person_by_slack_id
         sender_person = (
-            find_person_by_slack_id(slack_user_id) if slack_user_id else None
+            await asyncio.to_thread(find_person_by_slack_id, slack_user_id)
+            if slack_user_id
+            else None
         )
         if sender_person is None:
-            audit_log(
+            await asyncio.to_thread(
+                audit_log,
                 "integration_inbound",
                 f"Rejected: slack user={slack_user_id} not in People roster",
                 actor="slack",
@@ -230,22 +275,22 @@ def create_slack_app():
                 from openexecutive.workflows.inbound_resolver import resolve_inbound_message
                 from openexecutive.workflows.resumer import apply_resolution
 
-                person = find_person_by_slack_id(slack_user_id)
+                person = await asyncio.to_thread(
+                    find_person_by_slack_id, slack_user_id
+                )
                 if person is not None and person.id is not None:
-                    resolution = asyncio.run(
-                        resolve_inbound_message(
-                            channel="slack",
-                            channel_ref=slack_user_id,
-                            from_person_id=person.id,
-                            text=cleaned,
-                            message_id=str(event.get("ts") or ""),
-                            in_reply_to=str(thread_ts or ""),
-                        )
+                    resolution = await resolve_inbound_message(
+                        channel="slack",
+                        channel_ref=slack_user_id,
+                        from_person_id=person.id,
+                        text=cleaned,
+                        message_id=str(event.get("ts") or ""),
+                        in_reply_to=str(thread_ts or ""),
                     )
                     if resolution is not None and resolution.run_id:
-                        success = asyncio.run(apply_resolution(resolution.run_id, resolution))
+                        success = await apply_resolution(resolution.run_id, resolution)
                         if success:
-                            say(
+                            await say(
                                 text="Got it — your response has been recorded.",
                                 thread_ts=thread_ts,
                             )
@@ -269,14 +314,12 @@ def create_slack_app():
                     or getattr(sender_person, "name", None)
                     or slack_user_id
                 )
-                decision = asyncio.run(
-                    should_respond(
-                        user_text=cleaned,
-                        author_display_name=speaker_label,
-                        history=gate_history,
-                        bot_display_name="Open Executive",
-                        channel="slack",
-                    )
+                decision = await should_respond(
+                    user_text=cleaned,
+                    author_display_name=speaker_label,
+                    history=gate_history,
+                    bot_display_name="Open Executive",
+                    channel="slack",
                 )
                 if not decision.allow:
                     logger.info(
@@ -285,7 +328,8 @@ def create_slack_app():
                         session_id,
                         decision.reason,
                     )
-                    audit_log(
+                    await asyncio.to_thread(
+                        audit_log,
                         "integration_inbound",
                         f"Skipped: response gate (reason={decision.reason})",
                         actor="slack",
@@ -327,7 +371,7 @@ def create_slack_app():
             from openexecutive.orchestrator.mcp_gateway import get_active_gateway
             from openexecutive.orchestrator.session import Session
 
-            profile = load_or_create_profile()
+            profile = await asyncio.to_thread(load_or_create_profile)
             session = Session(
                 session_id=session_id,
                 company_profile=profile if not profile.is_empty() else None,
@@ -355,12 +399,22 @@ def create_slack_app():
                     if _bot_user_id and uid == _bot_user_id:
                         continue
                     seen.add(uid)
-                    other = find_person_by_slack_id(uid)
+                    other = await asyncio.to_thread(find_person_by_slack_id, uid)
                     if other and other.id is not None:
                         co_present_person_ids.append(other.id)
 
-            retrieved_context = retrieve(query=cleaned)
-            episodic_context = format_for_prompt()
+            # Offloaded for the same reason api/routes/chat.py offloads them:
+            # both are blocking (ChromaDB query + embedding, SQLite read) and
+            # the handler now awaits on the application event loop, so running
+            # them inline would stall every other request. `get_store()` hands
+            # over the warm ChromaDB client the lifespan built, instead of
+            # constructing a fresh PersistentClient on every message.
+            from openexecutive.mcp_server.server import get_store
+
+            retrieved_context, episodic_context = await asyncio.gather(
+                asyncio.to_thread(retrieve, query=cleaned, store=get_store()),
+                asyncio.to_thread(format_for_prompt),
+            )
 
             # On the 1:1 DM path, hydrate with the context of any recent
             # outbound DM oe sent this user, so a reply oe solicited from
@@ -373,42 +427,42 @@ def create_slack_app():
                     hydrate_user_message,
                 )
 
-                chat_user_message = hydrate_user_message(
+                chat_user_message = await asyncio.to_thread(
+                    hydrate_user_message,
                     channel="slack_dm",
                     channel_ref=str(slack_user_id),
                     user_message=cleaned,
                 )
 
             executive = Executive(mcp_gateway=get_active_gateway())
-            response = asyncio.run(
-                executive.chat(
-                    user_message=chat_user_message,
-                    session=session,
-                    retrieved_context=retrieved_context,
-                    episodic_context=episodic_context,
-                    person_id=person_id,
-                    co_present_person_ids=co_present_person_ids or None,
-                )
+            response = await executive.chat(
+                user_message=chat_user_message,
+                session=session,
+                retrieved_context=retrieved_context,
+                episodic_context=episodic_context,
+                person_id=person_id,
+                co_present_person_ids=co_present_person_ids or None,
             )
 
-            say(text=response, thread_ts=thread_ts)
+            await say(text=response, thread_ts=thread_ts)
 
         except Exception as e:
             logger.error(f"Slack handler error: {e}", exc_info=True)
-            say(
+            await say(
                 text="I encountered an error processing your request. Please try again.",
                 thread_ts=thread_ts,
             )
 
     @app.event("app_mention")
-    def handle_mention(event: dict, say, client) -> None:
-        # Bolt auto-injects `client` (a WebClient) when listed in the
+    async def handle_mention(event: dict, say, client) -> None:
+        # Bolt auto-injects `client` (an AsyncWebClient) when listed in the
         # signature; we pass it through so the multi-peer thread-member
         # fetch can call conversations.replies without a separate import.
-        _handle_message_sync(event, say, client=client, mode="mention")
+        async with inflight:
+            await _handle_message(event, say, client=client, mode="mention")
 
     @app.event("message")
-    def handle_message(event: dict, say, client) -> None:
+    async def handle_message(event: dict, say, client) -> None:
         # Slack delivers BOTH a generic `message` event AND `app_mention`
         # when the bot is mentioned in a channel/thread. Filter early so
         # only one handler fires.
@@ -417,13 +471,14 @@ def create_slack_app():
 
         channel_type = event.get("channel_type")
         if channel_type == "im":
-            _handle_message_sync(event, say, client=client, mode="dm")
+            async with inflight:
+                await _handle_message(event, say, client=client, mode="dm")
             return
 
         # If the bot is @-mentioned, `app_mention` will handle it. Skip
         # here to avoid double-firing. When _bot_user_id failed to resolve
         # at startup this filter is a no-op, but the bot-presence guard
-        # inside _handle_message_sync (see "Bot-presence guard for
+        # inside _handle_message (see "Bot-presence guard for
         # thread_continuation mode") still catches the second invocation
         # because the bot has not yet engaged in any thread.
         text = event.get("text", "")
@@ -432,25 +487,38 @@ def create_slack_app():
 
         # Auto-continuation only fires inside a thread the bot has
         # previously engaged in. The "has the bot replied here?" check
-        # happens inside _handle_message_sync where conversations_replies
+        # happens inside _handle_message where conversations_replies
         # is already being fetched; we only filter the cheap signals here.
         thread_ts = event.get("thread_ts")
         if not thread_ts or str(thread_ts) == str(event.get("ts") or ""):
             return  # not a threaded reply (thread starters go through app_mention)
 
-        _handle_message_sync(event, say, client=client, mode="thread_continuation")
+        async with inflight:
+            await _handle_message(
+                event, say, client=client, mode="thread_continuation"
+            )
 
-    return app, SocketModeHandler
+    handler = AsyncSocketModeHandler(app, settings.slack_app_token)
+    return app, handler
+
+
+async def _run_slack_bot_async() -> None:
+    _, handler = await create_slack_app()
+    logger.info("Starting Slack bot in socket mode...")
+    # start_async() == connect_async() + sleep(inf): correct for a standalone
+    # process, but never call it from the FastAPI lifespan — it would never
+    # return. The lifespan uses connect_async()/close_async() instead.
+    await handler.start_async()
 
 
 def run_slack_bot() -> None:
-    app, SocketModeHandler = create_slack_app()
-    from openexecutive.config import get_settings
+    """Standalone entrypoint: ``python -m openexecutive.integrations.slack_bot``.
 
-    settings = get_settings()
-    handler = SocketModeHandler(app, settings.slack_app_token)
-    logger.info("Starting Slack bot in socket mode...")
-    handler.start()
+    Still supported for running the bot in isolation. Normal operation now
+    starts the listener from the FastAPI lifespan instead (see api/main.py),
+    so ``make dev`` brings Slack up with the rest of the app.
+    """
+    asyncio.run(_run_slack_bot_async())
 
 
 if __name__ == "__main__":

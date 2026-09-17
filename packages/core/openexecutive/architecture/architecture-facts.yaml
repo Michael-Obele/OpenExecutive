@@ -902,8 +902,11 @@ peer_memory:
       ``HONCHO_ENABLED`` env var. When false, every entry point
       short-circuits with ``outcome=disabled`` and the rest of OE
       behaves identically to its pre-Honcho posture. Per-loop client
-      cache keyed by ``asyncio.AbstractEventLoop`` so Slack's per-turn
-      ``asyncio.run`` doesn't bind a stale client.
+      cache keyed by ``asyncio.AbstractEventLoop`` so a caller that
+      spins up its own loop doesn't bind a stale client. (Slack was the
+      original motivation; it now awaits on the app loop like every
+      other adapter, but the cache still guards tests and the
+      standalone entrypoints.)
   surfaces:
     prefetch: |
       ``prefetch(query, *, person_id, session_id=None, reasoning_level="low")``
@@ -2689,8 +2692,18 @@ integrations:
     block. The outbound gate at ``mcp_gateway._check_gmail_recipients``
     is the actual security boundary against auto-replying to spam.
   slack: |
-    openexecutive.integrations.slack_bot — Bolt socket-mode adapter
-    (token-gated). Responds to (a) ``@mention`` events, (b) DMs, and
+    openexecutive.integrations.slack_bot — async Bolt socket-mode
+    adapter (``AsyncApp`` + ``AsyncSocketModeHandler``) embedded in the
+    FastAPI lifespan (no separate process), started when both
+    ``SLACK_BOT_TOKEN`` and ``SLACK_APP_TOKEN`` are set. The lifespan
+    runs ``connect_async()`` as a background task and ``close_async()``
+    on shutdown — ``connect_async()`` retries internally and never
+    returns on a bad app token, so awaiting it would hang boot, and
+    ``start_async()`` (sleep-forever) must never be used there.
+    Handlers await on the application event loop, which is what keeps
+    the uvicorn-bound MCP gateway, the shared AsyncAnthropic client and
+    the SSE queues off a foreign loop. Responds to (a) ``@mention``
+    events, (b) DMs, and
     (c) thread continuations: any non-mention message in a thread the
     bot has previously replied in is treated as a continuation and run
     through the shared ``response_gate`` (see `response_gate:` below).
