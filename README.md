@@ -130,17 +130,29 @@ Open http://localhost:3000 to start chatting with your executive. The API runs o
 > downloads a small embedding model (~90 MB) to build the local vector index — so the
 > first `make dev` takes a few minutes before the app is ready. Subsequent starts are fast.
 
+> **On Windows:** run `make` from Git Bash or WSL, not PowerShell or `cmd`.
+> The recipes are POSIX shell (`if [ -f .env ]; …`), and GNU Make falls back to
+> `cmd.exe` when no `sh` is on PATH — which fails with
+> `-f was unexpected at this time`. If Make still picks the wrong shell, point
+> it at one: `make dev SHELL="C:/Program Files/Git/bin/sh.exe"`. Note that
+> `make stop` uses `lsof` and has no Windows equivalent; stop the two dev
+> servers from their own terminals instead.
+
 **For contributors not using `make`:**
 
 ```bash
 cd packages/core
 uv sync
-source .venv/bin/activate
-uvicorn openexecutive.api.main:app --reload --port 8000
+uv run uvicorn openexecutive.api.main:app --reload --port 8000
 
 # In a second terminal
 cd packages/ui && npm install && npm run dev
 ```
+
+`uv run` executes inside the project's virtualenv without activating it, so
+these commands are the same on macOS, Linux and Windows. (Activating manually
+works too, but the path differs per platform: `.venv/bin/activate` on
+macOS/Linux, `.venv\Scripts\Activate.ps1` on Windows.)
 
 ## Run the Discord Bot
 
