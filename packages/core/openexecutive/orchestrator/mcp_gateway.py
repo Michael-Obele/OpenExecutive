@@ -580,6 +580,34 @@ def _record_email_outbound_context(arguments: dict[str, Any]) -> None:
         )
 
 
+def configured_server_names(config_path: Path) -> list[str]:
+    """Names the MCP config at `config_path` defines under `mcpServers`.
+
+    Empty when the file is absent, unreadable, not a JSON object, or defines no
+    servers. Callers use this to decide whether starting the gateway can
+    accomplish anything: extensible-mcp's own config loader ends with
+    `ValueError("Config must define at least one server in 'mcpServers'")` and
+    exits, and because the child is already gone by then the only thing that
+    reaches us is anyio's "Attempted to exit cancel scope in a different task"
+    from `stdio_client` unwinding — a traceback that names nothing about
+    configuration (#122). Checking first is what makes the failure legible.
+    """
+    if not config_path.exists():
+        return []
+    try:
+        raw = json.loads(config_path.read_text())
+    except (OSError, ValueError):
+        logger.warning(
+            "MCP config %s is not readable as JSON; treating it as defining "
+            "no servers", config_path,
+        )
+        return []
+    servers = raw.get("mcpServers") if isinstance(raw, dict) else None
+    if not isinstance(servers, dict):
+        return []
+    return sorted(str(name) for name in servers)
+
+
 class MCPGateway:
     """Proxies search_tools / call_tool / load_mcp_server to an extensible-mcp subprocess.
 

@@ -8,7 +8,7 @@ import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -49,6 +49,9 @@ from openexecutive.api.routes import (
 )
 from openexecutive.integrations.google_chat import router as google_chat_router
 from openexecutive.integrations.telegram_bot import router as telegram_router
+
+if TYPE_CHECKING:
+    from openexecutive.config import Settings
 
 
 class _OELogFormatter(logging.Formatter):
@@ -142,6 +145,72 @@ _configure_logging()
 _UNAUTHENTICATED_PATHS: frozenset[str] = frozenset(
     {"/health", "/webhook/telegram", "/webhook/google-chat"}
 )
+
+
+async def _start_mcp_gateway(
+    app: FastAPI, settings: Settings
+) -> asyncio.Task[None] | None:
+    """Bring the MCP gateway up, or leave MCP off and say why.
+
+    Sets ``app.state.mcp_gateway`` — the gateway on success, ``None`` otherwise
+    — and returns the email-poller task that rides on it, or ``None``.
+
+    Never raises. The gateway spawns extensible-mcp as a subprocess, and a
+    failure there used to propagate out of the lifespan and kill the container;
+    under ``restart: unless-stopped`` that is a crash loop whose only outward
+    symptom is a healthcheck that never passes (#122). Booting without MCP
+    costs the Gmail/Calendar/Drive tool surface and the email poller; refusing
+    to boot costs everything, so degrade and log loudly enough to alert on.
+    """
+    app.state.mcp_gateway = None
+    if not settings.mcp_enabled:
+        return None
+
+    from openexecutive.orchestrator.mcp_gateway import (
+        MCPGateway,
+        configured_server_names,
+        set_active_gateway,
+    )
+
+    log = logging.getLogger("openexecutive")
+    config_path = settings.mcp_servers_config_path
+    servers = configured_server_names(config_path)
+    # With MCP_ENABLED unset it is the config file's presence that turned MCP
+    # on (config._resolve_mcp), so an operator can arrive here without having
+    # asked for MCP at all. Naming which it was is the fact the original
+    # traceback never carried.
+    why = (
+        "auto-enabled by the presence of the config file"
+        if settings.mcp_auto_enabled
+        else "MCP_ENABLED was set explicitly"
+    )
+
+    if not servers:
+        log.warning(
+            "MCP is on (%s) but %s defines no servers under 'mcpServers'; "
+            "starting without MCP tools. Add a server to that file, or set "
+            "MCP_ENABLED=false to stop the file from enabling MCP.",
+            why, config_path,
+        )
+        return None
+
+    gateway = MCPGateway()
+    try:
+        await gateway.start(config_path)
+    except Exception:
+        log.exception(
+            "MCP gateway failed to start; continuing WITHOUT MCP tools and "
+            "without the email poller. config=%s servers=[%s] (%s)",
+            config_path, ", ".join(servers), why,
+        )
+        await gateway.close()
+        return None
+
+    app.state.mcp_gateway = gateway
+    set_active_gateway(gateway)
+
+    from openexecutive.integrations.email_poller import run_email_poller
+    return asyncio.create_task(run_email_poller(gateway))
 
 
 @asynccontextmanager
@@ -393,18 +462,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     discord_bot: Any = None
     discord_bot_task: asyncio.Task[None] | None = None
 
-    if settings.mcp_enabled:
-        from openexecutive.orchestrator.mcp_gateway import MCPGateway, set_active_gateway
-
-        gateway = MCPGateway()
-        await gateway.start(settings.mcp_servers_config_path)
-        app.state.mcp_gateway = gateway
-        set_active_gateway(gateway)
-
-        from openexecutive.integrations.email_poller import run_email_poller
-        email_poller_task = asyncio.create_task(run_email_poller(gateway))
-    else:
-        app.state.mcp_gateway = None
+    email_poller_task = await _start_mcp_gateway(app, settings)
 
     if settings.scheduler_enabled:
         from openexecutive.scheduler import run_scheduler

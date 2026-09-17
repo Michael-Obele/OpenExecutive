@@ -465,7 +465,15 @@ class Settings(BaseSettings):
     mcp_servers_config_path: Path = Field(
         _ROOT / "company" / "mcp_servers.json", alias="MCP_SERVERS_CONFIG_PATH"
     )
+    # Left unset, this is inferred from the presence of mcp_servers_config_path
+    # (see _resolve_mcp). Set explicitly, the explicit value always wins.
     mcp_enabled: bool = Field(False, alias="MCP_ENABLED")
+    # Derived, not configured: _resolve_mcp overwrites this on every load. True
+    # when MCP is on ONLY because the config file exists. The API lifespan
+    # reports it when MCP then fails to come up — an operator who never set
+    # MCP_ENABLED has to be told the file is what turned MCP on, which is the
+    # diagnosis #122 cost 15 container restarts and a read of this file.
+    mcp_auto_enabled: bool = Field(False, alias="MCP_AUTO_ENABLED")
 
     # ---- Calendar booking (first-climb autonomy, Build 1) ------------------
     # When true, the `create_calendar_event` / `cancel_calendar_event` tools
@@ -806,7 +814,28 @@ class Settings(BaseSettings):
     def _resolve_mcp(self) -> "Settings":
         if not self.mcp_servers_config_path.is_absolute():
             self.mcp_servers_config_path = Path.cwd() / self.mcp_servers_config_path
-        if not self.mcp_enabled and self.mcp_servers_config_path.exists():
+        # Convenience for people who never touch the var: dropping an
+        # mcp_servers.json next to profile.yaml is enough to turn MCP on.
+        # An EXPLICIT setting always wins, in both directions.
+        #
+        # `model_fields_set` carries the field names the env/init actually
+        # supplied, which is what separates "never set" from "set to false".
+        # The plain `not self.mcp_enabled` this used to test could not tell
+        # them apart, so the config file's presence silently overrode
+        # MCP_ENABLED=false and there was no way to say "the file exists but I
+        # do not want MCP running" short of moving it (#122).
+        # `env_ignore_empty` means a bare `MCP_ENABLED=` in .env reads as
+        # unset, which is the intent.
+        #
+        # Read it BEFORE the assignment below: pydantic adds a field to
+        # `model_fields_set` on assignment too, so once this validator has
+        # auto-enabled MCP the set no longer distinguishes the two cases for
+        # anyone downstream. That is what `mcp_auto_enabled` records.
+        explicit = "mcp_enabled" in self.model_fields_set
+        self.mcp_auto_enabled = (
+            not explicit and self.mcp_servers_config_path.exists()
+        )
+        if self.mcp_auto_enabled:
             self.mcp_enabled = True
         return self
 

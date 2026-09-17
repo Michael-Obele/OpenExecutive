@@ -2919,6 +2919,48 @@ integrations:
     INVARIANT: anything the subprocess needs from the environment must be added
     to _FORWARDED_ENV_VARS — parent env is otherwise invisible to it.
 
+    Enablement (config._resolve_mcp): MCP_ENABLED left unset is INFERRED from
+    the presence of mcp_servers_config_path, so dropping an mcp_servers.json
+    next to profile.yaml turns MCP on with no further configuration. An
+    EXPLICIT setting wins in both directions — MCP_ENABLED=false keeps MCP off
+    with the file still in place. This needs care: the validator used to test
+    `not self.mcp_enabled`, which cannot distinguish "never set" from "set to
+    false", so the file's presence silently overrode an operator who had asked
+    for MCP to be off (#122; the trap is easy to fall into because
+    docs/deployment.md lists /data/company/mcp_servers.json under persistent
+    state, so shipping the file there is the expected setup). It now reads
+    model_fields_set — the field names the env/init actually supplied — and
+    records the outcome on the derived Settings field mcp_auto_enabled.
+    INVARIANT: read model_fields_set BEFORE assigning mcp_enabled. Pydantic
+    adds a field to that set on assignment too, so after the auto-enable the
+    set no longer distinguishes the two cases; anything downstream that wants
+    to know "was this explicit?" reads mcp_auto_enabled, never
+    model_fields_set.
+
+    Startup is BEST-EFFORT, in api.main._start_mcp_gateway (extracted from the
+    lifespan so it is unit-testable). It never raises. Two checks run before
+    the subprocess is spawned: MCP off is a no-op, and a config that defines no
+    servers under mcpServers is logged at WARNING and skipped — gateway not
+    started. That empty-config case is why the crash existed: extensible-mcp's
+    load_config ends with ValueError("Config must define at least one server in
+    'mcpServers'") and the child exits, so the only thing reaching us is anyio's
+    "Attempted to exit cancel scope in a different task than it was entered in"
+    from stdio_client unwinding a subprocess that had already gone — a
+    traceback that names nothing about configuration. configured_server_names()
+    (mcp_gateway) reads the names up front for that check and for the log; it
+    returns [] for a missing, unreadable, non-object, or serverless config.
+    A gateway that fails anyway is logged at ERROR via logger.exception with the
+    config path, the server names, and whether the config file or an explicit
+    MCP_ENABLED turned MCP on, then close()d; app.state.mcp_gateway stays None,
+    set_active_gateway is NOT called, and the email poller (which rides on the
+    gateway) is not started. The API then boots without MCP tools.
+    INVARIANT: an MCP failure must never propagate out of the lifespan. It used
+    to, which kills the container — under `restart: unless-stopped` that is a
+    crash loop whose only outward symptom is a healthcheck that never passes
+    (#122 hit 15 restarts). Losing the Gmail/Calendar/Drive surface and the
+    email poller beats losing the whole API. Same degradation pattern as the
+    Discord bot block in the lifespan.
+
     Egress gating: MCPGateway.call_tool intercepts three tool families before
     delegating to the MCP subprocess. All three resolve the allow-list from the
     shared _roster_allow_set() helper (People roster emails + the exec address):
