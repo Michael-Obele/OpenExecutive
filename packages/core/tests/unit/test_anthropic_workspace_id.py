@@ -67,9 +67,13 @@ def test_the_header_is_purely_additive() -> None:
     plain = AnthropicProvider(api_key="sk-test")
     with_ws = AnthropicProvider(api_key="sk-test", workspace_id="wrkspc_123")
 
-    added = set(_headers(with_ws)) - set(_headers(plain))
+    ours = _headers(with_ws)
+    theirs = _headers(plain)
 
-    assert added == {"anthropic-workspace-id"}
+    assert set(ours) - set(theirs) == {"anthropic-workspace-id"}
+    assert {k: v for k, v in ours.items() if k != "anthropic-workspace-id"} == theirs, (
+        "every header the SDK sets must survive unchanged in value, not just in name"
+    )
     assert with_ws._client.auth_headers == plain._client.auth_headers
 
 
@@ -119,3 +123,58 @@ def test_settings_default_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
 
     assert get_settings().anthropic_workspace_id is None
+
+
+# ── what a .env can actually hand us ──────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "# leave blank for a workspace-scoped key",  # dotenv reads an inline
+                                                     # comment after `KEY=` as
+                                                     # the value (verified)
+        "   ",
+        "",
+    ],
+)
+def test_a_blank_or_comment_value_reads_as_unset(raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failure mode this setting must not create.
+
+    Sending a comment string as the workspace id is a legal HTTP header, so it
+    reaches Anthropic and 400s every call — handing the exact symptom of #128
+    to someone whose key never needed a workspace at all.
+    """
+    from openexecutive.config import get_settings
+
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", raw)
+
+    assert get_settings().anthropic_workspace_id is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["wrkspc_1 trailing", "wrkspc\r\nx-injected: 1", '"wrkspc_1"', "wrkspc_é"],
+)
+def test_an_unusable_value_fails_at_boot(raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail where the operator can act on it.
+
+    Each of these is either an illegal header value — which httpx/h11 reject as
+    a *connection* error two silent retries into the first Claude call — or a
+    quoted/padded copy-paste that Anthropic would simply reject. Neither points
+    at the .env line that caused it, so the settings load is the place to stop.
+    """
+    from openexecutive.config import get_settings
+
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", raw)
+
+    with pytest.raises(Exception, match="ANTHROPIC_WORKSPACE_ID"):
+        get_settings()
+
+
+def test_surrounding_whitespace_is_trimmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openexecutive.config import get_settings
+
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "  wrkspc_123  ")
+
+    assert get_settings().anthropic_workspace_id == "wrkspc_123"
