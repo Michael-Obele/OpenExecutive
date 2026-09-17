@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- `packages/ui`: force `lodash-es` to 4.18.1 via an npm `overrides` entry
+  (GHSA-r5fr-rjxr-66jc code injection in `_.template`, GHSA-f23m-r3pf-42rh
+  prototype pollution in `_.unset`/`_.omit`). The vulnerable 4.17.23 was pinned
+  exactly by `chevrotain@11.1.2` underneath `mermaid@12.0.0`, and no mermaid
+  release moves off it.
+
 ### Removed
 - **Talent / executive search.** The whole vertical is gone: the `talent`
   specialist, `openexecutive/talent/` (engagements, candidates, offers, the
