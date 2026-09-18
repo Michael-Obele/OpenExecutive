@@ -914,12 +914,49 @@ peer_memory:
       ``stream_chat_with_committee``. Calls Honcho's dialectic endpoint
       (``peer.aio.chat(query)``) and returns a short ``<peer_memory>``
       block injected into the USER turn (never a cached system block,
-      so it doesn't poison prompt caching). Bounded by
-      ``HONCHO_PREFETCH_TIMEOUT_S`` (10s in prod) — on timeout the turn
+      so it doesn't poison prompt caching). On timeout the turn
       proceeds with an empty block. ``reasoning_level`` trades latency
       for synthesis depth: ``"low"`` for the per-turn path,
-      ``"medium"`` for committee-reviewed turns that already pay
+      ``"medium"`` for committee-reviewed turns (and inbound email,
+      which defaults ``committee_review=True``) that already pay
       deep-review latency.
+
+      ``HONCHO_PREFETCH_TIMEOUT_S`` is the knob for the FAST per-turn
+      path and is used unscaled there (``minimal``/``low`` sit at 1.0).
+      Only the deliberate levels scale off it — ``medium`` 4x, ``high``
+      5x, ``max`` 6x — capped at ``_PREFETCH_CEILING_S`` and never below
+      the configured base, via ``prefetch_timeout_s()``. At the default 3s
+      base that is 12s for ``medium`` with ``high``/``max`` at the 15s
+      ceiling; at a 10s base every deliberate level IS the ceiling — the
+      multipliers only differentiate below it, by design. Honcho's
+      dialectic latency scales steeply with the level (measured on
+      hosted Honcho: ``low`` ~2s, ``medium`` ~8s), so a single flat
+      budget made the deeper levels unreachable — every ``medium`` call
+      timed out and the turn silently ran with no peer memory, strictly
+      worse than having asked for ``low``. ``medium`` carries more
+      headroom than its measurement alone implies because the budget
+      spans ``peer()`` + ``chat()`` and a budget at the mean still times
+      out half the time.
+
+      The fast levels stay unscaled deliberately: ``prefetch`` is awaited
+      inline before the first streamed byte, so multiplying the base
+      there adds dead air to every ordinary turn; and any multiplier
+      above 1.0 flattens every level onto the ceiling once the base
+      approaches it, which would stop the operator's knob distinguishing
+      the two paths at all. A non-positive base falls back to
+      ``_DEFAULT_PREFETCH_TIMEOUT_S`` — ``wait_for`` with timeout <= 0
+      fires before the request is made. Each prefetch audit row carries
+      the ``timeout_s`` it ran under.
+
+      ``_client_timeout_s`` is an OUTER bound over every PER-CALL budget
+      in the module, kept strictly greater than all of them; the aggregate
+      ceilings on whole passes are deliberately excluded, since it applies
+      per request. Because it is no longer tight, the
+      fire-and-forget bodies (person sync, department sync, department
+      note) — none of whose individual calls is separately budgeted —
+      carry their own ``_SYNC_TOTAL_TIMEOUT_S`` ceiling and emit
+      ``outcome=timeout`` when it fires; the workspace purge's session
+      listing is bounded by ``_SESSION_PURGE_BUDGET_S`` for the same reason.
     sync_turn: |
       ``sync_turn(user, assistant, *, person_id, session_id, co_present_person_ids)``
       — fire-and-forget background task scheduled on the current event
@@ -928,9 +965,74 @@ peer_memory:
       enumerates other humans in the conversation context (Discord
       thread members, Slack thread participants, email To+Cc) so
       Honcho can store them as session peers — the data shape that
-      makes peer-of-peer reasoning possible. Sanitizes session ids
-      through ``_safe_honcho_id`` (Honcho rejects ``[^a-zA-Z0-9_-]``)
-      so channel-shaped ids like ``discord:thread:N`` get rewritten to
+      makes peer-of-peer reasoning possible. Also seeds each person
+      peer's Honcho card with the roster's name (``_seed_identities`` /
+      ``_seed_peer_identity``, applied on the department sync path too):
+      peers are keyed by ``Person.id``, so without this the only identity
+      signal Honcho receives is a bare integer, and its dreaming agent
+      concludes the number IS the person's name — observed in production
+      as a card reading ``IDENTITY: Name: 1``. Cards are injected into
+      the dialectic system prompt on every ``peer.aio.chat()``, so that
+      error then propagates into every later answer about that person.
+
+      The card carries the NAME ONLY: email and role would export roster
+      PII to a third-party memory service, for cc'd people included, and
+      neither is needed to fix the defect. ``set_card`` replaces the
+      whole card, so only ``IDENTITY:`` lines are swapped (matched case-
+      and whitespace-insensitively) and the deriver's ``ATTRIBUTE:`` /
+      ``RELATIONSHIP:`` lines are preserved; the existing card is split
+      on PHYSICAL lines first, because one list element may itself span
+      lines and hide an identity claim on its second, and the carried-over
+      lines are capped.
+
+      Roster values are attacker-reachable (``upsert_person`` is a chat
+      tool an inbound email sender can reach), so ``_card_value``
+      NFKC-normalises, flattens whitespace, strips Cc/Cf characters,
+      length-caps, and then holds the value to an ALLOW-LIST of letters,
+      combining marks, digits and a small punctuation set, with the
+      colon lookalikes the category allow-list would otherwise admit
+      STRIPPED out — taken from Unicode's confusables data (everything
+      mapped to U+003A) rather than from character names; U+A4FD is a
+      Lisu tone LETTER whose name never says colon. Stripped rather than
+      refused, because the visarga is the nominative ending in formal
+      Devanagari/Gujarati names: refusing would leave those people never
+      seeded, stripping keeps the stem form and still lets no colon shape
+      reach the card. Modifier letters as a class stay allowed (々, ー, ʻ). A deny-list of structure
+      tokens is not sufficient: the consumer is an LLM system prompt
+      rather than a parser, so ``ATTRIBUTE :``, a fullwidth colon, a
+      zero-width space and a Cyrillic homoglyph all read the same to the
+      model while defeating a literal match. The allow-list refuses every
+      colon variant, checked by an exhaustive test over every Unicode
+      codepoint whose name contains COLON plus an explicit test of the
+      confusables that names miss. It does NOT stop merely persuasive prose
+      — OE already embeds ``full_name`` in its own system prompt, so that
+      exposure is pre-existing, not introduced here.
+
+      Seeding runs AFTER the message write (that write is the point of
+      the sync and must not queue behind two card round trips per peer),
+      is bounded per peer by ``_IDENTITY_SEED_TIMEOUT_S`` AND per pass by
+      ``_SEED_TOTAL_TIMEOUT_S`` (the pass is serial, so the per-peer bound
+      alone costs peers x budget on a wide thread), and is best-effort. It runs OUTSIDE the
+      sync ceiling and is audited as its own ``seed_identity`` row (``ok`` only when no
+      peer failed; ``error`` when any did, with the ``failed`` count on
+      the row; ``timeout``; ``empty``), so the
+      sync row is a pure record of the persist, emitted the instant the
+      write lands — a slow card round trip can neither delay nor replace
+      it. Memoized per ``(workspace, person)`` on the facts
+      sent with an ``_IDENTITY_RECHECK_S`` interval: a rename re-seeds at
+      once, and because the deriver keeps re-deriving identity from the
+      peer id a one-shot memo would let ``IDENTITY: Name: 1`` return
+      unnoticed. A failure is memoized separately for
+      ``_IDENTITY_RETRY_AFTER_S`` — including every peer a pass-ceiling
+      cut-off left in flight or unreached — so a degraded card endpoint is
+      probed once per interval, not once per peer per turn.
+
+      Known limitation: the card replace is read-modify-write with no
+      ETag in the SDK, so a deriver write landing in between is lost
+      (self-correcting, since the deriver re-derives). Sanitizes session
+      ids through ``_safe_honcho_id`` (Honcho rejects
+      ``[^a-zA-Z0-9_-]``) so channel-shaped ids like
+      ``discord:thread:N`` get rewritten to
       ``discord_thread_N``.
     directional_chat: |
       ``directional_chat(*, person_id, question, target_person_id=None)``
@@ -1495,7 +1597,7 @@ audit:
     - cache_event — one row per model call, from every call site (`audit.usage.log_model_usage`): Executive iterations and the committee revision pass (`actor` executive / committee_revision), `BaseAgent.analyze` callers — chat-turn consults via `route_parallel` (`actor` specialist), workflow steps and other direct `route_to_specialist` callers (specialist_workflow), the MCP `consult_specialist` tool (specialist_mcp), and both Council test boxes (agent_test) — `BaseAgent.analyze_with_tools` callers (specialist_research, query_watch, signal_enrichment), the research synthesis and watchlist passes (research_synthesis / research_watchlist), triage, and the chat memory extractor (memory_extractor). Captures `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `cost_usd`, `web_search_requests` (from `usage.server_tool_use`), `stop_reason`, and — inside a research run — the run's `run_id`, so prompt-cache hits are visible per turn, plus `cost_usd` — the actual USD OpenRouter charged for the call (read from `usage.cost`; null on the Anthropic-direct path or for rows logged before cost capture shipped). This is the token-usage + cost source of truth aggregated by both `/audit/sessions/{id}` (per session) and `/audit/usage` (cross-session).
     - memory_snapshot — one row at Executive turn entry; captures the system-block layout, conversation history length, episodic context (full text in `full_json`), and a company-profile hash so the session view can render "what the agent saw" before any API call
     - committee_review — one row per committee-reviewed turn; carries draft length, final length, per-reviewer critiques and timings (previously emitted but newly declared as a recognised event_type)
-    - peer_memory — one row per `openexecutive.memory.honcho_client` call (prefetch / sync_turn / directional_chat / prefetch_department / sync_department_turn / append_department_note); carries `op`, `person_id`, optional `department_slug`, `outcome` (ok / timeout / error / disabled / no_person / no_department / no_loop / empty), `duration_ms`, plus op-specific details (query preview, reasoning_level, peer count, co_present_person_ids, co_present_department_slugs, originating_person_id, target_person_id, session_id, kind) so the flow-chart view renders the peer_memory path alongside `<retrieved_context>` and `<past_decisions>`. Disabled / no-Person / no-Department turns still emit (outcome marker) so audit absence equals "code path never ran" instead of "the provider was down."
+    - peer_memory — one row per `openexecutive.memory.honcho_client` call (prefetch / sync_turn / seed_identity / directional_chat / prefetch_department / sync_department_turn / append_department_note); carries `op`, `person_id`, optional `department_slug`, `outcome` (ok / timeout / error / disabled / no_person / no_department / no_loop / empty), `duration_ms`, plus op-specific details (query preview, reasoning_level, peer count, co_present_person_ids, co_present_department_slugs, originating_person_id, target_person_id, session_id, kind) so the flow-chart view renders the peer_memory path alongside `<retrieved_context>` and `<past_decisions>`. Disabled / no-Person / no-Department turns still emit (outcome marker) so audit absence equals "code path never ran" instead of "the provider was down."
     - external_signal_received — one row per signal an external-monitor adapter wrote to `external_signals`. Carries `signal_id`, `watchlist_id`, `watchlist_slug`, `source_kind`, `severity_hint`, `dedup_key`. The audit trail of what the monitor noticed, separate from what it surfaced.
     - external_signal_deferred — one row per poll that skipped entries whose published_at is more than the row's future-skew tolerance ahead (aggregated — `count`, `future_skew_hours`, `race_tick`, and up to 10 `entries` each with `dedup_key`, `published_at`, `summary` and `provenance_url`, so an operator can tell WHAT was held back). Emitted from the scan loop's finally, so it survives a poll that raises later in the same row. A deferred entry is by design NOT written to external_signals (that would burn its dedup key and mute it for good), so this row is its only trace until its date passes and it is judged normally.
     - external_signal_promoted — one row per signal promoted into the alerts pipeline (post-suppression cascade). Carries `signal_id`, `watchlist_id`, `watchlist_slug`, `source_kind`, `severity_hint`, `dedup_key`, `provenance_url`. Pair with `external_signal_received` to compute promotion rate per watchlist row.
@@ -2789,6 +2891,13 @@ integrations:
     to-roster) instead of wasting a turn discovering the outbound
     block. The outbound gate at ``mcp_gateway._check_gmail_recipients``
     is the actual security boundary against auto-replying to spam.
+    Like every other channel adapter, the poller calls
+    ``Executive.chat`` on the standard path — it does NOT force
+    ``committee_review=True``. Committee review is a per-request
+    opt-in on ``/chat`` only; it was previously forced on for every
+    inbound email (at least 5 model calls per message, ``medium`` Honcho
+    prefetch) and removed because the revision pass never reaches
+    Gmail anyway (outbound mail is sent from the draft's tool loop).
   slack: |
     openexecutive.integrations.slack_bot — async Bolt socket-mode
     adapter (``AsyncApp`` + ``AsyncSocketModeHandler``) embedded in the
