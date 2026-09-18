@@ -18,7 +18,10 @@ Three more columns, same idempotent ALTER:
                               gate is pause-only and nothing will continue it
   resumed_at        TEXT    — ISO timestamp a resume was claimed at, so a
                               worker that dies mid-resume can be found again
-  resume_attempts   INTEGER — bounded retries for that requeue
+  resume_attempts   INTEGER — bounded retries for that requeue, reset at each
+                              new gate (a new gate is new work, not a retry)
+  resume_claim      TEXT    — fencing token for the live claim; a worker's
+                              terminal write is refused once it is superseded
 
 New status values beyond running/done/error:
   awaiting_human — paused, waiting for a human reply
@@ -32,6 +35,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -80,6 +84,11 @@ def initialize_runs_db(db_path: Path | None = None) -> None:
             ("resume_state_json", "TEXT"),
             ("resumed_at", "TEXT"),
             ("resume_attempts", "INTEGER NOT NULL DEFAULT 0"),
+            # Fencing token for the current claim. A worker writes its
+            # terminal row only if this still matches what it claimed with,
+            # so a worker wrongly declared dead cannot overwrite the one that
+            # replaced it.
+            ("resume_claim", "TEXT"),
         ):
             if col not in existing:
                 try:
@@ -262,23 +271,43 @@ def save_checkpoint(
     db_path: Path | None = None,
     *,
     resume_state_json: str | None = None,
-) -> None:
+    expect_claim: str | None = None,
+) -> bool:
     """Persist a WaitForHuman pause point and mark the run awaiting_human.
 
     ``resume_state_json`` is keyword-only and defaulted so every existing
     positional caller keeps working; NULL leaves the gate pause-only.
 
-    ``resolution_json`` and ``resumed_at`` are CLEARED here, which is what
-    makes a *second* gate correct: a run resumed past gate 1 still carries
-    gate 1's resolution and claim timestamp, and leaving them would let the
-    stale-resume sweep and the executor act on gate 1's answer at gate 2.
+    ``resolution_json``, ``resumed_at``, ``resume_claim`` and
+    ``resume_attempts`` are all CLEARED here, which is what makes a *second*
+    gate correct. A run resumed past gate 1 still carries gate 1's resolution
+    and claim, and leaving those would let the stale-resume sweep and the
+    executor act on gate 1's answer at gate 2. ``resume_attempts`` resets
+    because a new gate is a new unit of work, not a retry of the last one —
+    counting gates against the crash-recovery budget would leave a three-gate
+    workflow with none by its final gate.
+
+    Gate 1's decision is not lost by the clear: the engine records it as the
+    gate step's own output, so it travels on inside the new
+    ``resume_state_json`` and lands in the artifact.
+
+    ``expect_claim`` fences a SECOND-gate checkpoint: pass the token the
+    caller claimed with and the write is refused if that claim has since been
+    superseded, so a worker wrongly declared dead cannot park a run the live
+    worker has already finished. Returns whether a row was written.
     """
     initialize_runs_db(db_path)  # _resolve happens inside
     now = datetime.now(UTC).isoformat()
     until_str = awaiting_until.isoformat() if awaiting_until else None
+    clause = " AND resume_claim = ?" if expect_claim is not None else ""
+    params: list[Any] = [
+        state_json, awaiting_person_id, until_str, resume_state_json, now, run_id
+    ]
+    if expect_claim is not None:
+        params.append(expect_claim)
     with _get_conn(_resolve(db_path)) as conn:
-        conn.execute(
-            """
+        cur = conn.execute(
+            f"""
             UPDATE workflow_runs
                SET status = 'awaiting_human',
                    state_json = ?,
@@ -287,18 +316,14 @@ def save_checkpoint(
                    resume_state_json = ?,
                    resolution_json = NULL,
                    resumed_at = NULL,
+                   resume_claim = NULL,
+                   resume_attempts = 0,
                    updated_at = ?
-             WHERE run_id = ?
+             WHERE run_id = ?{clause}
             """,
-            (
-                state_json,
-                awaiting_person_id,
-                until_str,
-                resume_state_json,
-                now,
-                run_id,
-            ),
+            params,
         )
+        return cur.rowcount > 0
 
 
 def load_checkpoint(
@@ -407,14 +432,58 @@ def list_resumable_runs(
     return out
 
 
-def claim_run_for_resume(run_id: str, db_path: Path | None = None) -> bool:
+def claim_run_for_resume(run_id: str, db_path: Path | None = None) -> str | None:
     """Atomically take ownership of a resolved run: resolved -> running.
 
-    This single guarded UPDATE is what prevents double execution. The resumer
-    poll and the immediate post-resolution kick both call it, and whichever
-    loses the race sees rowcount 0 and does nothing. `resumed_at` stamps the
-    claim so a worker that dies mid-resume leaves a findable row rather than
-    an orphan stuck in `running` forever.
+    Returns a fencing token on success, or None if another worker won the race
+    or the row moved on. This single guarded UPDATE is what prevents double
+    execution between the resumer poll and the immediate post-resolution kick.
+
+    The token matters because the claim is not a lease and cannot be: the
+    stale sweep decides a worker is dead from a wall-clock guess, and a slow
+    but ALIVE worker will eventually be declared dead and replaced. Terminal
+    writes carry the token so the superseded worker's late `complete_run` (or
+    worse, its `save_checkpoint` at a later gate) is refused instead of
+    overwriting — or resurrecting — the run the replacement finished.
+    """
+    if not _resolve(db_path).exists():
+        return None
+    now = datetime.now(UTC).isoformat()
+    token = uuid.uuid4().hex
+    with _get_conn(_resolve(db_path)) as conn:
+        cur = conn.execute(
+            """
+            UPDATE workflow_runs
+               SET status = 'running',
+                   resumed_at = ?,
+                   resume_claim = ?,
+                   resume_attempts = resume_attempts + 1,
+                   updated_at = ?
+             WHERE run_id = ?
+               AND status = 'resolved'
+               AND resume_state_json IS NOT NULL
+            """,
+            (now, token, now, run_id),
+        )
+        return token if cur.rowcount > 0 else None
+
+
+def finish_resumed_run(
+    run_id: str,
+    claim: str,
+    *,
+    artifact: str | None = None,
+    error: str | None = None,
+    db_path: Path | None = None,
+) -> bool:
+    """Write a resumed run's terminal row, but only if the claim still holds.
+
+    The fenced counterpart to `complete_run` / `fail_run`, which have no status
+    guard at all. Without the fence a worker the stale sweep replaced could
+    land its result on top of the replacement's, or flip an already-`done` run
+    back to `error`. Also clears the resume payload, so the row cannot be
+    re-claimed. Returns False when the claim was superseded — the caller
+    should do nothing further.
     """
     if not _resolve(db_path).exists():
         return False
@@ -423,15 +492,23 @@ def claim_run_for_resume(run_id: str, db_path: Path | None = None) -> bool:
         cur = conn.execute(
             """
             UPDATE workflow_runs
-               SET status = 'running',
-                   resumed_at = ?,
-                   resume_attempts = resume_attempts + 1,
+               SET status = ?,
+                   artifact = COALESCE(?, artifact),
+                   error = ?,
+                   resume_state_json = NULL,
+                   resumed_at = NULL,
+                   resume_claim = NULL,
                    updated_at = ?
-             WHERE run_id = ?
-               AND status = 'resolved'
-               AND resume_state_json IS NOT NULL
+             WHERE run_id = ? AND status = 'running' AND resume_claim = ?
             """,
-            (now, now, run_id),
+            (
+                "done" if artifact is not None else "error",
+                artifact,
+                error,
+                now,
+                run_id,
+                claim,
+            ),
         )
         return cur.rowcount > 0
 
@@ -446,8 +523,8 @@ def clear_resume_state(run_id: str, db_path: Path | None = None) -> None:
         return
     with _get_conn(_resolve(db_path)) as conn:
         conn.execute(
-            "UPDATE workflow_runs SET resume_state_json = NULL, resumed_at = NULL "
-            "WHERE run_id = ?",
+            "UPDATE workflow_runs SET resume_state_json = NULL, resumed_at = NULL, "
+            "resume_claim = NULL WHERE run_id = ?",
             (run_id,),
         )
 
@@ -484,11 +561,44 @@ def list_stale_resuming_runs(
     return [r[0] for r in rows]
 
 
+def list_exhausted_resuming_runs(
+    older_than: datetime,
+    max_attempts: int = 3,
+    db_path: Path | None = None,
+) -> list[str]:
+    """Stranded resumes that have used up their retry budget.
+
+    The companion to `list_stale_resuming_runs`, and the reason the bound is
+    not simply a filter: a run that exceeds it drops out of that query, but it
+    is `running` with a payload, so `list_resumable_runs` (which wants
+    `resolved`) never sees it either. Without this it would sit in `running`
+    forever, showing as in-progress on /jobs, in no queue at all.
+    """
+    if not _resolve(db_path).exists():
+        return []
+    with _get_conn(_resolve(db_path)) as conn:
+        rows = conn.execute(
+            """
+            SELECT run_id FROM workflow_runs
+             WHERE status = 'running'
+               AND resume_state_json IS NOT NULL
+               AND resumed_at IS NOT NULL
+               AND resumed_at < ?
+               AND resume_attempts >= ?
+             ORDER BY resumed_at
+            """,
+            (older_than.isoformat(), max_attempts),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
 def requeue_run_for_resume(run_id: str, db_path: Path | None = None) -> bool:
     """running -> resolved, so the next tick re-claims it. Guarded, idempotent.
 
-    `resume_attempts` is NOT reset — it is the bound that stops a run which
-    reliably kills its worker from being retried forever.
+    `resume_attempts` is NOT reset here — it is the bound that stops a run
+    which reliably kills its worker from being retried forever. It IS reset by
+    `save_checkpoint`, because reaching a new gate is new work rather than
+    another attempt at the last one.
     """
     if not _resolve(db_path).exists():
         return False
@@ -496,7 +606,10 @@ def requeue_run_for_resume(run_id: str, db_path: Path | None = None) -> bool:
     with _get_conn(_resolve(db_path)) as conn:
         cur = conn.execute(
             "UPDATE workflow_runs SET status = 'resolved', resumed_at = NULL, "
-            "updated_at = ? "
+            # Breaking the claim is the point: the worker we just declared
+            # dead may in fact be alive, and this is what stops its late
+            # write from landing on the replacement's work.
+            "resume_claim = NULL, updated_at = ? "
             "WHERE run_id = ? AND status = 'running' "
             "AND resume_state_json IS NOT NULL",
             (now, run_id),

@@ -32,6 +32,7 @@ from the same loop, with a fresh payload.
 """
 from __future__ import annotations
 
+import hashlib
 import string
 from collections.abc import AsyncIterator
 from typing import Any
@@ -56,8 +57,9 @@ from openexecutive.workflows.dynamic_models import (
     SynthesisStepSpec,
 )
 from openexecutive.workflows.wait_for_human import (
+    CONTINUE_DECISIONS,
     DECISION_VERBS,
-    STOP_DECISIONS,
+    NON_APPROVAL_SHAPES,
     WaitForHumanEvent,
     WaitForHumanResolution,
     WorkflowResumeState,
@@ -66,6 +68,11 @@ from openexecutive.workflows.wait_for_human import (
 # Synthetic first step every dynamic workflow runs — loads the company profile
 # and surfaces a "Load context" row in the UI, mirroring the built-ins.
 _CONTEXT_STEP_ID = "context"
+
+# Cap on the approver's own text carried into the artifact — and therefore
+# into the synthesis specialist's prompt. A decision needs a sentence or two
+# of reasoning; anything longer is not a sign-off note.
+_MAX_REPLY_CHARS = 500
 
 
 class _FlatFormatter(string.Formatter):
@@ -255,12 +262,17 @@ class DynamicWorkflow(Workflow):
         )
 
         decision = str(resolution.parsed_decision.get("decision") or "")
-        if decision in STOP_DECISIONS:
-            # The human said no (or not yet). Everything after the gate exists
-            # to act on a yes, so stop rather than produce the deliverable they
-            # just declined. The full decision stays in `resolution_json`.
+        if not _may_continue(gate, decision):
+            # Not a recognisable yes, so stop rather than produce the
+            # deliverable they did not approve. Everything after the gate
+            # exists to act on an approval. The full decision — including a
+            # verdict we did not recognise — stays in `resolution_json`.
             note = str(resolution.parsed_decision.get("note") or "").strip()
-            verb = DECISION_VERBS.get(decision, decision or "declined")
+            verb = DECISION_VERBS.get(decision) or (
+                f"Stopped on an unrecognised decision {decision!r}"
+                if decision
+                else "Stopped with no decision recorded"
+            )
             yield WorkflowEvent(
                 type="error",
                 message=(
@@ -270,8 +282,12 @@ class DynamicWorkflow(Workflow):
             )
             return
 
-        # Close the `step_start` the original run emitted for this gate, and
-        # give the synthesis step the decision as a readable section.
+        # Give the synthesis step the decision as a readable section, and
+        # close the gate's step in the event stream for symmetry with a fresh
+        # run. Nothing consumes these events on the resume path today — the
+        # original SSE socket closed hours ago and the run-detail page polls
+        # JSON — but `resume()` yields the same shape `run()` does so any
+        # future consumer (a reconnecting stream) needs no special case.
         outputs: dict[str, tuple[str, str]] = dict(state.outputs)
         outputs[gate.id] = (gate.title, _format_resolution(gate, resolution))
         yield WorkflowEvent(
@@ -281,7 +297,10 @@ class DynamicWorkflow(Workflow):
         )
 
         async for event in self._run_steps(
-            start_index=state.next_step_index,
+            # DERIVED from the validated gate index, never read from the
+            # payload: a stored cursor is a second source of truth, and the
+            # copy an attacker can edit would be the one we obeyed.
+            start_index=state.gate_step_index + 1,
             values=values,
             company_block=company_block,
             outputs=outputs,
@@ -310,6 +329,14 @@ class DynamicWorkflow(Workflow):
             return None
         step = self._defn.steps[state.gate_step_index]
         if not isinstance(step, ApprovalGateStepSpec) or step.id != state.gate_step_id:
+            return None
+        # The gate being where we left it is NOT enough. Someone can keep the
+        # gate identical and replace every step after it while the run is
+        # parked, so the approver's yes lands on work they never saw. Pin the
+        # whole list. (An empty fingerprint is a payload written before this
+        # check existed; refuse it rather than grandfather a gap in the very
+        # control this is protecting.)
+        if state.steps_fingerprint != _steps_fingerprint(self._defn):
             return None
         return step
 
@@ -392,7 +419,7 @@ class DynamicWorkflow(Workflow):
                         workflow_name=self.name,
                         gate_step_id=step.id,
                         gate_step_index=index,
-                        next_step_index=index + 1,
+                        steps_fingerprint=_steps_fingerprint(self._defn),
                         # Copy: the caller serialises this after we return, and
                         # a live reference would keep mutating under it if the
                         # loop ever continued.
@@ -419,6 +446,30 @@ class DynamicWorkflow(Workflow):
 # ---------------------------------------------------------------------------
 # Internal helpers (mirror the private helpers in the hand-written workflows)
 # ---------------------------------------------------------------------------
+
+
+def _steps_fingerprint(defn: DynamicWorkflowDef) -> str:
+    """A stable digest of a definition's step list.
+
+    Covers the steps only — not the title, cadence or description — because
+    those do not change what a resumed run will DO. Serialised through the
+    Pydantic models so field order is fixed and a semantically identical
+    definition fingerprints identically across processes.
+    """
+    body = "\n".join(step.model_dump_json() for step in defn.steps)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _may_continue(step: ApprovalGateStepSpec, decision: str) -> bool:
+    """Whether a resumed run may proceed past this gate.
+
+    Fails closed for approve/reject gates: only a recognised approval
+    continues. The other reply shapes are questions, not permission, so their
+    answer is data and the run always continues.
+    """
+    if step.expected_reply_shape in NON_APPROVAL_SHAPES:
+        return True
+    return decision in CONTINUE_DECISIONS
 
 
 def _stale_error(stale: list[tuple[str, str]]) -> WorkflowEvent:
@@ -451,24 +502,39 @@ def _format_resolution(
     shape = step.expected_reply_shape
     lines: list[str] = []
 
+    def _quote(text: str) -> str:
+        """Fence the human's own words before they reach a specialist prompt.
+
+        This section becomes a "section draft" handed to the synthesis
+        specialist, so anything the approver wrote arrives as prompt context.
+        Label it as data and cap it: a `free_text` gate otherwise passes the
+        whole reply through (Slack allows tens of thousands of characters),
+        and an approver could reshape the artifact by writing instructions
+        into their answer.
+        """
+        clean = " ".join(str(text).split())
+        if len(clean) > _MAX_REPLY_CHARS:
+            clean = clean[: _MAX_REPLY_CHARS - 1].rstrip() + "…"
+        return f"> {clean}" if clean else ""
+
     if shape == "numeric":
         value = parsed.get("value")
         unit = str(parsed.get("unit") or "").strip()
         rendered = "no value given" if value is None else f"{value}{' ' + unit if unit else ''}"
         lines.append(f"**Answer:** {rendered}")
     elif shape == "free_text":
-        lines.append(str(parsed.get("text") or resolution.reply_text or "").strip())
+        lines.append(_quote(parsed.get("text") or resolution.reply_text or ""))
     elif shape == "document":
         preview = str(parsed.get("text_preview") or "").strip()
         lines.append("**Document received.**" if parsed.get("received") else "**No document received.**")
         if preview:
-            lines.append(f"\n{preview}")
+            lines.append("\n" + _quote(preview))
     else:  # approve_reject
         decision = str(parsed.get("decision") or "")
         lines.append(f"**{DECISION_VERBS.get(decision, 'Recorded')}**")
         note = str(parsed.get("note") or "").strip()
         if note:
-            lines.append(f"\n{note}")
+            lines.append("\n" + _quote(note))
 
     if str(parsed.get("decision") or "") == "auto_proceed":
         lines.append(

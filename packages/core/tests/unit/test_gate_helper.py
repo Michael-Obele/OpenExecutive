@@ -76,7 +76,7 @@ def _resume_state() -> WorkflowResumeState:
         workflow_name="weekly_watch",
         gate_step_id="gate",
         gate_step_index=1,
-        next_step_index=2,
+        steps_fingerprint="deadbeef",
         outputs={"research": ("Research", "body")},
     )
 
@@ -142,7 +142,7 @@ async def test_resume_payload_goes_to_its_own_column_not_state_json(
     assert "resume_state" not in json.loads(row["state_json"])
     stored = json.loads(row["resume_state_json"])
     assert stored["gate_step_id"] == "gate"
-    assert stored["next_step_index"] == 2
+    assert stored["gate_step_index"] == 1
 
 
 @pytest.mark.asyncio

@@ -10,11 +10,20 @@ advertised as awaiting a reply nobody was asked for, or checkpointed without
 the routing fields the inbound resolver matches against.
 
 ``ensure_workflow_event`` is the other half. Nine more sites iterate a
-workflow's event stream and cannot pause. None can reach a dynamic workflow
-today, so none can see a gate — but that is a property of today's registry,
-not of their code, and the failure mode if it ever changes is a run that
-silently drops every step after the gate (or an opaque ``AttributeError`` on
-``event.type``). The guard makes that a loud, named failure instead.
+workflow's event stream and cannot pause. Eight of them run a fixed built-in
+from ``WORKFLOW_REGISTRY`` and so cannot reach a dynamic workflow at all —
+for those the guard is defensive, protecting a property of today's registry
+rather than of their code. The ninth,
+``scheduler.runner._run_dynamic_workflow``, genuinely CAN be handed a gate: it
+is the cadence branch, and although ``validate_definition`` forbids gates in
+cadence-enabled definitions, one saved before that rule (or edited while a
+scheduled row was pending) still lands there. For it this is a live behaviour
+change — it previously ignored the gate and stored a completed run whose body
+was ``"(no artifact)"``, a phantom success every period.
+
+Either way the failure mode without the guard is a run that silently drops
+every step after the gate, or an opaque ``AttributeError`` on ``event.type``.
+The guard makes it a loud, named failure instead.
 """
 from __future__ import annotations
 
@@ -36,6 +45,10 @@ logger = logging.getLogger(__name__)
 
 class UnsupportedGateError(RuntimeError):
     """A workflow raised an approval gate at a runner that cannot pause."""
+
+
+class ClaimSupersededError(RuntimeError):
+    """A fenced checkpoint was refused: this worker no longer owns the run."""
 
 
 class GatePause(BaseModel):
@@ -63,6 +76,7 @@ async def checkpoint_gate(
     workflow_title: str = "",
     now: datetime | None = None,
     db_path: Path | None = None,
+    expect_claim: str | None = None,
 ) -> GatePause:
     """Deliver an approval gate's question and persist the pause.
 
@@ -77,6 +91,11 @@ async def checkpoint_gate(
     checkpointed is invisible to the resumer and the inbound resolver, and
     would sit in `running` forever. Delivery failures do not raise (see
     `gate_delivery`); they come back as `delivery` for the caller to relay.
+
+    `expect_claim` is for the resumer parking a run at a SECOND gate: it
+    fences the write on the claim the caller is executing under, and raises
+    `ClaimSupersededError` if that claim has been taken over. Callers that are
+    not resuming omit it, and for them the fence can never fire.
     """
     until = (now or datetime.now(UTC)) + timedelta(hours=event.timeout_hours)
     # Module-qualified, not a from-import: tests patch
@@ -92,7 +111,7 @@ async def checkpoint_gate(
     resume_state_json = (
         gate.resume_state.model_dump_json() if gate.resume_state is not None else None
     )
-    save_checkpoint(
+    written = save_checkpoint(
         run_id=run_id,
         # `resume_state` is excluded at the field level, so this is exactly the
         # checkpoint shape the inbound resolver reads.
@@ -101,7 +120,16 @@ async def checkpoint_gate(
         awaiting_until=until,
         db_path=db_path,
         resume_state_json=resume_state_json,
+        expect_claim=expect_claim,
     )
+    if not written:
+        # Only reachable with a fence: an unfenced checkpoint either writes or
+        # raises. Raising keeps the return type honest for the two callers
+        # that never fence, instead of making them narrow an Optional they
+        # can't actually receive.
+        raise ClaimSupersededError(
+            f"run {run_id}: checkpoint refused, the resume claim was superseded"
+        )
     logger.info(
         "gate: run %s paused for person %s (delivery=%s, resumable=%s)",
         run_id, gate.person_id, delivery, resume_state_json is not None,
@@ -135,6 +163,7 @@ def ensure_workflow_event(event: object, *, site: str) -> WorkflowEvent:
 
 
 __all__ = [
+    "ClaimSupersededError",
     "GatePause",
     "UnsupportedGateError",
     "checkpoint_gate",

@@ -50,16 +50,23 @@ from pathlib import Path
 
 import openexecutive.workflows.persistence as _wf_persistence
 from openexecutive.workflows.wait_for_human import (
+    CONTINUE_DECISIONS,
     DECISION_VERBS,
-    STOP_DECISIONS,
     WaitForHumanResolution,
     WorkflowResumeState,
 )
 
 # How long a claimed resume may sit unfinished before we assume its worker
-# died and requeue it. Generously longer than any real run: a workflow that
-# consults several specialists can legitimately take minutes.
-_RESUME_STALE_AFTER = timedelta(minutes=30)
+# died and requeue it.
+#
+# This is a wall-clock guess, not a lease, so it must clear the worst case
+# comfortably or it forks live work: a definition may hold up to _MAX_STEPS
+# (12) specialist consults, each able to run to the specialist timeout, which
+# is well over half an hour before any retry/backoff. 30 minutes sat inside
+# that range. The fencing token makes a wrong guess survivable — the
+# superseded worker's writes are refused — but duplicated specialist calls are
+# still billed, so the window is set beyond any plausible real run.
+_RESUME_STALE_AFTER = timedelta(minutes=90)
 # Bound on those requeues, so a run that reliably kills its worker stops
 # rather than looping forever.
 _MAX_RESUME_ATTEMPTS = 3
@@ -134,7 +141,12 @@ _ACK_RESUMING = (
 )
 _ACK_STOPPED = (
     "That's recorded, and the run stops there — nothing after the sign-off "
-    "will be produced. Tell me if you'd rather I take it forward anyway."
+    "will be produced. Say the word and I'll start a fresh run when you want "
+    "it."
+    # Deliberately NOT "tell me if you'd rather I take it forward anyway":
+    # there is no path out of `error`, and the resume payload is cleared on
+    # the way there. Offering a follow-up nothing can deliver is the same
+    # class of lie as the wording this replaced.
 )
 _ACK_PAUSE_ONLY = (
     "That's recorded against the sign-off and closes it out. The workflow "
@@ -164,7 +176,10 @@ def resolution_acknowledgement(
 
     if not resumable:
         tail = _ACK_PAUSE_ONLY
-    elif decision in STOP_DECISIONS:
+    elif decision not in CONTINUE_DECISIONS:
+        # Mirrors the engine: anything that is not a recognised approval stops
+        # the run, so the acknowledgement must say so rather than promising
+        # work that will not happen.
         tail = _ACK_STOPPED
     else:
         tail = _ACK_RESUMING
@@ -191,8 +206,12 @@ def _abandon_resume(run_id: str, reason: str, db_path: Path | None = None) -> No
     """
     import contextlib
 
+    # `db_path` on BOTH: passing it to one and not the other would write the
+    # terminal row to the default DB while clearing the payload in the real
+    # one, leaving the run `running` with no payload — in neither queue, which
+    # is precisely the stranding this function exists to prevent.
     with contextlib.suppress(Exception):
-        _wf_persistence.fail_run(run_id, reason)
+        _wf_persistence.fail_run(run_id, reason, db_path=db_path)
     with contextlib.suppress(Exception):
         _wf_persistence.clear_resume_state(run_id, db_path=db_path)
 
@@ -213,11 +232,12 @@ def _kick_resume(run_id: str, db_path: Path | None = None) -> None:
 
     async def _run() -> None:
         try:
-            if not _wf_persistence.claim_run_for_resume(run_id, db_path=db_path):
+            claim = _wf_persistence.claim_run_for_resume(run_id, db_path=db_path)
+            if claim is None:
                 return
             row = _load_resumable_row(run_id, db_path=db_path)
             if row is not None:
-                await _execute_resume(row, db_path=db_path)
+                await _execute_resume(row, claim, db_path=db_path)
         except Exception:
             logger.exception("resumer: kicked resume failed for run_id=%s", run_id)
             _abandon_resume(run_id, "resume failed unexpectedly", db_path=db_path)
@@ -252,8 +272,9 @@ async def _process_resumable(now: datetime, db_path: Path | None = None) -> int:
 
     # Crash recovery first, so a run stranded by a dead worker is back in the
     # queue before we read it.
+    cutoff = now - _RESUME_STALE_AFTER
     for stale_id in _wf_persistence.list_stale_resuming_runs(
-        now - _RESUME_STALE_AFTER, _MAX_RESUME_ATTEMPTS, db_path=db_path
+        cutoff, _MAX_RESUME_ATTEMPTS, db_path=db_path
     ):
         if _wf_persistence.requeue_run_for_resume(stale_id, db_path=db_path):
             logger.warning(
@@ -261,22 +282,38 @@ async def _process_resumable(now: datetime, db_path: Path | None = None) -> int:
                 stale_id,
             )
 
+    # A run past its retry budget leaves the stale query but is still
+    # `running` with a payload, so nothing else would ever look at it again.
+    # End it, loudly, rather than letting it show as in-progress forever.
+    for dead_id in _wf_persistence.list_exhausted_resuming_runs(
+        cutoff, _MAX_RESUME_ATTEMPTS, db_path=db_path
+    ):
+        logger.error(
+            "resumer: run %s failed to resume after %d attempts — giving up",
+            dead_id, _MAX_RESUME_ATTEMPTS,
+        )
+        _abandon_resume(
+            dead_id,
+            f"resume did not complete after {_MAX_RESUME_ATTEMPTS} attempts",
+            db_path=db_path,
+        )
+
     executed = 0
     for row in _wf_persistence.list_resumable_runs(db_path=db_path):
         run_id = row["run_id"]
         try:
-            claimed = _wf_persistence.claim_run_for_resume(run_id, db_path=db_path)
+            claim = _wf_persistence.claim_run_for_resume(run_id, db_path=db_path)
         except sqlite3.OperationalError:
             # The DB is shared with the scheduler, the API and the chat bots.
             # A lock here means "someone else is writing", not "this run is
             # broken" — leave it for the next tick rather than failing it.
             logger.warning("resumer: database busy claiming run %s — next tick", run_id)
             continue
-        if not claimed:
+        if claim is None:
             continue  # a kick, or another worker, got there first
         try:
-            await _execute_resume(row, db_path=db_path)
-            executed += 1
+            if await _execute_resume(row, claim, db_path=db_path):
+                executed += 1
         except Exception:
             logger.exception("resumer: resume failed for run_id=%s", run_id)
             _abandon_resume(run_id, "resume failed unexpectedly", db_path=db_path)
@@ -285,11 +322,18 @@ async def _process_resumable(now: datetime, db_path: Path | None = None) -> int:
     return executed
 
 
-async def _execute_resume(row: dict, db_path: Path | None = None) -> None:
+async def _execute_resume(
+    row: dict, claim: str, db_path: Path | None = None
+) -> bool:
     """Drive one claimed run's remaining steps to a terminal state.
 
-    Assumes the caller already won `claim_run_for_resume`, so the row is ours
-    and sits in `running`.
+    `claim` is the fencing token from `claim_run_for_resume`; every write here
+    carries it, so if the stale sweep declared this worker dead and handed the
+    run to another, our writes are refused rather than landing on theirs.
+
+    Returns True when the run reached a terminal state, False when it paused
+    again at a later gate or our claim was superseded — so the caller's
+    "executed N" count means completions, not merely claims.
     """
     import contextlib
 
@@ -299,7 +343,10 @@ async def _execute_resume(row: dict, db_path: Path | None = None) -> None:
     from openexecutive.workflows import get_workflow
     from openexecutive.workflows.dynamic import DynamicWorkflow
     from openexecutive.workflows.dynamic_store import get_definition
-    from openexecutive.workflows.gate import checkpoint_gate
+    from openexecutive.workflows.gate import (
+        ClaimSupersededError,
+        checkpoint_gate,
+    )
     from openexecutive.workflows.wait_for_human import WaitForHumanEvent
 
     run_id = row["run_id"]
@@ -314,7 +361,7 @@ async def _execute_resume(row: dict, db_path: Path | None = None) -> None:
     except Exception:
         logger.exception("resumer: unreadable resume payload for run %s", run_id)
         _abort("the stored resume payload could not be read")
-        return
+        return True
 
     resolution = _resolution_from_row(row, run_id)
 
@@ -331,7 +378,7 @@ async def _execute_resume(row: dict, db_path: Path | None = None) -> None:
             + ("deactivated" if definition is not None else "deleted")
             + " while this run was awaiting approval"
         )
-        return
+        return True
 
     if not isinstance(workflow, DynamicWorkflow):
         # `get_workflow` checks the built-in registry first, so a dynamic
@@ -339,13 +386,13 @@ async def _execute_resume(row: dict, db_path: Path | None = None) -> None:
         _abort(
             f"{name!r} is no longer a custom workflow, so this run cannot be resumed"
         )
-        return
+        return True
 
     try:
         inputs = workflow.input_model().model_validate(row["inputs"])
     except Exception as exc:
         _abort(f"the workflow's inputs no longer validate: {exc}")
-        return
+        return True
 
     store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
     artifact = ""
@@ -360,12 +407,23 @@ async def _execute_resume(row: dict, db_path: Path | None = None) -> None:
             # other runners use: that flips running -> awaiting_human,
             # stores the fresh payload, and clears gate 1's resolution so
             # this run is not immediately re-claimed on its old answer.
-            await checkpoint_gate(
-                run_id=run_id,
-                event=event,
-                workflow_title=workflow.title,
-                db_path=db_path,
-            )
+            try:
+                await checkpoint_gate(
+                    run_id=run_id,
+                    event=event,
+                    workflow_title=workflow.title,
+                    db_path=db_path,
+                    expect_claim=claim,
+                )
+            except ClaimSupersededError:
+                # Another worker has already taken this run somewhere. Parking
+                # it now would resurrect whatever they finished.
+                logger.warning(
+                    "resumer: run %s lost its claim before a later gate — "
+                    "discarding this worker's result",
+                    run_id,
+                )
+                return False
             audit_log(
                 "workflow_resume",
                 f"run {run_id} resumed and paused again at a later gate",
@@ -377,24 +435,32 @@ async def _execute_resume(row: dict, db_path: Path | None = None) -> None:
                     "outcome": "awaiting_human",
                 },
             )
-            return
+            return False
         if event.type == "artifact" and event.content:
             artifact = event.content
         elif event.type == "error" and event.message:
             last_error = event.message
 
     decision = str(resolution.parsed_decision.get("decision") or "")
-    if artifact:
-        with contextlib.suppress(Exception):
-            _wf_persistence.complete_run(run_id, artifact)
-        outcome = "done"
-    else:
-        message = last_error or "resume finished without producing an artifact"
-        with contextlib.suppress(Exception):
-            _wf_persistence.fail_run(run_id, message)
-        outcome = "error"
-    with contextlib.suppress(Exception):
-        _wf_persistence.clear_resume_state(run_id, db_path=db_path)
+    message = "" if artifact else (
+        last_error or "resume finished without producing an artifact"
+    )
+    # One fenced write for both outcomes: it sets the status, clears the
+    # payload, and refuses outright if this worker has been superseded.
+    won = _wf_persistence.finish_resumed_run(
+        run_id,
+        claim,
+        artifact=artifact or None,
+        error=message or None,
+        db_path=db_path,
+    )
+    if not won:
+        logger.warning(
+            "resumer: run %s lost its claim before finishing — result discarded",
+            run_id,
+        )
+        return False
+    outcome = "done" if artifact else "error"
 
     audit_log(
         "workflow_resume",
@@ -410,6 +476,7 @@ async def _execute_resume(row: dict, db_path: Path | None = None) -> None:
         },
     )
     logger.info("resumer: run %s resumed -> %s", run_id, outcome)
+    return True
 
 
 def _resolution_from_row(row: dict, run_id: str) -> WaitForHumanResolution:
@@ -480,7 +547,19 @@ async def _handle_timeout(run: dict, now: datetime) -> None:
                 "alert skipped, run marked timed_out",
                 run_id,
             )
-        _wf_persistence.mark_timed_out(run_id)
+        if not _wf_persistence.mark_timed_out(run_id):
+            # The row moved between `_tick` listing it and us acting: almost
+            # always a reply that arrived in the gap and already resolved it.
+            # Every write below is unguarded, so continuing would discard a
+            # decision a human actually made — clear_resume_state would strip
+            # the payload from a `resolved` run, leaving it queued to resume
+            # with nothing to resume from.
+            logger.info(
+                "resumer: run %s was answered before its timeout was applied "
+                "— leaving the resolution alone",
+                run_id,
+            )
+            return
         # `timed_out` is terminal: nobody answered, so the payload will never
         # be replayed. Dropping it keeps the completed-step text out of a row
         # nothing will read, and keeps the run off the resumable queue.
@@ -498,7 +577,21 @@ async def _handle_timeout(run: dict, now: datetime) -> None:
         await apply_resolution(run_id, auto_resolution)
 
     else:  # "fail"
-        _wf_persistence.fail_run(run_id, f"WaitForHuman timed out (on_timeout=fail) at {now.isoformat()}")
+        # Same race as the escalate branch: `fail_run` has no status guard, so
+        # check the transition first rather than overwriting a resolution that
+        # landed in the gap.
+        if not _wf_persistence.mark_timed_out(run_id):
+            logger.info(
+                "resumer: run %s was answered before its timeout was applied "
+                "— not failing it",
+                run_id,
+            )
+            return
+        _wf_persistence.fail_run(
+            run_id,
+            f"WaitForHuman timed out (on_timeout=fail) at {now.isoformat()}",
+        )
+        _wf_persistence.clear_resume_state(run_id)
 
 
 async def sweep_stale_awaiting(db_path: Path | None = None) -> int:

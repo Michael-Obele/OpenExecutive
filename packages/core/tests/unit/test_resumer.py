@@ -258,15 +258,25 @@ def test_acknowledgement_survives_a_missing_run(tmp_path: Path) -> None:
 # Resume — the background executor
 # ---------------------------------------------------------------------------
 
-_RESUME_STATE = json.dumps({
-    "version": 1,
-    "engine": "dynamic",
-    "workflow_name": "weekly_watch",
-    "gate_step_id": "gate",
-    "gate_step_index": 1,
-    "next_step_index": 2,
-    "outputs": {"research": ["Research", "prior output"]},
-})
+def _resume_state_json(fingerprint: str = "") -> str:
+    """A payload matching the definition `_real_workflow()` builds.
+
+    Most of these tests replace `resume()` outright, so the fingerprint is
+    never checked — but the one that doesn't would fail on a hardcoded value,
+    and a literal here would silently rot the moment that definition changes.
+    """
+    return json.dumps({
+        "version": 1,
+        "engine": "dynamic",
+        "workflow_name": "weekly_watch",
+        "gate_step_id": "gate",
+        "gate_step_index": 1,
+        "steps_fingerprint": fingerprint,
+        "outputs": {"research": ["Research", "prior output"]},
+    })
+
+
+_RESUME_STATE = _resume_state_json()
 
 
 def _resolved(
@@ -363,8 +373,9 @@ def test_resume_executes_remaining_steps_and_completes(
     assert run["artifact"] == "# Final artifact"
     # The payload is dropped so a finished run can never be re-claimed.
     assert run["resume_state_json"] is None
-    # The engine was handed the recorded cursor and the human's decision.
-    assert stub.calls[0]["state"].next_step_index == 2
+    # The engine was handed the recorded gate and the human's decision.
+    assert stub.calls[0]["state"].gate_step_id == "gate"
+    assert stub.calls[0]["state"].gate_step_index == 1
     assert stub.calls[0]["resolution"].parsed_decision["decision"] == "approve"
 
 
@@ -689,3 +700,135 @@ def test_a_gate_as_the_final_step_fails_rather_than_hanging(
     run = wf_persistence.get_run("res-1")
     assert run["status"] == "error"
     assert "without producing an artifact" in run["error"]
+
+
+def test_a_run_past_its_retry_budget_is_ended(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exceeding the cap must be terminal, not a disappearance. The row is
+    `running` with a payload, so it is in neither queue — without this it shows
+    as in-progress on /jobs forever, with nothing coming back for it."""
+    from openexecutive.workflows.resumer import (
+        _MAX_RESUME_ATTEMPTS,
+        _RESUME_STALE_AFTER,
+        _process_resumable,
+    )
+
+    _resolved()
+    for _ in range(_MAX_RESUME_ATTEMPTS):
+        wf_persistence.claim_run_for_resume("res-1")
+        wf_persistence.requeue_run_for_resume("res-1")
+    wf_persistence.claim_run_for_resume("res-1")  # the claim that never returns
+    assert wf_persistence.get_run("res-1")["status"] == "running"
+
+    _install_stub(monkeypatch, _real_workflow())
+    later = datetime.now(UTC) + _RESUME_STALE_AFTER + timedelta(minutes=1)
+    asyncio.run(_process_resumable(later))
+
+    run = wf_persistence.get_run("res-1")
+    assert run["status"] == "error"
+    assert "attempts" in run["error"]
+    assert run["resume_state_json"] is None
+
+
+def test_a_reply_arriving_mid_timeout_is_not_discarded() -> None:
+    """`_tick` lists expired rows, then acts on them. A reply landing in that
+    gap already moved the run to `resolved`; every write in the escalate branch
+    is unguarded, so continuing would strip the payload off a run that is
+    queued to resume — approval recorded, never executed."""
+    from openexecutive.workflows.resumer import _handle_timeout
+
+    _seed_awaiting("race-1", 7, on_timeout="escalate", resume_state=_RESUME_STATE)
+    run = dict(wf_persistence.list_awaiting_runs()[0])  # as _tick would see it
+
+    # The human answers before _handle_timeout gets there.
+    wf_persistence.store_resolution("race-1", json.dumps({"decision": "approve"}))
+
+    asyncio.run(_handle_timeout(run, datetime.now(UTC)))
+
+    row = wf_persistence.get_run("race-1")
+    assert row["status"] == "resolved", "the human's answer must stand"
+    assert row["resume_state_json"] is not None, "and it must still be resumable"
+
+
+def test_a_reply_arriving_mid_fail_timeout_is_not_discarded() -> None:
+    """Same race, the `on_timeout='fail'` branch — `fail_run` has no status
+    guard, so it would overwrite the resolution with `error`."""
+    from openexecutive.workflows.resumer import _handle_timeout
+
+    _seed_awaiting("race-2", 7, on_timeout="fail", resume_state=_RESUME_STATE)
+    run = dict(wf_persistence.list_awaiting_runs()[0])
+    wf_persistence.store_resolution("race-2", json.dumps({"decision": "approve"}))
+
+    asyncio.run(_handle_timeout(run, datetime.now(UTC)))
+
+    assert wf_persistence.get_run("race-2")["status"] == "resolved"
+
+
+def test_a_second_gate_restores_the_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end: reaching gate 2 resets `resume_attempts`, so a multi-gate
+    workflow does not arrive at its last gate with no crash-recovery budget
+    left having never failed at anything."""
+    from openexecutive.workflows.resumer import _process_resumable
+    from openexecutive.workflows.wait_for_human import (
+        WaitForHumanEvent,
+        WorkflowResumeState,
+    )
+
+    _resolved()
+    second = WaitForHumanEvent(
+        person_id=7, question="Ship it?",
+        resume_state=WorkflowResumeState(
+            workflow_name="weekly_watch", gate_step_id="gate2",
+            gate_step_index=3, steps_fingerprint="abc", outputs={},
+        ),
+    )
+    _install_stub(monkeypatch, _real_workflow([second]))
+
+    async def _deliver(event, **_):  # noqa: ANN001, ANN202
+        return event.model_copy(update={"delivery": "sent"}), "sent"
+
+    monkeypatch.setattr(
+        "openexecutive.workflows.gate_delivery.deliver_gate_question", _deliver
+    )
+
+    asyncio.run(_process_resumable(datetime.now(UTC)))
+
+    import sqlite3
+    conn = sqlite3.connect(str(wf_persistence.DB_PATH))
+    attempts = conn.execute(
+        "SELECT resume_attempts FROM workflow_runs WHERE run_id = 'res-1'"
+    ).fetchone()[0]
+    conn.close()
+    assert attempts == 0
+
+
+def test_a_second_gate_pause_is_not_counted_as_a_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`executed` is logged as "executed N resumed run(s)"; a run that merely
+    parked again has not been executed."""
+    from openexecutive.workflows.resumer import _process_resumable
+    from openexecutive.workflows.wait_for_human import (
+        WaitForHumanEvent,
+        WorkflowResumeState,
+    )
+
+    _resolved()
+    second = WaitForHumanEvent(
+        person_id=7, question="Ship it?",
+        resume_state=WorkflowResumeState(
+            workflow_name="weekly_watch", gate_step_id="gate2",
+            gate_step_index=3, steps_fingerprint="abc", outputs={},
+        ),
+    )
+    _install_stub(monkeypatch, _real_workflow([second]))
+
+    async def _deliver(event, **_):  # noqa: ANN001, ANN202
+        return event.model_copy(update={"delivery": "sent"}), "sent"
+
+    monkeypatch.setattr(
+        "openexecutive.workflows.gate_delivery.deliver_gate_question", _deliver
+    )
+
+    assert asyncio.run(_process_resumable(datetime.now(UTC))) == 0

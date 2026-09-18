@@ -52,9 +52,20 @@ class WorkflowResumeState(BaseModel):
     workflow_name: str
     gate_step_id: str
     # Index of the gate itself, re-checked against the live definition on
-    # resume — a definition edited during the pause can move it.
+    # resume — a definition edited during the pause can move it. The index to
+    # continue AT is derived from this on resume, never stored: two copies of
+    # the cursor could disagree, and the one an attacker controls would win.
     gate_step_index: int
-    next_step_index: int
+    # Fingerprint of the ENTIRE step list as it stood when the gate was raised.
+    #
+    # Pinning only the gate is not enough. `upsert_definition` overwrites by
+    # name, and any rostered chat user can call `save_workflow` (or
+    # `PUT /workflows/custom/{name}`), so while a run sits parked someone can
+    # keep the gate exactly where it is and replace every step AFTER it. The
+    # approver then answers the question they were asked, and their sign-off is
+    # recorded against work they never saw — which defeats the one thing an
+    # approval gate exists to do. A mismatch refuses the resume.
+    steps_fingerprint: str = ""
     # step_id -> (step title, output text) for every step completed before the
     # gate. Round-trips through JSON as a 2-array and back to a tuple.
     outputs: dict[str, tuple[str, str]] = Field(default_factory=dict)
@@ -141,15 +152,25 @@ DECISION_VERBS: dict[str, str] = {
     "auto_proceed": "Auto-approved on timeout",
 }
 
-# Decisions that STOP a resumable run rather than continuing it. A human who
-# declined or deferred did not ask for the remaining steps to be paid for and
-# delivered, so the run ends at `error` with their note.
+# Decisions that let a resumable run CONTINUE past an approve/reject gate.
 #
-# Note this is only reachable for a REAL verdict: `inbound_resolver` drops
-# `unrelated` replies and parser fallbacks before `apply_resolution`, so a
-# `defer` arriving here is a person deferring, never a parse failure wearing
-# a defer's clothes.
-STOP_DECISIONS = frozenset({"reject", "defer"})
+# An allowlist, deliberately. `decision` is whatever a fast model extracted
+# from free-form chat text, and models drift: "rejected", "Reject", "decline",
+# "no" are all things it plausibly emits for a refusal. Under a denylist
+# ("stop only on these words") every one of those continues the run — the
+# approver says no and the declined deliverable is produced anyway. An
+# approval gate must fail CLOSED: anything that is not recognisably a yes
+# stops the run.
+#
+# `auto_proceed` is here because the timeout policy synthesises it, and
+# `on_timeout='auto_proceed'` is an explicit instruction from the workflow's
+# author to proceed unattended.
+CONTINUE_DECISIONS = frozenset({"approve", "auto_proceed"})
+
+# Reply shapes that ask a question rather than seek permission. These carry no
+# `decision` at all — the answer IS the value — so there is nothing to fail
+# closed on and the run always continues.
+NON_APPROVAL_SHAPES = frozenset({"free_text", "numeric", "document"})
 
 
 class WaitForHumanResolution(BaseModel):

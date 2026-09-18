@@ -2604,27 +2604,67 @@ workflows:
 
     EXECUTION — `resumer._process_resumable` claims a `resolved` run
     carrying a payload with one guarded UPDATE (`claim_run_for_resume`:
-    resolved -> running, stamping `resumed_at` and incrementing
-    `resume_attempts`), then drives `workflow.resume(...)` to `complete_run`
-    / `fail_run`. It is reached two ways: immediately, via a task
-    `apply_resolution` kicks off so a Slack approval starts in seconds, and
-    from `_tick` every 60s as the durable backstop. Both share the claim, so
-    a run executes exactly once even with two resumers against one database.
-    `_tick` runs the executor AFTER the timeout loop, which is what finally
-    makes `on_timeout='auto_proceed'` do what its name says:
-    `_handle_timeout` resolves the run and the same tick executes it. Crash
-    recovery: a worker that dies mid-resume leaves the run in `running` with
-    a `resumed_at`, which `list_stale_resuming_runs` finds after 30 minutes
-    and requeues, bounded by `_MAX_RESUME_ATTEMPTS`.
+    resolved -> running, stamping `resumed_at`, incrementing
+    `resume_attempts` and minting a `resume_claim` token), then drives
+    `workflow.resume(...)` to a terminal row. It is reached two ways:
+    immediately, via a task `apply_resolution` kicks off so a Slack approval
+    starts in seconds, and from `_tick` every 60s as the durable backstop.
+    Both share the claim, so a run executes exactly once even with two
+    resumers against one database. `_tick` runs the executor AFTER the
+    timeout loop, which is what finally makes `on_timeout='auto_proceed'` do
+    what its name says: `_handle_timeout` resolves the run and the same tick
+    executes it.
 
-    REJECT STOPS THE RUN — `reject` and `defer` (`STOP_DECISIONS`) end the
-    run at `error` with the human's note; `approve` and the synthetic
-    `auto_proceed` continue. The decision becomes the gate step's own output
-    via `dynamic._format_resolution`, so it appears as a section IN the
-    artifact, not only in a database column. A definition edited during the
-    pause is caught before any of that: `resume` re-validates the payload's
-    version/engine/workflow name and that `steps[gate_step_index]` is still
-    the same gate, and refuses rather than resuming at a shifted index.
+    FENCING — the claim is not a lease. The stale sweep decides a worker is
+    dead from a wall-clock guess (`_RESUME_STALE_AFTER`, 90 minutes, set
+    beyond 12 specialist consults at the specialist timeout), so a slow but
+    ALIVE worker can be declared dead and replaced. Every write the executor
+    makes therefore carries the claim token — `finish_resumed_run` and a
+    fenced `save_checkpoint` — and is refused once superseded. Without that,
+    the replaced worker's late `complete_run` lands on top of its
+    replacement's result, or its `save_checkpoint` at a later gate
+    RESURRECTS an already-`done` run to `awaiting_human` and asks the
+    approver a second time. `requeue_run_for_resume` clears the token, which
+    is what breaks the old worker's write.
+
+    RETRY BUDGET — `resume_attempts` bounds the requeue. It is reset by
+    `save_checkpoint`, because reaching a new gate is new work rather than
+    another attempt at the last one; counting gates against it would leave a
+    three-gate workflow with no crash-recovery budget by its final gate,
+    without a single failure. Exceeding the bound is TERMINAL, not a
+    disappearance: an exhausted run is `running` with a payload, so it is in
+    neither queue, and `list_exhausted_resuming_runs` exists so the resumer
+    can end it instead of leaving it showing as in-progress forever.
+
+    THE GATE FAILS CLOSED — continuing is an allowlist
+    (`CONTINUE_DECISIONS` = approve, auto_proceed), not "anything that is not
+    a stop word". `decision` is whatever a fast model extracted from
+    free-form chat, and it drifts: under a denylist, "rejected", "Reject",
+    "decline" and "no" all CONTINUE the run, so the approver declines and the
+    deliverable is produced anyway. Reply shapes that ask a question rather
+    than seek permission (`NON_APPROVAL_SHAPES`) always continue — the answer
+    is the value, there is nothing to fail closed on. A stop ends the run at
+    `error` with the human's note. Either way the decision becomes the gate
+    step's own output via `dynamic._format_resolution`, so it appears as a
+    section IN the artifact; that text is capped and blockquoted because it
+    reaches the synthesis specialist as prompt context.
+
+    A DEFINITION EDITED DURING THE PAUSE — `resume` re-validates the
+    payload's version/engine/workflow name, that `steps[gate_step_index]` is
+    still the same gate, AND a `steps_fingerprint` over the whole step list;
+    the index to continue at is DERIVED (`gate_step_index + 1`), never read
+    from the payload. Pinning only the gate is not enough: `upsert_definition`
+    overwrites by name and any rostered chat user can call `save_workflow`,
+    so someone could keep the gate identical and replace every step after it,
+    and the approver's sign-off would be recorded against work they never
+    saw — defeating the one thing an approval gate is for.
+
+    THE TIMEOUT/REPLY RACE — `_tick` lists expired rows and then acts on
+    them, so a reply can land in the gap. Both terminal branches of
+    `_handle_timeout` check `mark_timed_out`'s guarded result first and bail
+    if it returns False; the writes that follow have no status guard of their
+    own, and continuing would strip the payload off (or overwrite) a run a
+    human had just answered.
 
     NO BUILT-IN workflow yields the gate — `offer_approval` did, and it was
     removed with the talent vertical. (`exec_search_brief` survived that

@@ -123,8 +123,10 @@ async def test_run_pauses_at_approval_gate(monkeypatch: pytest.MonkeyPatch) -> N
     assert state.workflow_name == "weekly_watch"
     assert state.gate_step_id == "gate"
     assert state.gate_step_index == 1
-    assert state.next_step_index == 2
     assert state.outputs == {"research": ("Research", "section")}
+    # Pins the whole step list, not just the gate: a definition edited during
+    # the pause must not be able to swap the steps the approval lands on.
+    assert state.steps_fingerprint
 
 
 @pytest.mark.asyncio
