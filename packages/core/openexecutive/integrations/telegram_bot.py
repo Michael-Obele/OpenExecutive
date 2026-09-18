@@ -224,6 +224,7 @@ async def _process_and_reply(
             logger.exception("Telegram: attachment processing setup failed")
 
     from openexecutive.integrations.channel_context import (
+        attach_briefing_context,
         build_channel_context_block,
     )
     from openexecutive.knowledge.retriever import retrieve
@@ -292,12 +293,21 @@ async def _process_and_reply(
                     user_message=message_text,
                 )
 
+            briefing_context = await asyncio.to_thread(
+                attach_briefing_context,
+                session,
+                # Telegram private chats are 1:1; a group chat is not.
+                is_dm=(str(chat_id).lstrip("-").isdigit() and not str(chat_id).startswith("-")),
+                person=person,
+            )
+
             response = await Executive(mcp_gateway=get_active_gateway()).chat(
                 user_message=chat_user_message,
                 session=session,
                 retrieved_context=retrieved_context,
                 episodic_context=episodic_context,
                 attachment_blocks=att_image_blocks or None,
+                briefing_context=briefing_context,
                 channel_context_block=build_channel_context_block("telegram"),
                 person_id=person_id,
             )

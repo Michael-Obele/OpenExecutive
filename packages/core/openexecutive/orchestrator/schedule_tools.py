@@ -1558,19 +1558,23 @@ async def handle_ack_alert(tool_input: dict[str, Any]) -> str:
     if _origin:
         _trusted = getattr(_session, "trusted_alert_ids", None) or set()
         try:
-            _requested = int(tool_input["alert_id"])
-        except (KeyError, TypeError, ValueError):
+            _requested: int | None = int(tool_input["alert_id"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            # Fail closed. Letting an unparseable id skip the check relies on
+            # the parse further down staying identical to this one forever;
+            # the moment they diverge that is a trust bypass.
             _requested = None
-        if _requested is not None and _requested not in _trusted:
+        if _requested is None or _requested not in _trusted:
             logger.warning(
                 "ack_alert: refused alert_id=%s on channel=%s — not among the "
                 "ids the server showed this turn (%s)",
                 _requested, _origin, sorted(_trusted),
             )
             return json.dumps({"error": (
-                f"alert_id {_requested} was not among the open items you were "
-                "shown this turn, so it cannot be acked from here. If the user "
-                "is asking about it, point them at the briefing page."
+                f"alert_id {tool_input.get('alert_id')!r} was not among the "
+                "open items you were shown this turn, so it cannot be acked "
+                "from here. If the user is asking about it, point them at the "
+                "briefing page."
             )})
 
     from openexecutive.alerts import store as alert_store

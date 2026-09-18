@@ -127,6 +127,19 @@ _SHAPE_PROMPTS: dict[str, str] = {
     ),
 }
 
+# Appended to every shape. Without it only `approve_reject` could decline to
+# answer, and the three other shapes had NO relevance check at all: an open
+# free_text gate turned the person's next unrelated message into its answer
+# and closed the sign-off ("what's on my calendar?" recorded verbatim), and a
+# numeric gate swallowed any message containing a number.
+_UNRELATED_CLAUSE = (
+    '\n\nIF the message is not a response to the question at all — a new '
+    "request, a different topic, small talk, or a reply meant for someone "
+    'else — ignore the shape above and return exactly: {"decision": '
+    '"unrelated"}. Prefer this whenever the message does not read as an '
+    "answer to THIS question."
+)
+
 # Marks a parse_decision result as the fallback rather than a real verdict.
 # The previous sentinel was `note == "parse_error"`, which the model itself
 # can emit — a human replying "no, your parser threw a parse_error" could
@@ -160,7 +173,10 @@ async def parse_decision(
 
     from openexecutive.agents.utility_fast import get_fast_model
 
-    shape_prompt = _SHAPE_PROMPTS.get(expected_shape, _SHAPE_PROMPTS["free_text"])
+    shape_prompt = (
+        _SHAPE_PROMPTS.get(expected_shape, _SHAPE_PROMPTS["free_text"])
+        + _UNRELATED_CLAUSE
+    )
     fallback = _FALLBACKS.get(expected_shape, {"text": ""})
 
     try:

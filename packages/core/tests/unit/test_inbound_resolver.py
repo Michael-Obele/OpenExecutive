@@ -126,7 +126,7 @@ def test_resolve_by_single_candidate_match(tmp_path: Path) -> None:
     with patch("openexecutive.workflows.inbound_resolver.parse_decision", new=AsyncMock(return_value={"decision": "approve", "note": ""})):
         result = _run_resolver(
             channel="slack",
-            channel_ref="U999",
+            channel_ref="U123",
             from_person_id=7,
             text="sounds good",
         )
@@ -142,7 +142,7 @@ def test_resolve_single_candidate_parses_decision(tmp_path: Path) -> None:
     with patch("openexecutive.workflows.inbound_resolver.parse_decision", new=AsyncMock(return_value={"decision": "reject", "note": "too expensive"})):
         result = _run_resolver(
             channel="slack",
-            channel_ref="U100",
+            channel_ref="U123",
             from_person_id=3,
             text="no reject",
         )
@@ -165,7 +165,7 @@ def test_resolve_returns_none_when_multiple_candidates_no_llm(tmp_path: Path) ->
     ):
         result = _run_resolver(
             channel="slack",
-            channel_ref="U200",
+            channel_ref="U123",
             from_person_id=2,
             text="ok",
         )
@@ -183,7 +183,7 @@ def test_resolve_tier3_high_confidence_returns_match(tmp_path: Path) -> None:
     ), patch("openexecutive.workflows.inbound_resolver.parse_decision", new=AsyncMock(return_value={"decision": "approve", "note": ""})):
         result = _run_resolver(
             channel="slack",
-            channel_ref="U200",
+            channel_ref="U123",
             from_person_id=2,
             text="yes this one",
         )
@@ -606,3 +606,57 @@ def test_a_gate_accepts_an_aliased_session_id() -> None:
         )
 
     assert result is not None
+
+
+def test_unreadable_state_json_is_not_wildcard_matched() -> None:
+    """A corrupt row has no channel and no `delivery` key — the same shape as
+    a legacy row — so the compat wildcard would have matched any message from
+    that person on any channel."""
+    db = episodic.DB_PATH
+    wf_persistence.create_run("run-1", "test_wf", "Test", {}, db_path=db)
+    until = datetime.now(UTC) + timedelta(hours=48)
+    wf_persistence.save_checkpoint("run-1", "{not json", 7, until, db_path=db)
+
+    result = _run_resolver(
+        channel="slack", channel_ref="U123", from_person_id=7, text="approved"
+    )
+
+    assert result is None
+
+
+def test_a_dm_scoped_gate_is_not_answerable_from_a_public_channel() -> None:
+    """A gate delivered by DM records that DM's session. Before that it had
+    no session at all and matched on (person, channel) alone, so an unrelated
+    @mention in a public channel resolved it — and the acknowledgement, run
+    title included, was posted there."""
+    db = episodic.DB_PATH
+    _seed_awaiting_run(
+        "run-1",
+        person_id=7,
+        channel="slack",
+        origin_session_id="slack:dm:U123",
+        delivery="sent",
+        db=db,
+    )
+
+    public = _run_resolver(
+        channel="slack",
+        channel_ref="U123",
+        from_person_id=7,
+        text="sounds good",
+        session_ids=["slack:channel:C1:U123"],
+    )
+    assert public is None
+
+    with patch(
+        "openexecutive.workflows.inbound_resolver.parse_decision",
+        new=AsyncMock(return_value=_APPROVE),
+    ):
+        in_dm = _run_resolver(
+            channel="slack",
+            channel_ref="U123",
+            from_person_id=7,
+            text="sounds good",
+            session_ids=["slack:dm:U123"],
+        )
+    assert in_dm is not None

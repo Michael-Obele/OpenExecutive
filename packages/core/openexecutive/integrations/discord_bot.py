@@ -145,6 +145,36 @@ def _compute_session_id(
     return f"discord:user:{discord_user_id}"
 
 
+def _session_id_aliases(
+    *,
+    mode: str,
+    session_id: str,
+    parent_channel_id: str,
+    discord_user_id: str,
+) -> list[str]:
+    """Every session id this inbound message legitimately belongs to.
+
+    Normally just its own. The exception mirrors Slack's: the auto-thread
+    router answers a plain-channel @mention by promoting the reply into a
+    BOT-OWNED thread, and the turn is double-written to that thread's session
+    (see the promoted-thread block in `_handle_message`). A follow-up inside
+    that thread therefore arrives under `discord:thread:{thread}` while an
+    approval gate raised on the mention recorded
+    `discord:channel:{parent}:{user}` — so without the parent id here the gate
+    can never be answered in the thread it was asked in, which is exactly the
+    #136 failure.
+
+    Only CLASSIFY_THREAD_CONTINUATION qualifies: that mode already means the
+    thread is bot-owned and unarchived (`_classify_inbound`), and the router
+    only ever promotes for the person who sent the mention. A thread a human
+    opened classifies as CLASSIFY_MENTION instead and gets no alias.
+    """
+    aliases = [session_id]
+    if mode == CLASSIFY_THREAD_CONTINUATION and parent_channel_id and discord_user_id:
+        aliases.append(f"discord:channel:{parent_channel_id}:{discord_user_id}")
+    return aliases
+
+
 # Routing modes returned by _classify_inbound() — strings, not an enum, to
 # keep the module importable in unit tests without instantiating discord.py.
 CLASSIFY_SKIP = "skip"
@@ -555,6 +585,7 @@ async def _handle_message(
     is_dm: bool,
     session_id: str,
     session_title: str,
+    session_id_aliases: list[str] | None = None,
     on_first_turn_complete: Callable[[str, str], Awaitable[None]] | None = None,
     author_display_name: str | None = None,
     gate_eligible: bool = False,
@@ -643,7 +674,7 @@ async def _handle_message(
             send=send_fn,
             message_id=message_id,
             in_reply_to=thread_id or "",
-            session_ids=[session_id],
+            session_ids=session_id_aliases or [session_id],
         ):
             return
 
@@ -670,6 +701,7 @@ async def _handle_message(
     # raises UnboundLocalError.
     from openexecutive.config import get_settings
     from openexecutive.integrations.channel_context import (
+        attach_briefing_context,
         build_channel_context_block,
     )
     from openexecutive.knowledge.retriever import retrieve
@@ -806,6 +838,13 @@ async def _handle_message(
                     user_message=formatted_user_text,
                 )
 
+            briefing_context = await asyncio.to_thread(
+                attach_briefing_context,
+                session,
+                is_dm=is_dm,
+                person=sender_person,
+            )
+
             executive = Executive(mcp_gateway=get_active_gateway())
             response = await executive.chat(
                 user_message=chat_user_message,
@@ -813,6 +852,7 @@ async def _handle_message(
                 retrieved_context=retrieved_context,
                 episodic_context=episodic_context,
                 attachment_blocks=attachment_blocks or None,
+                briefing_context=briefing_context,
                 channel_context_block=build_channel_context_block("discord"),
                 person_id=person_id,
                 co_present_person_ids=co_present_person_ids or None,
@@ -1368,6 +1408,19 @@ def create_discord_bot():
             is_dm=is_dm,
             session_id=session_id,
             session_title=session_title,
+            # In a bot-owned thread the parent channel is where the mention
+            # that created it lives — the session an approval gate raised on
+            # that mention recorded.
+            session_id_aliases=_session_id_aliases(
+                mode=mode,
+                session_id=session_id,
+                parent_channel_id=(
+                    str(getattr(message.channel, "parent_id", "") or "")
+                    if isinstance(message.channel, discord.Thread)
+                    else ""
+                ),
+                discord_user_id=discord_user_id,
+            ),
             on_first_turn_complete=on_first_turn,
             author_display_name=getattr(message.author, "display_name", None),
             gate_eligible=gate_eligible,

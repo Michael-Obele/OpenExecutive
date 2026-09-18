@@ -2455,7 +2455,14 @@ workflows:
     the model has no reason to emit — rather than the old `note ==
     "parse_error"` string, which a human could produce and thereby have a
     genuine rejection discarded. The fallback guard applies to EVERY reply
-    shape, not just approve_reject.
+    shape, not just approve_reject, and every shape can answer `unrelated` —
+    without it an open free_text gate turned the person's next message into
+    its answer verbatim, and a numeric gate swallowed any message containing
+    a number. `ack_alert` is withheld from the unattended passes
+    (`executive_reflection` and the `executive_research` synthesis): both
+    render open alerts into their context, those headlines come from inbound
+    mail and chat, and the server-side ack trust check keys on a session's
+    `origin_channel`, which those passes do not set.
     `resumer.apply_resolution` then records the
     decision, marks the run `resolved`, and writes an audit row. A timeout
     instead applies the step's `on_timeout` policy (escalate /

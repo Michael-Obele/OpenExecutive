@@ -104,4 +104,35 @@ def build_channel_context_block(
     )
 
 
-__all__ = ["build_channel_context_block"]
+def attach_briefing_context(session: object, *, is_dm: bool, person: object) -> str:
+    """Return the open-alert digest for this turn, and record its ids.
+
+    Gated to the principal's DMs on every channel: the board is company-wide,
+    so pulling it into a shared channel would leak every open item to everyone
+    in it. The ids the block named are recorded on the session, which is what
+    lets `ack_alert` refuse any other id from a chat channel — prompt wording
+    alone is not a control.
+
+    Shared rather than repeated per adapter: `ack_alert`'s guard trips on any
+    session with an `origin_channel`, so an adapter that sets one without
+    populating the trusted set would have the tool permanently refuse every
+    id instead of merely never having a trustworthy one.
+
+    Synchronous SQLite — call it via ``asyncio.to_thread``. Never raises.
+    """
+    if not is_dm or not getattr(person, "is_principal", False):
+        return ""
+    try:
+        from openexecutive.briefing.context import format_open_alerts_for_prompt
+
+        rendered: list[int] = []
+        block = format_open_alerts_for_prompt(rendered_ids=rendered)
+        if session is not None:
+            session.trusted_alert_ids = set(rendered)  # type: ignore[attr-defined]
+        return block
+    except Exception:
+        logger.exception("channel_context: could not build the briefing block")
+        return ""
+
+
+__all__ = ["attach_briefing_context", "build_channel_context_block"]

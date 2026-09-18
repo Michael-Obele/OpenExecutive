@@ -1,7 +1,8 @@
 """Inbound message resolver for WaitForHuman workflow pauses.
 
-When a human sends a reply via Slack, Telegram, or email, this module
-tries to match it to an ``awaiting_human`` workflow run.
+When a human replies on Slack, Discord or Telegram, this module tries to
+match it to an ``awaiting_human`` workflow run. (Email and Google Chat have
+no call site — their adapters do not resolve gates.)
 
 Three-tier matching (highest priority first)
 -------------------------------------------
@@ -62,11 +63,30 @@ def _load_awaiting_runs(
 
 
 def _parse_state(run: dict) -> dict:
+    """The gate's stored state, or `{}` when it cannot be read.
+
+    An unreadable state is NOT the same as an empty one — see
+    `_state_is_readable`. Tier 2's legacy wildcard keys off the absence of a
+    `delivery` key, and a corrupt row would otherwise present as a legacy row
+    and match any message from that person on any channel.
+    """
     raw = run.get("state_json") or "{}"
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _state_is_readable(run: dict) -> bool:
+    """False when `state_json` is present but not a readable JSON object."""
+    raw = run.get("state_json")
+    if raw is None or raw == "":
+        return True  # nothing stored is a legitimate legacy shape
+    try:
+        return isinstance(json.loads(raw), dict)
+    except (json.JSONDecodeError, TypeError):
+        return False
 
 
 def _scoped_to_session(candidates: list[dict], session_ids: Sequence[str]) -> list[dict]:
@@ -239,8 +259,20 @@ async def resolve_inbound_message(
         state = _parse_state(run)
         stored = normalize_channel(str(state.get("channel") or ""))
         if stored:
-            if stored == wanted:
-                channel_matches.append(run)
+            if stored != wanted:
+                continue
+            # Address-level narrowing when both sides know it: a gate
+            # delivered to this person's Slack DM should not be answerable
+            # from a Slack channel. Only applied when the stored ref is
+            # non-empty, so a self-approval gate with no ref still matches.
+            stored_ref = str(state.get("channel_ref") or "")
+            if stored_ref and channel_ref and stored_ref != channel_ref:
+                logger.debug(
+                    "resolver: run %s was delivered to %s, not %s — skipping",
+                    run.get("run_id"), stored_ref, channel_ref,
+                )
+                continue
+            channel_matches.append(run)
             continue
         # No stored channel. Two very different situations share that shape,
         # and `delivery` tells them apart: a checkpoint written before gate
@@ -249,7 +281,12 @@ async def resolve_inbound_message(
         # suppressed / alerted / failed has the key and must NOT be — nobody
         # was asked on any channel, so any message matching it would record
         # an answer to a question that was never put.
-        if "delivery" not in state:
+        if not _state_is_readable(run):
+            logger.warning(
+                "resolver: run %s has unreadable state_json — not matchable",
+                run.get("run_id"),
+            )
+        elif "delivery" not in state:
             logger.info(
                 "resolver: run %s predates gate delivery (no channel, no "
                 "delivery status) — treating as a wildcard",
@@ -365,12 +402,6 @@ async def resolve_and_acknowledge(
         if not await apply_resolution(resolution.run_id, resolution):
             # Already resolved or timed out — not ours to answer.
             return False
-        await send(
-            await asyncio.to_thread(
-                resolution_acknowledgement, resolution.run_id, resolution
-            )
-        )
-        return True
     except Exception:
         logger.exception(
             "resolver: inbound check failed for channel=%s person=%s",
@@ -378,6 +409,29 @@ async def resolve_and_acknowledge(
             person_id,
         )
         return False
+
+    # The gate is CLOSED from here on. A failed acknowledgement send must not
+    # report the message as unhandled — the caller would fall it through to
+    # alert triage and a full chat turn, so the person's sign-off would be
+    # recorded while they got an unrelated reply. That is the swallowed-
+    # approval shape #136 was filed for.
+    try:
+        await send(
+            await asyncio.to_thread(
+                resolution_acknowledgement, resolution.run_id, resolution
+            )
+        )
+    except Exception:
+        logger.exception(
+            "resolver: resolved run %s but could not acknowledge it to "
+            "person %s on %s",
+            resolution.run_id,
+            person_id,
+            channel,
+        )
+    return True
+
+
 
 
 async def _llm_disambiguate(

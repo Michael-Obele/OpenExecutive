@@ -40,6 +40,7 @@ Never raises: a delivery problem must not fail the run that is trying to pause.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Literal
@@ -100,7 +101,7 @@ async def deliver_gate_question(
     question = _compose_question(
         event,
         workflow_title=workflow_title,
-        launched_by=_launcher_name(session),
+        launched_by=await _launcher_name(session),
     )
     try:
         from openexecutive.orchestrator.schedule_tools import handle_message_person
@@ -119,13 +120,22 @@ async def deliver_gate_question(
 
     status = str(parsed.get("status") or "")
     if status == "sent":
+        sent_channel = normalize_channel(str(parsed.get("channel") or ""))
+        sent_ref = str(parsed.get("channel_ref") or "")
         return (
             event.model_copy(
                 update={
-                    "channel": normalize_channel(str(parsed.get("channel") or "")),
-                    "channel_ref": str(parsed.get("channel_ref") or ""),
+                    "channel": sent_channel,
+                    "channel_ref": sent_ref,
                     "outbound_message_id": str(parsed.get("message_id") or ""),
                     "delivery": "sent",
+                    # `handle_message_person` always sends a 1:1 DM, so the
+                    # answer belongs in that DM. Without this the gate had no
+                    # session at all and matched on (person, channel) alone —
+                    # so an unrelated @mention in a public channel resolved it
+                    # AND got the acknowledgement, workflow title and all,
+                    # posted where everyone could read it.
+                    "origin_session_id": _dm_session_id(sent_channel, sent_ref),
                 }
             ),
             "sent",
@@ -158,19 +168,43 @@ async def deliver_gate_question(
         parsed.get("error") or status or "no status",
         event.person_id,
     )
-    return event.model_copy(), "failed"
+    return event.model_copy(update={"delivery": "failed"}), "failed"
+
+
+# How each adapter names the 1:1 conversation with a person. Must stay in step
+# with the adapters' own session-id schemes (`_slack_session_id`,
+# `discord_bot._compute_session_id`, telegram's `telegram:{chat_id}`).
+_DM_SESSION_PATTERNS = {
+    "slack": "slack:dm:{ref}",
+    "discord": "discord:dm:{ref}",
+    "telegram": "telegram:{ref}",
+}
+
+
+def _dm_session_id(channel: str, channel_ref: str) -> str:
+    """The session id of the DM a gate question was delivered into, if known.
+
+    Returns "" for a channel we have no pattern for, which leaves the gate
+    matching on channel alone — the previous behaviour, not a regression.
+    """
+    pattern = _DM_SESSION_PATTERNS.get(channel)
+    if not pattern or not channel_ref:
+        return ""
+    return pattern.format(ref=channel_ref)
 
 
 def _session_caller_id(session: object) -> int | None:
     """The person id behind the current chat session, if it is known."""
     for attr in ("caller_person_id", "person_id"):
         value = getattr(session, attr, None)
-        if isinstance(value, int):
+        # `bool` is an `int` subclass, and True would compare equal to
+        # person_id 1.
+        if isinstance(value, int) and not isinstance(value, bool):
             return value
     return None
 
 
-def _launcher_name(session: object) -> str:
+async def _launcher_name(session: object) -> str:
     """Who set this workflow running, when we can tell.
 
     Any rostered chat user can launch a workflow, so an approval question can
@@ -184,7 +218,9 @@ def _launcher_name(session: object) -> str:
     try:
         from openexecutive.people.store import get_person
 
-        person = get_person(person_id)
+        # Offloaded: this runs on the application event loop, and every other
+        # SQLite touch on this path is already off it.
+        person = await asyncio.to_thread(get_person, person_id)
     except Exception:
         logger.exception("gate_delivery: could not resolve launcher %s", person_id)
         return ""

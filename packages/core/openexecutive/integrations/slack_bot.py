@@ -136,6 +136,13 @@ def _persist_turn(
             logger.exception("Slack: failed to persist turn for session %s", sid)
 
 
+def _thread_root_author(thread_replies: list[dict] | None) -> str:
+    """The user_id who posted the message a thread hangs off, if known."""
+    if not thread_replies:
+        return ""
+    return str(thread_replies[0].get("user") or "")
+
+
 def _session_id_aliases(
     *,
     mode: str,
@@ -143,21 +150,36 @@ def _session_id_aliases(
     user_id: str,
     session_id: str,
     is_threaded_reply: bool,
+    thread_replies: list[dict] | None,
 ) -> list[str]:
     """Every session id this inbound message legitimately belongs to.
 
-    Normally just its own. The exception is a reply inside a thread in a
-    channel: the bot may have rooted that thread by answering this person's
-    @mention, in which case the conversation ALSO lives under the rolling
-    `slack:channel:{channel}:{user}` session — the same pair `_persist_turn`
-    double-writes history to. Without the parent id here, a gate raised on the
-    mention can never be answered in the thread it was asked in.
+    Normally just its own. The exception is a reply inside a thread THIS
+    person rooted: the bot answers an @mention in a channel by replying in a
+    thread hung off that mention, so the conversation also lives under the
+    rolling `slack:channel:{channel}:{user}` session — the same pair
+    `_persist_turn` double-writes history to. Without the parent id, a gate
+    raised on the mention can never be answered in the thread it was asked in.
 
-    The widening is bounded: same person, same channel, and only for gates
-    that named a session in the first place.
+    The root-author check is what keeps that from being a hole. Widening on
+    "threaded and not a DM" alone would offer Alice's channel session inside
+    ANY thread in that channel — including one rooted by Bob's mention — so a
+    remark Alice made to Bob could resolve her open gate, post the run's title
+    into Bob's thread, and do it having skipped the multi-human response gate
+    (the resolver runs before it). Scoped to threads this person started, the
+    alias only ever names a conversation that is genuinely theirs.
+
+    A thread whose replies could not be fetched degrades to no alias: the
+    gate stays unanswered, which is recoverable, rather than over-matching.
     """
     aliases = [session_id]
-    if mode != "dm" and is_threaded_reply and channel and user_id:
+    if (
+        mode != "dm"
+        and is_threaded_reply
+        and channel
+        and user_id
+        and _thread_root_author(thread_replies) == user_id
+    ):
         aliases.append(f"slack:channel:{channel}:{user_id}")
     return aliases
 
@@ -451,6 +473,7 @@ async def create_slack_app():
                     user_id=str(slack_user_id),
                     session_id=session_id,
                     is_threaded_reply=is_threaded_reply,
+                    thread_replies=thread_replies,
                 ),
             ):
                 return
@@ -522,6 +545,7 @@ async def create_slack_app():
 
         try:
             from openexecutive.integrations.channel_context import (
+                attach_briefing_context,
                 build_channel_context_block,
             )
             from openexecutive.knowledge.retriever import retrieve
@@ -602,21 +626,12 @@ async def create_slack_app():
                 # company-wide, and pulling it into a shared channel would
                 # leak every open item to everyone in that channel. Same gate
                 # shape the outbound-context hydration below uses.
-                briefing_context = ""
-                if mode == "dm" and getattr(sender_person, "is_principal", False):
-                    from openexecutive.briefing.context import (
-                        format_open_alerts_for_prompt,
-                    )
-
-                    rendered_alert_ids: list[int] = []
-                    briefing_context = await asyncio.to_thread(
-                        format_open_alerts_for_prompt,
-                        rendered_ids=rendered_alert_ids,
-                    )
-                    # Server-side counterpart to the trust rule in
-                    # ack_alert's description: only ids this block actually
-                    # named can be acked from here.
-                    session.trusted_alert_ids = set(rendered_alert_ids)
+                briefing_context = await asyncio.to_thread(
+                    attach_briefing_context,
+                    session,
+                    is_dm=(mode == "dm"),
+                    person=sender_person,
+                )
 
                 # On the 1:1 DM path, hydrate with the context of any recent
                 # outbound DM oe sent this user, so a reply oe solicited from

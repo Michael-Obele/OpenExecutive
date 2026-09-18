@@ -629,7 +629,12 @@ async def test_threaded_reply_still_passes_a_real_reply_reference() -> None:
     async with _listeners() as listeners:
         with _Harness() as h:
             h.client.conversations_replies = AsyncMock(
-                return_value={"messages": [{"user": "UBOT", "text": "shall I?"}]}
+                return_value={
+                    "messages": [
+                        {"user": "U123", "text": "<@UBOT> run the brief"},
+                        {"user": "UBOT", "text": "shall I?"},
+                    ]
+                }
             )
             resolve = AsyncMock(return_value=None)
             with patch(
@@ -738,7 +743,12 @@ async def test_thread_reply_offers_the_parent_channel_session_too() -> None:
     async with _listeners() as listeners:
         with _Harness() as h:
             h.client.conversations_replies = AsyncMock(
-                return_value={"messages": [{"user": "UBOT", "text": "shall I?"}]}
+                return_value={
+                    "messages": [
+                        {"user": "U123", "text": "<@UBOT> run the brief"},
+                        {"user": "UBOT", "text": "shall I?"},
+                    ]
+                }
             )
             resolve = AsyncMock(return_value=None)
             with patch(
@@ -825,3 +835,41 @@ async def test_a_turn_without_a_briefing_block_trusts_no_alert_ids() -> None:
             )
 
     assert h.chat.await_args.kwargs["session"].trusted_alert_ids == set()
+
+
+@pytest.mark.asyncio
+async def test_no_alias_for_a_thread_someone_else_rooted() -> None:
+    """Widening on "threaded and not a DM" alone offered Alice's channel
+    session inside ANY thread in that channel — including one rooted by Bob's
+    mention. A remark Alice made to Bob could then resolve her open gate,
+    post the run's title into Bob's thread, and do it having skipped the
+    multi-human response gate, which runs after the resolver."""
+    event = {
+        "text": "yeah that works for me",
+        "user": "U123",
+        "channel": "C1",
+        "ts": "1700000500.0",
+        "thread_ts": "1700000000.0",
+    }
+    async with _listeners() as listeners:
+        with _Harness() as h:
+            h.client.conversations_replies = AsyncMock(
+                return_value={
+                    "messages": [
+                        {"user": "UBOB", "text": "<@UBOT> what's our runway?"},
+                        {"user": "UBOT", "text": "about 14 months"},
+                    ]
+                }
+            )
+            resolve = AsyncMock(return_value=None)
+            with patch(
+                "openexecutive.workflows.inbound_resolver.resolve_inbound_message",
+                resolve,
+            ):
+                await listeners["handle_message"](
+                    event=event, say=h.say, client=h.client
+                )
+
+    assert resolve.await_args.kwargs["session_ids"] == [
+        "slack:thread:C1:1700000000.0"
+    ]

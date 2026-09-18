@@ -76,7 +76,13 @@ _AWAITING_HINTS: dict[str, str] = {
 
 
 def _assert_hints_cover_every_delivery_status() -> None:
-    """Fail at import if a DeliveryStatus has no hint.
+    """Raise if a DeliveryStatus has no hint. Called by the unit suite.
+
+    Deliberately NOT called at import: `api/main.py` builds the app at module
+    level, so an import-time raise here takes the whole process down rather
+    than degrading one tool — the same trap CLAUDE.md records for
+    OE_PUBLIC_DEPLOYMENT. A test gives identical coverage with no production
+    blast radius.
 
     The hints and the `run_workflow` tool description are two hand-written
     paraphrases of the same delivery semantics, so a new status could
@@ -96,8 +102,6 @@ def _assert_hints_cover_every_delivery_status() -> None:
             "outcomes correctly."
         )
 
-
-_assert_hints_cover_every_delivery_status()
 
 # The exception snippet surfaced back to the model when a workflow crashes
 # mid-run. Shorter than ERROR_DETAIL_LEN because it is quoted inside a longer

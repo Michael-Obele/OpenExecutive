@@ -110,9 +110,11 @@ def test_gate_for_someone_else_is_actually_sent_to_them() -> None:
     assert delivery == "sent"
     assert routed.channel == "telegram"
     assert routed.outbound_message_id == "tg-9"
-    # Not scoped to the launcher's conversation — the approver answers wherever
-    # they were reached.
-    assert routed.origin_session_id == ""
+    # Scoped to the DM it was actually delivered into, NOT the launcher's
+    # conversation. Without a session the gate matched on (person, channel)
+    # alone, so an unrelated public message from the approver resolved it and
+    # got the acknowledgement — workflow title included — posted in public.
+    assert routed.origin_session_id == "telegram:556677"
 
 
 # --------------------------------------------------------------------- #
@@ -301,3 +303,50 @@ def test_an_unresolvable_launcher_does_not_break_delivery() -> None:
 
     assert delivery == "sent"
     assert "started by" not in send.await_args.args[0]["text"]
+
+
+def test_a_dm_delivered_gate_is_scoped_to_that_dm() -> None:
+    """Per channel, because each adapter names its 1:1 conversation
+    differently and the resolver compares the id verbatim."""
+    for channel, ref, expected in (
+        ("slack", "U500", "slack:dm:U500"),
+        ("slack_dm", "U500", "slack:dm:U500"),  # outbound vocabulary
+        ("discord", "42", "discord:dm:42"),
+        ("telegram", "556677", "telegram:556677"),
+    ):
+        send = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "status": "sent",
+                    "channel": channel,
+                    "channel_ref": ref,
+                    "message_id": "m-1",
+                }
+            )
+        )
+        with patch(
+            "openexecutive.orchestrator.schedule_tools.handle_message_person", send
+        ):
+            routed, _ = _deliver(_gate())
+        assert routed.origin_session_id == expected, channel
+
+
+def test_an_unknown_channel_leaves_the_gate_unscoped() -> None:
+    """Better to match on channel alone than to invent a session id the
+    adapter will never present."""
+    send = AsyncMock(
+        return_value=json.dumps(
+            {
+                "status": "sent",
+                "channel": "carrier_pigeon",
+                "channel_ref": "P1",
+                "message_id": "m-1",
+            }
+        )
+    )
+    with patch(
+        "openexecutive.orchestrator.schedule_tools.handle_message_person", send
+    ):
+        routed, _ = _deliver(_gate())
+
+    assert routed.origin_session_id == ""
