@@ -146,13 +146,19 @@ uv sync
 uv run uvicorn openexecutive.api.main:app --reload --port 8000
 
 # In a second terminal
-cd packages/ui && npm install && npm run dev
+cd packages/ui
+npm install
+npm run dev
 ```
 
 `uv run` executes inside the project's virtualenv without activating it, so
 these commands are the same on macOS, Linux and Windows. (Activating manually
 works too, but the path differs per platform: `.venv/bin/activate` on
-macOS/Linux, `.venv\Scripts\Activate.ps1` on Windows.)
+macOS/Linux, `.venv\Scripts\Activate.ps1` on Windows.) The `packages/ui`
+commands are listed one per line rather than chained with `&&` so that they
+run in every shell too: Windows PowerShell 5.1, the version that ships with
+Windows, has no `&&` operator and rejects the chained form with `The token
+'&&' is not a valid statement separator in this version.`
 
 ## Run the Discord Bot
 
