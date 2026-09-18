@@ -49,6 +49,30 @@ class WaitForHumanEvent(BaseModel):
     channel: str = ""
     # Channel-specific address used (Slack user id, email address, chat_id str).
     channel_ref: str = ""
+    # Chat session the gate was raised from, when a person launched the
+    # workflow conversationally and is themselves the approver. The inbound
+    # resolver matches such a gate ONLY against replies in that same session,
+    # so an open gate in one Slack DM cannot swallow an unrelated message in
+    # another thread. Empty for web/scheduler-originated runs, which fall back
+    # to channel matching.
+    origin_session_id: str = ""
+
+
+# Outbound channel vocabulary (`slack_dm`, `discord_dm`) differs from the
+# inbound vocabulary the adapters use when resolving a reply (`slack`,
+# `discord`). Canonicalise on WRITE so `state_json` only ever holds inbound
+# keys — normalising at read time instead would leave two conventions in the
+# database.
+_CHANNEL_ALIASES = {
+    "slack_dm": "slack",
+    "discord_dm": "discord",
+}
+
+
+def normalize_channel(channel: str) -> str:
+    """Map an outbound channel key onto its inbound equivalent."""
+    key = (channel or "").strip().lower()
+    return _CHANNEL_ALIASES.get(key, key)
 
 
 class WaitForHumanResolution(BaseModel):
@@ -75,9 +99,14 @@ _SYSTEM_PROMPT = (
 
 _SHAPE_PROMPTS: dict[str, str] = {
     "approve_reject": (
-        'Return: {"decision": "approve|reject|defer", "note": "<brief reason, max 100 chars>"}\n'
+        'Return: {"decision": "approve|reject|defer|unrelated", '
+        '"note": "<brief reason, max 100 chars>"}\n'
         "Rules: approve = yes/ok/agreed/sounds good/LGTM; reject = no/denied/decline; "
-        "defer = maybe later/need more info/not now. When ambiguous, choose defer."
+        "defer = maybe later/need more info/not now. "
+        "unrelated = the message is not a response to this question at all "
+        "(a new request, a different topic, small talk) — use it whenever the "
+        "message does not read as an answer to THIS question, even loosely. "
+        "When the message IS an answer but its verdict is ambiguous, choose defer."
     ),
     "free_text": (
         'Return: {"text": "<exact reply text, max 500 chars>"}'

@@ -634,7 +634,10 @@ async def _handle_message(
         try:
             from openexecutive.people.store import find_person_by_discord_id
             from openexecutive.workflows.inbound_resolver import resolve_inbound_message
-            from openexecutive.workflows.resumer import apply_resolution
+            from openexecutive.workflows.resumer import (
+                apply_resolution,
+                resolution_acknowledgement,
+            )
 
             person = find_person_by_discord_id(discord_user_id)
             if person is not None and person.id is not None:
@@ -645,11 +648,18 @@ async def _handle_message(
                     text=text,
                     message_id=message_id,
                     in_reply_to=thread_id or "",
+                    session_id=session_id,
                 )
                 if resolution is not None and resolution.run_id:
                     success = await apply_resolution(resolution.run_id, resolution)
                     if success:
-                        await send_fn("Got it — your response has been recorded.")
+                        await send_fn(
+                            await asyncio.to_thread(
+                                resolution_acknowledgement,
+                                resolution.run_id,
+                                resolution,
+                            )
+                        )
                         return
         except Exception:
             logger.exception("Discord: inbound resolver check failed")
@@ -671,6 +681,14 @@ async def _handle_message(
     except Exception:
         logger.exception("Failed to schedule alert evaluation for Discord message")
 
+    # Bound here, not in the `gate_eligible` branch above: that branch's own
+    # `from openexecutive.config import get_settings` makes the name local to
+    # this whole function, so referencing it later when the branch did not run
+    # raises UnboundLocalError.
+    from openexecutive.config import get_settings
+    from openexecutive.integrations.channel_context import (
+        build_channel_context_block,
+    )
     from openexecutive.knowledge.retriever import retrieve
     from openexecutive.memory.episodic import format_for_prompt
     from openexecutive.memory.session_store import (
@@ -746,9 +764,13 @@ async def _handle_message(
     async with _session_lock(session_id):
         try:
             profile = load_or_create_profile()
+            # See the note in slack_bot: lets an approval gate raised in
+            # this turn be answered by a reply in this same conversation.
             session = Session(
                 session_id=session_id,
                 company_profile=profile if not profile.is_empty() else None,
+                origin_channel="discord",
+                origin_channel_ref=str(discord_user_id or ""),
             )
             history = load_messages(session_id)
             if history:
@@ -764,6 +786,9 @@ async def _handle_message(
             # Sender was already resolved at the roster gate above; reuse it
             # so we don't hit the DB twice in the hot path.
             person_id = sender_person.id
+            # Bound here rather than at construction because the id is only
+            # resolved now; an approval gate raised later in this turn reads it.
+            session.caller_person_id = person_id
 
             # Multi-peer co-presence: resolve every other thread
             # participant's Person.id so Honcho can add them as peers
@@ -805,6 +830,7 @@ async def _handle_message(
                 retrieved_context=retrieved_context,
                 episodic_context=episodic_context,
                 attachment_blocks=attachment_blocks or None,
+                channel_context_block=build_channel_context_block("discord"),
                 person_id=person_id,
                 co_present_person_ids=co_present_person_ids or None,
             )

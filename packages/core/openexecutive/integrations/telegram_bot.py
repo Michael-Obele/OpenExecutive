@@ -160,7 +160,10 @@ async def _process_and_reply(
     try:
         from openexecutive.people.store import find_person_by_telegram_chat_id
         from openexecutive.workflows.inbound_resolver import resolve_inbound_message
-        from openexecutive.workflows.resumer import apply_resolution
+        from openexecutive.workflows.resumer import (
+            apply_resolution,
+            resolution_acknowledgement,
+        )
 
         person = find_person_by_telegram_chat_id(str(chat_id))
         if person is not None and person.id is not None:
@@ -171,11 +174,20 @@ async def _process_and_reply(
                 text=message_text,
                 message_id=str(message_id),
                 in_reply_to="",
+                session_id=session_id,
             )
             if resolution is not None and resolution.run_id:
                 success = await apply_resolution(resolution.run_id, resolution)
                 if success:
-                    await send_message(token, chat_id, "Got it — your response has been recorded.")
+                    await send_message(
+                        token,
+                        chat_id,
+                        await asyncio.to_thread(
+                            resolution_acknowledgement,
+                            resolution.run_id,
+                            resolution,
+                        ),
+                    )
                     return
     except Exception:
         logger.exception("Telegram: inbound resolver check failed")
@@ -223,6 +235,9 @@ async def _process_and_reply(
         except Exception:
             logger.exception("Telegram: attachment processing setup failed")
 
+    from openexecutive.integrations.channel_context import (
+        build_channel_context_block,
+    )
     from openexecutive.knowledge.retriever import retrieve
     from openexecutive.memory.episodic import format_for_prompt
     from openexecutive.memory.session_store import (
@@ -240,9 +255,13 @@ async def _process_and_reply(
     async with _chat_lock(chat_id):
         try:
             profile = load_or_create_profile()
+            # See the note in slack_bot: lets an approval gate raised in
+            # this turn be answered by a reply in this same conversation.
             session = Session(
                 session_id=session_id,
                 company_profile=profile if not profile.is_empty() else None,
+                origin_channel="telegram",
+                origin_channel_ref=str(chat_id),
             )
             history = load_messages(session_id)
             if history:
@@ -259,6 +278,9 @@ async def _process_and_reply(
             from openexecutive.people.store import find_person_by_telegram_chat_id
             person = find_person_by_telegram_chat_id(str(chat_id))
             person_id = person.id if person else None
+            # Bound here rather than at construction because the id is only
+            # resolved now; an approval gate raised later in this turn reads it.
+            session.caller_person_id = person_id
 
             # Hydrate with the context of any recent outbound DM oe sent this
             # chat, so a reply oe solicited from another session lands with its
@@ -288,6 +310,7 @@ async def _process_and_reply(
                 retrieved_context=retrieved_context,
                 episodic_context=episodic_context,
                 attachment_blocks=att_image_blocks or None,
+                channel_context_block=build_channel_context_block("telegram"),
                 person_id=person_id,
             )
             await send_message(token, chat_id, response)

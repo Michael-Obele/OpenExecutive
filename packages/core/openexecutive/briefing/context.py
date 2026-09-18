@@ -49,10 +49,18 @@ def format_open_alerts_for_prompt(db_path: Path | None = None, limit: int = _MAX
     from openexecutive.briefing.ranking import score_and_categorize
 
     try:
-        alerts = list_live_alerts(limit=limit, db_path=db_path)
+        # Fetch one more than we render so we can tell a full board from a
+        # truncated one. Without this the header below claims the list is the
+        # whole board even when it is the most recent `limit` of many more —
+        # the Executive then tells the principal a partial set is everything
+        # (#136, second symptom).
+        alerts = list_live_alerts(limit=limit + 1, db_path=db_path)
     except Exception:
         logger.exception("briefing_context.list_alerts_failed")
         return ""
+
+    truncated = len(alerts) > limit
+    alerts = alerts[:limit]
 
     lines: list[str] = []
     for alert in alerts:
@@ -87,6 +95,13 @@ def format_open_alerts_for_prompt(db_path: Path | None = None, limit: int = _MAX
         "[alert_id] (category) headline — details. When the user asks about one "
         "of these by name, this is what they mean."
     )
+    if truncated:
+        header += (
+            f" NOTE: this is only the {len(lines)} most recent open items, not "
+            "the complete board — there are more. Do not describe this list as "
+            "everything that is open; say it is the most recent slice and point "
+            "the principal at the briefing page for the rest."
+        )
     return header + "\n" + "\n".join(lines)
 
 

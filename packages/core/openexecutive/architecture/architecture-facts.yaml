@@ -1138,8 +1138,12 @@ departments:
   api: /departments — CRUD for departments, goals, and checklist items
   authority_gate: |
     openexecutive.departments.authority — each department declares a mode.
-    `propose_only` departments route scheduled actions through an
-    approval workflow (wait_for_human) instead of executing immediately.
+    `propose_only` departments route scheduled actions to an approver as a
+    briefing alert (`propose_via_alert`) instead of executing immediately;
+    the scheduled_actions row is then marked done and the pending-ness lives
+    on the alert. This is NOT the `wait_for_human` workflow gate — that is a
+    separate primitive with its own table (`workflow_runs.status`), delivery
+    path and resolver; an earlier version of this note conflated the two.
     Autonomous departments fire actions directly. The approver is
     selected by AuthorityScope: each scheduled_actions row may carry
     a `required_scope` column (e.g. `vendor_onboarding`, `spend_lt_10k`,
@@ -1486,7 +1490,7 @@ audit:
     - tool_invocation — generic skill/MCP/alert/schedule tool calls; full payload includes `active_prompt_blocks`
     - scheduled_action — proactive nudge fired by the scheduler
     - alert — alert created by the triage pipeline
-    - integration_inbound — Slack / Discord / email / Telegram / Google Chat message received
+    - integration_inbound — Slack / Discord / email / Telegram / Google Chat message received. `details.outcome` distinguishes the non-reply paths — `rejected_unknown_sender` (not on the People roster), `skipped_gate` (response gate said no), and `handler_error` (the turn raised; the user got the generic apology). The error row carries the same `session_id` as the inbound row, so /audit can join a failed turn to the message that caused it.
     - knowledge_retrieval — one row per `knowledge.retriever.retrieve()` call; details carry chunk counts + domains, full payload carries each chunk's source, distance, and text preview so the session view shows "which RAG chunks influenced this response"
     - cache_event — one row per model call, from every call site (`audit.usage.log_model_usage`): Executive iterations and the committee revision pass (`actor` executive / committee_revision), `BaseAgent.analyze` callers — chat-turn consults via `route_parallel` (`actor` specialist), workflow steps and other direct `route_to_specialist` callers (specialist_workflow), the MCP `consult_specialist` tool (specialist_mcp), and both Council test boxes (agent_test) — `BaseAgent.analyze_with_tools` callers (specialist_research, query_watch, signal_enrichment), the research synthesis and watchlist passes (research_synthesis / research_watchlist), triage, and the chat memory extractor (memory_extractor). Captures `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `cost_usd`, `web_search_requests` (from `usage.server_tool_use`), `stop_reason`, and — inside a research run — the run's `run_id`, so prompt-cache hits are visible per turn, plus `cost_usd` — the actual USD OpenRouter charged for the call (read from `usage.cost`; null on the Anthropic-direct path or for rows logged before cost capture shipped). This is the token-usage + cost source of truth aggregated by both `/audit/sessions/{id}` (per session) and `/audit/usage` (cross-session).
     - memory_snapshot — one row at Executive turn entry; captures the system-block layout, conversation history length, episodic context (full text in `full_json`), and a company-profile hash so the session view can render "what the agent saw" before any API call
@@ -2402,21 +2406,60 @@ workflows:
   streaming: SSE — every step emits a WorkflowEvent (start/progress/complete) consumed by /workflows/{name}/runs.
   human_in_the_loop: |
     `wait_for_human` (openexecutive/workflows/wait_for_human.py) is a
-    first-class step primitive that pauses a run, writes an
-    `awaiting_human` row into scheduled_actions, and returns control to
-    the user. When the human replies on any channel, the
-    `inbound_resolver` workflow matches the response back to the paused
-    run via its resume token and `resumer.apply_resolution` records the
-    decision, marks the run `resolved`, and writes an audit row. A
-    timeout instead applies the step's `on_timeout` policy (escalate /
+    first-class step primitive that pauses a run: `save_checkpoint` moves
+    the `workflow_runs` row to `status='awaiting_human'` and stores the
+    serialized `WaitForHumanEvent` in `state_json`. (It does NOT write to
+    scheduled_actions, and it is NOT the department authority gate — see
+    the correction under `departments.authority_gate`.)
+
+    DELIVERY — `workflows.gate_delivery.deliver_gate_question`, called by
+    both checkpoint sites (api/routes/workflows.py and
+    orchestrator/workflow_run_tools.py) BEFORE `save_checkpoint`, so
+    state_json carries the routing fields. Two modes. Self-approval: the
+    chat session's `origin_channel` is set and its `caller_person_id` is
+    the gate's person — nothing is sent (the question rides in the
+    Executive's own reply) and the gate records `origin_session_id` plus
+    the session's channel/ref. Out-of-band: delegate to
+    `schedule_tools.handle_message_person` (preferred-channel selection,
+    per-channel id validation, fall-through, alert fallback), and record
+    the `channel` / `channel_ref` / `message_id` its success payload now
+    returns. Delivery may not happen — the outbound guard can suppress it
+    and an unreachable person falls back to an alert — in which case the
+    routing fields stay EMPTY and the caller reports `delivery` as
+    `suppressed` / `alerted`, never "waiting on them".
+
+    MATCHING — each adapter calls `inbound_resolver.resolve_inbound_message`
+    with its `session_id`. Tier 1 (explicit `in_reply_to` vs a stored
+    `outbound_message_id`) only refuses to fall through when some candidate
+    actually HAS an outbound id; Slack passes `thread_ts` on every threaded
+    message, and the old unconditional refusal made tiers 2-3 unreachable
+    there. Tier 2 normalizes channel names (`slack_dm` ≡ `slack`) and
+    treats an empty stored channel as a wildcard so pre-delivery rows stay
+    matchable. Tier 3 is one utility-fast disambiguation call at 0.85
+    confidence. Two guards stop an open gate swallowing unrelated traffic:
+    a gate with an `origin_session_id` matches only that conversation, and
+    the `approve_reject` parser can answer `unrelated`, which — like its
+    `parse_error` fallback — declines to resolve so the message reaches
+    the normal chat path. `resumer.apply_resolution` then records the
+    decision, marks the run `resolved`, and writes an audit row. A timeout
+    instead applies the step's `on_timeout` policy (escalate /
     auto_proceed / fail). Either way the captured outcome surfaces in the
     Today dashboard for the founder to see.
+
+    Every adapter replies with the one shared wording from
+    `resumer.resolution_acknowledgement`, which names the decision and
+    states that the sign-off is closed and the workflow does not continue
+    on its own. The previous "Got it — your response has been recorded."
+    implied work was now in flight.
 
     NOT YET SHIPPED — full generator resume: re-entering the paused async
     generator to run the *next* workflow step automatically is deferred
     to "Phase 7" (see the note in `resumer.py`). Today a paused multi-step
     workflow captures the human's decision and stops there; it does not
-    continue its remaining steps on its own. Single-step approval gates
+    continue its remaining steps on its own. `on_timeout='auto_proceed'`
+    does not proceed either — it synthesizes a resolution through the same
+    `apply_resolution` path, so `ApprovalGateStepSpec`'s suggestion to use
+    it as a workaround for the resume gap does not actually work. Single-step approval gates
     (the common case) are fully served by the capture-and-surface path
     above; multi-step auto-continuation is the gap.
 
@@ -2478,13 +2521,22 @@ workflows:
         via `get_workflow`, validates `inputs` against the workflow's
         input_model, persists the run (`create_run` → `complete_run`/`fail_run`),
         and streams `workflow.run(...)` to completion. It mirrors the HTTP
-        route's WaitForHumanEvent handling: an approval-gate step is checkpointed
-        via `save_checkpoint` and returned as `status='awaiting_human'` rather
+        route's WaitForHumanEvent handling: an approval-gate step is delivered
+        via `gate_delivery.deliver_gate_question`, checkpointed via
+        `save_checkpoint`, and returned as `status='awaiting_human'` with a
+        `delivery` field (self / sent / suppressed / alerted / failed) rather
         than hanging — so the same resumer/inbound_resolver path applies.
+        `_AWAITING_HINTS` picks the presentation hint from that field, so an
+        undelivered question is never reported as "waiting on them".
     Guardrail: `_CHAT_LAUNCH_BLOCKLIST` excludes `executive_research` (it has the
-    dedicated `run_executive_research` tool). The principal-targeting recurring
-    workflows (`morning_brief`, `end_of_day_digest`, `executive_reflection`) stay
-    launchable but the tool description warns they dispatch real messages. A successful
+    dedicated `run_executive_research` tool). Running a workflow from chat
+    DELIVERS NOTHING — it renders the artifact into the conversation; the
+    recurring principal briefs reach anyone only through the scheduler's
+    `_deliver_to_principal`. The tool description previously claimed
+    `morning_brief` and `end_of_day_digest` DM the principal when run and told
+    the model to confirm first, which had it soliciting a confirmation on a
+    false premise (#136); it now names `executive_reflection` as the one
+    workflow that really does execute tool calls of its own. A successful
     `run_workflow` emits an `action_taken` chip (in `action_chips`) linking to
     `/jobs/runs/{run_id}`.
   notable_recent:
@@ -2734,6 +2786,40 @@ integrations:
     ``auth_test()`` so it can detect its own past replies and avoid
     double-firing with ``app_mention``. Roster-gated per
     `channel_access`.
+
+    Session model (added with #136; Slack had none before it). The
+    conversation key is ``_slack_session_id``: ``slack:dm:{user}`` for a
+    DM, ``slack:thread:{channel}:{thread_ts}`` for a reply inside a
+    thread, ``slack:channel:{channel}:{user}`` for a mention that starts
+    one. The old scheme was ``slack:{channel}:{thread_ts or ts}``, which
+    in a DM minted a NEW id per message — so a multi-turn confirmation
+    could not work even once history was stored. Stored turns are
+    replayed via ``session_store.load_messages`` and persisted after the
+    reply lands (persist failures are logged, never surfaced); a mention
+    that roots a thread double-writes into that thread's session so its
+    first continuation is not cold. ``format_for_prompt`` is
+    session-scoped. A per-session ``asyncio.Lock`` serializes turns in one
+    conversation — ``_MAX_CONCURRENT_HANDLERS`` caps workspace-wide
+    fan-out and does nothing about interleaving. The same id is the audit
+    grouping key.
+
+    Per-turn context. Every turn carries the ``<channel>`` block from
+    ``integrations.channel_context`` (user turn, never a cached system
+    block) naming the surface and where each kind of approval is
+    completed. The principal's DMs additionally carry the open-alert
+    digest as ``<briefing>`` — gated to ``mode == "dm"`` and
+    ``is_principal`` because the board is company-wide. That digest and
+    the briefing page's ``[Discuss mode — alert_id=N]`` primer are the
+    ONLY trusted sources of an ``alert_id`` for ``ack_alert``; ids
+    appearing in an alert's own body are attacker-controlled, since
+    alerts are minted from inbound mail and chat.
+
+    Errors. The catch-all logs with session/user/channel/thread/mode,
+    writes an ``integration_inbound`` row with
+    ``details.outcome="handler_error"`` under the inbound's session_id,
+    and guards the apology send itself (an unguarded one escaped into
+    Bolt). No interactivity endpoint and no Block Kit exist — Slack
+    messages are text only, so no approval button can be offered there.
   discord: |
     openexecutive.integrations.discord_bot — discord.py gateway client
     embedded in the FastAPI lifespan (no separate process). Features:

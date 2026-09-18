@@ -29,6 +29,7 @@ import openexecutive.workflows.persistence as _wf_persistence
 from openexecutive.workflows.wait_for_human import (
     _CONFIDENCE_THRESHOLD,
     WaitForHumanResolution,
+    normalize_channel,
     parse_decision,
 )
 
@@ -65,6 +66,22 @@ def _parse_state(run: dict) -> dict:
         return {}
 
 
+def _scoped_to_session(candidates: list[dict], session_id: str) -> list[dict]:
+    """Drop gates that belong to a different conversation.
+
+    A gate with no ``origin_session_id`` (web or scheduler originated) stays in
+    play for any session — there is no conversation to tie it to. A gate that
+    DOES name a session only ever matches that one.
+    """
+    out = []
+    for run in candidates:
+        origin = str(_parse_state(run).get("origin_session_id") or "")
+        if origin and origin != session_id:
+            continue
+        out.append(run)
+    return out
+
+
 async def _make_resolution(
     *,
     run: dict,
@@ -73,8 +90,34 @@ async def _make_resolution(
     message_id: str,
     person_id: int,
     expected_shape: str,
-) -> WaitForHumanResolution:
+) -> WaitForHumanResolution | None:
+    """Parse the reply into a decision, or return None if it isn't one.
+
+    Returning None lets the caller fall through to the normal chat path. That
+    matters most for ``approve_reject``: with an open gate, every message from
+    that person on this channel reaches here, and answering an unrelated
+    question with "your response has been recorded" would be worse than the
+    gate never resolving at all.
+    """
     parsed = await parse_decision(text, expected_shape)
+    if expected_shape == "approve_reject":
+        decision = str(parsed.get("decision") or "")
+        if decision == "unrelated":
+            logger.info(
+                "resolver: reply for run %s is not an answer to the gate — "
+                "leaving the run open",
+                run.get("run_id"),
+            )
+            return None
+        if parsed.get("note") == "parse_error":
+            # parse_decision's fallback, not a real verdict. Recording a
+            # fabricated "defer" would close the gate on a parser outage.
+            logger.warning(
+                "resolver: could not parse a decision for run %s — leaving "
+                "the run open",
+                run.get("run_id"),
+            )
+            return None
     return WaitForHumanResolution(
         run_id=run["run_id"],
         reply_text=text,
@@ -94,17 +137,28 @@ async def resolve_inbound_message(
     text: str,
     message_id: str = "",
     in_reply_to: str = "",
+    session_id: str = "",
     db_path: Path | None = None,
 ) -> WaitForHumanResolution | None:
     """Try to match an inbound message to an awaiting_human workflow run.
 
     Returns a ``WaitForHumanResolution`` on a confident match, ``None``
     if unmatched or confidence below threshold.
+
+    ``session_id`` is the adapter's conversation key. A gate raised inside a
+    chat session (the person launched the workflow and is the approver) records
+    that session, and matches ONLY replies from it — otherwise one open gate
+    would swallow every message that person sends on the channel, in any
+    thread, and answer each with "your response has been recorded".
     """
     if not text.strip():
         return None
 
     candidates = _load_awaiting_runs(from_person_id, db_path)
+    if not candidates:
+        return None
+
+    candidates = _scoped_to_session(candidates, session_id)
     if not candidates:
         return None
 
@@ -131,20 +185,44 @@ async def resolve_inbound_message(
                     person_id=from_person_id or run.get("awaiting_person_id") or 0,
                     expected_shape=state.get("expected_reply_shape", "approve_reject"),
                 )
-        # Explicit reference given but not matched — refuse to fall through.
+        # An explicit reference that matched nothing only means something when
+        # some candidate actually HAS a stored outbound id to compare against.
+        # Slack passes its thread_ts on every threaded message, so when no
+        # candidate carries an outbound id this branch used to reject every
+        # reply before tiers 2 and 3 ever ran (#136).
+        if any(_parse_state(r).get("outbound_message_id") for r in candidates):
+            logger.debug(
+                "resolver: in_reply_to=%r did not match a run that has an "
+                "outbound_message_id — refusing to guess",
+                in_reply_to,
+            )
+            return None
         logger.debug(
-            "resolver: in_reply_to=%r supplied but no matching run — returning None",
+            "resolver: in_reply_to=%r supplied but no candidate has an "
+            "outbound_message_id — falling through to tier 2",
             in_reply_to,
         )
-        return None
 
     # ------------------------------------------------------------------ #
     # Tier 2: single-candidate — exactly one open run on this channel
     # ------------------------------------------------------------------ #
-    channel_matches = [
-        run for run in candidates
-        if _parse_state(run).get("channel") == channel
-    ]
+    # Normalize both sides (`slack_dm` and `slack` are the same channel), and
+    # treat an empty stored channel as a wildcard: rows checkpointed before
+    # gate delivery started populating the field would otherwise be
+    # permanently unmatchable.
+    wanted = normalize_channel(channel)
+    channel_matches = []
+    for run in candidates:
+        stored = normalize_channel(str(_parse_state(run).get("channel") or ""))
+        if not stored:
+            logger.info(
+                "resolver: run %s has no stored channel — treating as a "
+                "wildcard (pre-gate-delivery checkpoint)",
+                run.get("run_id"),
+            )
+            channel_matches.append(run)
+        elif stored == wanted:
+            channel_matches.append(run)
 
     if len(channel_matches) == 1:
         run = channel_matches[0]

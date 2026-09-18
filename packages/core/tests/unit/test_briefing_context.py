@@ -114,3 +114,54 @@ def test_monitoring_signal_categorized(db: Path) -> None:
     )
     out = format_open_alerts_for_prompt(db_path=db)
     assert "(monitoring)" in out
+
+
+# --------------------------------------------------------------------- #
+# Truncation honesty (#136, second symptom)
+# --------------------------------------------------------------------- #
+
+
+def _seed(db: Path, n: int) -> None:
+    for i in range(n):
+        insert_alert(
+            source="email",
+            external_id=f"msg-{i}",
+            severity="medium",
+            headline=f"Item {i}",
+            body="body",
+            db_path=db,
+        )
+
+
+def test_truncated_digest_says_it_is_not_the_whole_board(db: Path) -> None:
+    """The header used to present the capped list as the complete board, so
+    the Executive told the principal a partial set was everything."""
+    _seed(db, 7)
+
+    out = format_open_alerts_for_prompt(db_path=db, limit=5)
+
+    lines = out.split("\n")[1:]
+    assert len(lines) == 5, "must still render exactly `limit` items"
+    assert "only the 5 most recent open items" in out
+    assert "not the complete board" in out
+
+
+def test_untruncated_digest_makes_no_truncation_claim(db: Path) -> None:
+    _seed(db, 3)
+
+    out = format_open_alerts_for_prompt(db_path=db, limit=5)
+
+    assert len(out.split("\n")[1:]) == 3
+    assert "not the complete board" not in out
+
+
+def test_exactly_at_the_limit_is_not_truncated(db: Path) -> None:
+    """Off-by-one guard: `limit` items exactly is a complete board, not a
+    truncated one. The extra row fetched to detect overflow must not leak
+    into the rendered list either."""
+    _seed(db, 5)
+
+    out = format_open_alerts_for_prompt(db_path=db, limit=5)
+
+    assert len(out.split("\n")[1:]) == 5
+    assert "not the complete board" not in out

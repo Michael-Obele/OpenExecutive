@@ -1,0 +1,181 @@
+"""Deliver a wait-for-human gate's question, and record where to look for the answer.
+
+Before this module, a workflow that paused at an approval gate was a dead end
+(#136). ``dynamic.py`` built the ``WaitForHumanEvent`` with no ``channel``,
+``channel_ref`` or ``outbound_message_id``, and the two checkpoint sites wrote
+that empty state straight to ``workflow_runs.state_json``. Consequences:
+
+* Nobody was ever *asked*. The run sat at ``awaiting_human`` until it timed
+  out, and the only place it surfaced was the /today dashboard.
+* Even if the approver had guessed, the inbound resolver could not match
+  their reply: tier 2 filters candidates on ``state["channel"] == channel``,
+  which was always ``""``.
+
+So the primitive existed on paper and resolved nothing on any channel. This
+module fills in the routing fields and — when the approver is not the person
+already in the conversation — actually sends the question.
+
+Two modes:
+
+1. **Chat-origin self-approval.** A person launched the workflow from a chat
+   channel and is themselves the approver. Sending them a separate DM would be
+   absurd — the Executive is about to put the question in its own reply. Record
+   the session and channel so their next message in that conversation resolves
+   the gate, and send nothing.
+
+2. **Out-of-band.** A web ``/jobs`` run, a scheduled run, or a gate addressed
+   to someone other than the launcher. Delegate to
+   ``schedule_tools.handle_message_person``, which already does
+   preferred-channel selection, per-channel id validation, fall-through on a
+   failed send, and an alert fallback when nothing is reachable. Do not
+   reimplement any of that here.
+
+Delivery can legitimately not happen — the anti-spam guard suppresses
+duplicates, rate-cap breaches and quiet-hours sends, and an unreachable person
+falls back to an alert. In both cases the question is NOT sitting somewhere the
+approver can reply to, so the routing fields stay empty and the caller reports
+the real ``delivery`` state rather than implying someone was asked.
+
+Never raises: a delivery problem must not fail the run that is trying to pause.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Literal
+
+from openexecutive.workflows.wait_for_human import WaitForHumanEvent, normalize_channel
+
+logger = logging.getLogger(__name__)
+
+DeliveryStatus = Literal["self", "sent", "suppressed", "alerted", "failed"]
+
+
+async def deliver_gate_question(
+    event: WaitForHumanEvent,
+    *,
+    run_id: str,
+    workflow_title: str = "",
+) -> tuple[WaitForHumanEvent, DeliveryStatus]:
+    """Return a routed copy of *event* plus how its question was delivered.
+
+    The returned event is what the caller should checkpoint — it carries the
+    ``channel`` / ``channel_ref`` / ``outbound_message_id`` / ``origin_session_id``
+    the inbound resolver needs. The original is never mutated.
+    """
+    # --- mode 1: the approver is already in this conversation ---------- #
+    try:
+        from openexecutive.orchestrator.schedule_tools import current_session
+
+        session = current_session.get()
+    except Exception:  # pragma: no cover - defensive, contextvar lookup
+        session = None
+
+    origin_channel = str(getattr(session, "origin_channel", None) or "")
+    if (
+        session is not None
+        and origin_channel
+        and _session_caller_id(session) == event.person_id
+    ):
+        return (
+            event.model_copy(
+                update={
+                    "channel": normalize_channel(origin_channel),
+                    "channel_ref": str(
+                        getattr(session, "origin_channel_ref", None) or ""
+                    ),
+                    "origin_session_id": str(
+                        getattr(session, "session_id", None) or ""
+                    ),
+                    # No outbound message to reference — the question rides in
+                    # the Executive's own reply, so tier 2 does the matching.
+                    "outbound_message_id": "",
+                }
+            ),
+            "self",
+        )
+
+    # --- mode 2: ask them wherever they actually are -------------------- #
+    question = _compose_question(event, workflow_title=workflow_title)
+    try:
+        from openexecutive.orchestrator.schedule_tools import handle_message_person
+
+        raw = await handle_message_person(
+            {"person_id": event.person_id, "text": question}
+        )
+        parsed = json.loads(raw)
+    except Exception:
+        logger.exception(
+            "gate_delivery: could not ask person %s about run %s",
+            event.person_id,
+            run_id,
+        )
+        return event.model_copy(), "failed"
+
+    status = str(parsed.get("status") or "")
+    if status == "sent":
+        return (
+            event.model_copy(
+                update={
+                    "channel": normalize_channel(str(parsed.get("channel") or "")),
+                    "channel_ref": str(parsed.get("channel_ref") or ""),
+                    "outbound_message_id": str(parsed.get("message_id") or ""),
+                }
+            ),
+            "sent",
+        )
+
+    if status == "alerted":
+        # The question is on their briefing board, not in a conversation they
+        # can reply to. Leaving the routing fields empty is deliberate: a
+        # channel we did not actually send on must not be advertised as one
+        # where a reply will be matched.
+        logger.info(
+            "gate_delivery: run %s fell back to an alert for person %s",
+            run_id,
+            event.person_id,
+        )
+        return event.model_copy(), "alerted"
+
+    if status == "suppressed":
+        logger.info(
+            "gate_delivery: run %s send suppressed (%s) for person %s",
+            run_id,
+            parsed.get("reason", "unknown"),
+            event.person_id,
+        )
+        return event.model_copy(), "suppressed"
+
+    logger.warning(
+        "gate_delivery: run %s delivery returned %s for person %s",
+        run_id,
+        parsed.get("error") or status or "no status",
+        event.person_id,
+    )
+    return event.model_copy(), "failed"
+
+
+def _session_caller_id(session: object) -> int | None:
+    """The person id behind the current chat session, if it is known."""
+    for attr in ("caller_person_id", "person_id"):
+        value = getattr(session, attr, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def _compose_question(event: WaitForHumanEvent, *, workflow_title: str) -> str:
+    """The message the approver receives. Plain text — no channel has buttons."""
+    lines = [event.question.strip() or "A workflow needs your sign-off."]
+    if workflow_title:
+        lines.append(f"\n(From the '{workflow_title}' workflow.)")
+    if event.context_summary:
+        lines.append(f"\n{event.context_summary.strip()}")
+    if event.expected_reply_shape == "approve_reject":
+        lines.append("\nReply here to approve or decline.")
+    else:
+        lines.append("\nReply here with your answer.")
+    return "\n".join(lines)
+
+
+__all__ = ["DeliveryStatus", "deliver_gate_question"]
