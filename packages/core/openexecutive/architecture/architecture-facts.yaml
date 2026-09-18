@@ -2429,18 +2429,34 @@ workflows:
     `suppressed` / `alerted`, never "waiting on them".
 
     MATCHING — each adapter calls `inbound_resolver.resolve_inbound_message`
-    with its `session_id`. Tier 1 (explicit `in_reply_to` vs a stored
-    `outbound_message_id`) only refuses to fall through when some candidate
-    actually HAS an outbound id; Slack passes `thread_ts` on every threaded
-    message, and the old unconditional refusal made tiers 2-3 unreachable
-    there. Tier 2 normalizes channel names (`slack_dm` ≡ `slack`) and
-    treats an empty stored channel as a wildcard so pre-delivery rows stay
-    matchable. Tier 3 is one utility-fast disambiguation call at 0.85
-    confidence. Two guards stop an open gate swallowing unrelated traffic:
-    a gate with an `origin_session_id` matches only that conversation, and
-    the `approve_reject` parser can answer `unrelated`, which — like its
-    `parse_error` fallback — declines to resolve so the message reaches
-    the normal chat path. `resumer.apply_resolution` then records the
+    with every `session_id` the message belongs to (a Slack thread reply also
+    offers its parent `slack:channel:{c}:{u}`, mirroring the history
+    double-write — a gate raised on a mention records the channel session
+    while the answer arrives under the thread's, and a single-id comparison
+    made that gate permanently unanswerable). Tier 1 (explicit `in_reply_to`
+    vs a stored `outbound_message_id`) rules out only the candidates that
+    carry an outbound id — the ones it could have matched — and lets the rest
+    continue; Slack passes `thread_ts` on every threaded message, so an
+    unconditional refusal made tiers 2-3 unreachable there, and a global test
+    let one delivered gate's id block an unrelated self-approval gate. Tier 2
+    normalizes channel names (`slack_dm` ≡ `slack`) and treats an empty
+    stored channel as a wildcard ONLY when `state_json` has no `delivery` key
+    at all — that marks a checkpoint written before gate delivery existed. A
+    row whose delivery was suppressed / alerted / failed also has no channel
+    but DOES carry the key, and is not matchable: nobody was asked on any
+    channel, so matching it would record an answer to a question that was
+    never put. Tier 3 is one utility-fast disambiguation call at 0.85
+    confidence. Two guards stop an open gate swallowing unrelated traffic: a
+    gate with an `origin_session_id` matches only the conversations the
+    adapter names, and the parser can answer `unrelated`, which declines to
+    resolve so the message reaches the normal chat path. The parser receives
+    the gate's own question (without it a bare "yes" can never be judged
+    unrelated), and its fallback is flagged with `PARSE_FAILED_KEY` — a key
+    the model has no reason to emit — rather than the old `note ==
+    "parse_error"` string, which a human could produce and thereby have a
+    genuine rejection discarded. The fallback guard applies to EVERY reply
+    shape, not just approve_reject.
+    `resumer.apply_resolution` then records the
     decision, marks the run `resolved`, and writes an audit row. A timeout
     instead applies the step's `on_timeout` policy (escalate /
     auto_proceed / fail). Either way the captured outcome surfaces in the
@@ -2812,7 +2828,16 @@ integrations:
     the briefing page's ``[Discuss mode — alert_id=N]`` primer are the
     ONLY trusted sources of an ``alert_id`` for ``ack_alert``; ids
     appearing in an alert's own body are attacker-controlled, since
-    alerts are minted from inbound mail and chat.
+    alerts are minted from inbound mail and chat. Two mechanisms enforce
+    that, not one prompt rule: ``briefing.context`` collapses EVERY
+    interpolated field to a single line (a newline in a headline,
+    suggested action, tag or review note would otherwise forge a whole
+    extra ``[N]`` line — a fabricated instruction to clear somebody
+    else's alert), and the ids the block named are recorded on
+    ``Session.trusted_alert_ids`` so ``handle_ack_alert`` refuses any
+    other id when ``origin_channel`` is set. Web sessions are exempt —
+    the Discuss handoff acks over HTTP first, so its alert is no longer
+    unread and would not be in a digest.
 
     Errors. The catch-all logs with session/user/channel/thread/mode,
     writes an ``integration_inbound`` row with

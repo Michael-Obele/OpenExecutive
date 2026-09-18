@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -212,3 +212,92 @@ def test_the_original_event_is_never_mutated() -> None:
 
     assert original.channel == ""
     assert routed.channel == "slack"
+
+
+def test_the_checkpointed_event_records_how_it_was_delivered() -> None:
+    """The resolver needs `delivery` to tell a legacy checkpoint (safe to
+    match loosely) from one nobody was actually asked about."""
+    send = AsyncMock(return_value=json.dumps({"status": "suppressed"}))
+
+    with patch(
+        "openexecutive.orchestrator.schedule_tools.handle_message_person", send
+    ):
+        routed, _ = _deliver(_gate())
+
+    assert routed.delivery == "suppressed"
+
+
+def test_self_approval_records_its_delivery_too() -> None:
+    current_session.set(
+        Session(
+            session_id="slack:dm:U123",
+            origin_channel="slack",
+            origin_channel_ref="U123",
+            caller_person_id=7,
+        )
+    )
+    routed, _ = _deliver(_gate(person_id=7))
+    assert routed.delivery == "self"
+
+
+def test_the_question_names_who_started_the_workflow() -> None:
+    """Any rostered chat user can launch a workflow, so an approval request
+    can reach the principal on someone else's initiative. An unattributed
+    question merely looks official."""
+    current_session.set(
+        Session(
+            session_id="slack:dm:U123",
+            origin_channel="slack",
+            origin_channel_ref="U123",
+            caller_person_id=7,
+        )
+    )
+    send = AsyncMock(
+        return_value=json.dumps(
+            {
+                "status": "sent",
+                "channel": "slack",
+                "channel_ref": "U500",
+                "message_id": "m-1",
+            }
+        )
+    )
+    launcher = MagicMock()
+    launcher.full_name = "Dana Kim"
+
+    with (
+        patch(
+            "openexecutive.orchestrator.schedule_tools.handle_message_person", send
+        ),
+        patch("openexecutive.people.store.get_person", return_value=launcher),
+    ):
+        _deliver(_gate(person_id=99))
+
+    assert "started by Dana Kim" in send.await_args.args[0]["text"]
+
+
+def test_an_unresolvable_launcher_does_not_break_delivery() -> None:
+    send = AsyncMock(
+        return_value=json.dumps(
+            {
+                "status": "sent",
+                "channel": "slack",
+                "channel_ref": "U500",
+                "message_id": "m-1",
+            }
+        )
+    )
+
+    with (
+        patch(
+            "openexecutive.orchestrator.schedule_tools.handle_message_person", send
+        ),
+        patch(
+            "openexecutive.people.store.get_person",
+            side_effect=RuntimeError("db down"),
+        ),
+    ):
+        _, delivery = _deliver(_gate())
+
+    assert delivery == "sent"
+    assert "started by" not in send.await_args.args[0]["text"]

@@ -12,6 +12,7 @@ from typing import Any
 from openexecutive.audit import bind_turn, clear_turn, set_turn
 from openexecutive.audit import log_event as audit_log
 from openexecutive.audit.redaction import (
+    ERROR_DETAIL_LEN,
     audit_tool_input,
     audit_tool_input_full,
     audit_tool_result,
@@ -105,11 +106,6 @@ def _trunc(value: Any, limit: int = 200) -> str:
     return f"{s[:limit]}…[truncated {len(s) - limit} chars]"
 
 
-# Cap on the exception text handed back to the model and written to the audit
-# row. Long enough to name the failure, short enough not to blow out a turn.
-_TOOL_ERROR_MAXLEN = 300
-
-
 def _tool_error_result(tool_name: str, exc: BaseException) -> str:
     """Render a crashed tool handler as a JSON tool_result the model can read.
 
@@ -120,9 +116,20 @@ def _tool_error_result(tool_name: str, exc: BaseException) -> str:
     showed the user a generic apology with no way to tell which tool failed.
     Converting the exception into a normal error tool_result keeps the turn
     alive and lets the model recover on the next iteration.
+
+    Only the exception's TYPE goes to the model. Its message can carry
+    filesystem paths, a validation error echoing the input, or a third-party
+    HTTP body — and anything in model context can end up quoted back to the
+    user. The full repr stays in the server log and the audit row.
     """
-    detail = f"{type(exc).__name__}: {exc}"[:_TOOL_ERROR_MAXLEN]
-    return json.dumps({"error": f"{tool_name} failed: {detail}"})
+    return json.dumps(
+        {
+            "error": (
+                f"{tool_name} failed with {type(exc).__name__}. The failure is "
+                "recorded; do not retry the same call unchanged."
+            )
+        }
+    )
 
 
 def _build_current_speaker_block(person_id: int | None) -> str | None:
@@ -1401,7 +1408,7 @@ class Executive:
                                 "kind": "skill",
                                 "iteration": iteration,
                                 "ok": False,
-                                "error": repr(raw)[:_TOOL_ERROR_MAXLEN],
+                                "error": repr(raw)[:ERROR_DETAIL_LEN],
                             },
                         )
                         # Hand the model an error tool_result and move on. No
@@ -1502,7 +1509,7 @@ class Executive:
                                 "kind": "mcp",
                                 "iteration": iteration,
                                 "ok": False,
-                                "error": repr(raw)[:_TOOL_ERROR_MAXLEN],
+                                "error": repr(raw)[:ERROR_DETAIL_LEN],
                             },
                         )
                         results_by_id[tu["id"]] = _tool_error_result(tool_label, raw)

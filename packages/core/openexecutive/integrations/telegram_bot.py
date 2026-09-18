@@ -157,40 +157,28 @@ async def _process_and_reply(
         },
     )
     # WaitForHuman inbound resolver — check BEFORE alert triage.
-    try:
-        from openexecutive.people.store import find_person_by_telegram_chat_id
-        from openexecutive.workflows.inbound_resolver import resolve_inbound_message
-        from openexecutive.workflows.resumer import (
-            apply_resolution,
-            resolution_acknowledgement,
-        )
+    from openexecutive.people.store import find_person_by_telegram_chat_id
+    from openexecutive.workflows.inbound_resolver import resolve_and_acknowledge
 
-        person = find_person_by_telegram_chat_id(str(chat_id))
-        if person is not None and person.id is not None:
-            resolution = await resolve_inbound_message(
-                channel="telegram",
-                channel_ref=str(chat_id),
-                from_person_id=person.id,
-                text=message_text,
-                message_id=str(message_id),
-                in_reply_to="",
-                session_id=session_id,
-            )
-            if resolution is not None and resolution.run_id:
-                success = await apply_resolution(resolution.run_id, resolution)
-                if success:
-                    await send_message(
-                        token,
-                        chat_id,
-                        await asyncio.to_thread(
-                            resolution_acknowledgement,
-                            resolution.run_id,
-                            resolution,
-                        ),
-                    )
-                    return
-    except Exception:
-        logger.exception("Telegram: inbound resolver check failed")
+    async def _send_ack(text: str) -> None:
+        await send_message(token, chat_id, text)
+
+    _tg_person = find_person_by_telegram_chat_id(str(chat_id))
+    if (
+        _tg_person is not None
+        and _tg_person.id is not None
+        and await resolve_and_acknowledge(
+            channel="telegram",
+            channel_ref=str(chat_id),
+            person_id=_tg_person.id,
+            text=message_text,
+            send=_send_ack,
+            message_id=str(message_id),
+            in_reply_to="",
+            session_ids=[session_id],
+        )
+    ):
+        return
 
     # Fork into alert triage pipeline (fire-and-forget, same pattern as other integrations).
     try:

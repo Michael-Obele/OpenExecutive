@@ -90,13 +90,18 @@ async def deliver_gate_question(
                     # No outbound message to reference — the question rides in
                     # the Executive's own reply, so tier 2 does the matching.
                     "outbound_message_id": "",
+                    "delivery": "self",
                 }
             ),
             "self",
         )
 
     # --- mode 2: ask them wherever they actually are -------------------- #
-    question = _compose_question(event, workflow_title=workflow_title)
+    question = _compose_question(
+        event,
+        workflow_title=workflow_title,
+        launched_by=_launcher_name(session),
+    )
     try:
         from openexecutive.orchestrator.schedule_tools import handle_message_person
 
@@ -110,7 +115,7 @@ async def deliver_gate_question(
             event.person_id,
             run_id,
         )
-        return event.model_copy(), "failed"
+        return event.model_copy(update={"delivery": "failed"}), "failed"
 
     status = str(parsed.get("status") or "")
     if status == "sent":
@@ -120,6 +125,7 @@ async def deliver_gate_question(
                     "channel": normalize_channel(str(parsed.get("channel") or "")),
                     "channel_ref": str(parsed.get("channel_ref") or ""),
                     "outbound_message_id": str(parsed.get("message_id") or ""),
+                    "delivery": "sent",
                 }
             ),
             "sent",
@@ -135,7 +141,7 @@ async def deliver_gate_question(
             run_id,
             event.person_id,
         )
-        return event.model_copy(), "alerted"
+        return event.model_copy(update={"delivery": "alerted"}), "alerted"
 
     if status == "suppressed":
         logger.info(
@@ -144,7 +150,7 @@ async def deliver_gate_question(
             parsed.get("reason", "unknown"),
             event.person_id,
         )
-        return event.model_copy(), "suppressed"
+        return event.model_copy(update={"delivery": "suppressed"}), "suppressed"
 
     logger.warning(
         "gate_delivery: run %s delivery returned %s for person %s",
@@ -164,11 +170,40 @@ def _session_caller_id(session: object) -> int | None:
     return None
 
 
-def _compose_question(event: WaitForHumanEvent, *, workflow_title: str) -> str:
+def _launcher_name(session: object) -> str:
+    """Who set this workflow running, when we can tell.
+
+    Any rostered chat user can launch a workflow, so an approval question can
+    arrive at the principal on someone else's initiative. Naming the launcher
+    is the difference between a sign-off request and an anonymous one that
+    merely looks official.
+    """
+    person_id = _session_caller_id(session)
+    if person_id is None:
+        return ""
+    try:
+        from openexecutive.people.store import get_person
+
+        person = get_person(person_id)
+    except Exception:
+        logger.exception("gate_delivery: could not resolve launcher %s", person_id)
+        return ""
+    return getattr(person, "full_name", "") or "" if person else ""
+
+
+def _compose_question(
+    event: WaitForHumanEvent, *, workflow_title: str, launched_by: str = ""
+) -> str:
     """The message the approver receives. Plain text — no channel has buttons."""
     lines = [event.question.strip() or "A workflow needs your sign-off."]
-    if workflow_title:
+    if workflow_title and launched_by:
+        lines.append(
+            f"\n(From the '{workflow_title}' workflow, started by {launched_by}.)"
+        )
+    elif workflow_title:
         lines.append(f"\n(From the '{workflow_title}' workflow.)")
+    elif launched_by:
+        lines.append(f"\n(Started by {launched_by}.)")
     if event.context_summary:
         lines.append(f"\n{event.context_summary.strip()}")
     if event.expected_reply_shape == "approve_reject":

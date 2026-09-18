@@ -31,6 +31,7 @@ def _seed_awaiting_run(
     channel: str = "",
     outbound_message_id: str = "",
     origin_session_id: str = "",
+    delivery: str | None = None,
     *,
     db: Path,
 ) -> None:
@@ -44,7 +45,7 @@ def _seed_awaiting_run(
     populated shape now ask for it explicitly.
     """
     wf_persistence.create_run(run_id, "test_wf", "Test", {}, db_path=db)
-    state = json.dumps({
+    state_dict = {
         "on_timeout": "escalate",
         "channel": channel,
         "channel_ref": "U123",
@@ -52,7 +53,12 @@ def _seed_awaiting_run(
         "origin_session_id": origin_session_id,
         "expected_reply_shape": "approve_reject",
         "question": "Please approve this vendor renegotiation.",
-    })
+    }
+    # Omitted entirely for a legacy row — its ABSENCE is what marks a
+    # checkpoint written before gate delivery existed.
+    if delivery is not None:
+        state_dict["delivery"] = delivery
+    state = json.dumps(state_dict)
     until = datetime.now(UTC) + timedelta(hours=48)
     wf_persistence.save_checkpoint(run_id, state, person_id, until, db_path=db)
 
@@ -347,14 +353,14 @@ def test_session_scoped_gate_matches_only_its_own_conversation() -> None:
             channel_ref="U123",
             from_person_id=7,
             text="approved",
-            session_id="slack:dm:U123",
+            session_ids=["slack:dm:U123"],
         )
         other_thread = _run_resolver(
             channel="slack",
             channel_ref="U123",
             from_person_id=7,
             text="approved",
-            session_id="slack:thread:C1:1700000000.0",
+            session_ids=["slack:thread:C1:1700000000.0"],
         )
 
     assert matched is not None
@@ -375,7 +381,7 @@ def test_unscoped_gate_still_matches_any_session() -> None:
             channel_ref="U123",
             from_person_id=7,
             text="approved",
-            session_id="slack:thread:C1:1700000000.0",
+            session_ids=["slack:thread:C1:1700000000.0"],
         )
 
     assert result is not None
@@ -408,20 +414,86 @@ def test_unrelated_message_does_not_resolve_the_gate() -> None:
 
 
 def test_parser_failure_leaves_the_gate_open() -> None:
-    """parse_decision's fallback is a fabricated 'defer', not a verdict.
+    """parse_decision's fallback is a fabricated answer, not a verdict.
     Recording it would close a sign-off on a parser outage."""
+    from openexecutive.workflows.wait_for_human import PARSE_FAILED_KEY
+
     db = episodic.DB_PATH
     _seed_awaiting_run("run-1", person_id=7, channel="slack", db=db)
 
     with patch(
         "openexecutive.workflows.inbound_resolver.parse_decision",
-        new=AsyncMock(return_value={"decision": "defer", "note": "parse_error"}),
+        new=AsyncMock(
+            return_value={"decision": "defer", "note": "x", PARSE_FAILED_KEY: True}
+        ),
     ):
         result = _run_resolver(
             channel="slack", channel_ref="U123", from_person_id=7, text="approved"
         )
 
     assert result is None
+
+
+def test_a_model_written_parse_error_note_is_not_mistaken_for_the_fallback() -> None:
+    """The sentinel used to be `note == "parse_error"`, which the model can
+    emit — a person replying "no, your parser threw a parse_error" would have
+    had their genuine rejection silently discarded."""
+    db = episodic.DB_PATH
+    _seed_awaiting_run("run-1", person_id=7, channel="slack", db=db)
+
+    with patch(
+        "openexecutive.workflows.inbound_resolver.parse_decision",
+        new=AsyncMock(
+            return_value={"decision": "reject", "note": "parse_error mentioned"}
+        ),
+    ):
+        result = _run_resolver(
+            channel="slack",
+            channel_ref="U123",
+            from_person_id=7,
+            text="no — your parser threw a parse_error on my last message",
+        )
+
+    assert result is not None
+    assert result.parsed_decision["decision"] == "reject"
+
+
+def test_parser_failure_leaves_a_free_text_gate_open_too() -> None:
+    """The guard used to run only for approve_reject, so a parser outage on a
+    free_text gate recorded an empty string as the answer and closed it."""
+    from openexecutive.workflows.wait_for_human import PARSE_FAILED_KEY
+
+    db = episodic.DB_PATH
+    _seed_awaiting_run("run-1", person_id=7, channel="slack", db=db)
+
+    with patch(
+        "openexecutive.workflows.inbound_resolver.parse_decision",
+        new=AsyncMock(return_value={"text": "", PARSE_FAILED_KEY: True}),
+    ):
+        result = _run_resolver(
+            channel="slack", channel_ref="U123", from_person_id=7, text="anything"
+        )
+
+    assert result is None
+
+
+def test_the_fallback_marker_is_not_stored_on_the_resolution() -> None:
+    """It is internal plumbing, not part of the recorded decision."""
+    from openexecutive.workflows.wait_for_human import PARSE_FAILED_KEY
+
+    db = episodic.DB_PATH
+    _seed_awaiting_run("run-1", person_id=7, channel="slack", db=db)
+
+    with patch(
+        "openexecutive.workflows.inbound_resolver.parse_decision",
+        new=AsyncMock(return_value=dict(_APPROVE)),
+    ):
+        result = _run_resolver(
+            channel="slack", channel_ref="U123", from_person_id=7, text="approved"
+        )
+
+    assert result is not None
+    assert PARSE_FAILED_KEY not in result.parsed_decision
 
 
 def test_a_genuine_defer_still_resolves() -> None:
@@ -439,3 +511,98 @@ def test_a_genuine_defer_still_resolves() -> None:
 
     assert result is not None
     assert result.parsed_decision["decision"] == "defer"
+
+
+def test_undelivered_gate_is_not_wildcard_matched() -> None:
+    """A gate whose delivery was suppressed / alerted / failed has no stored
+    channel — the same shape as a legacy row. It must NOT be matched loosely:
+    nobody was asked on any channel, so matching would record an answer to a
+    question that was never put."""
+    db = episodic.DB_PATH
+    _seed_awaiting_run(
+        "run-1", person_id=7, channel="", delivery="suppressed", db=db
+    )
+
+    result = _run_resolver(
+        channel="telegram",
+        channel_ref="556677",
+        from_person_id=7,
+        text="what's on my plate?",
+    )
+
+    assert result is None
+
+
+def test_legacy_row_without_a_delivery_key_is_still_wildcard_matched() -> None:
+    """Rows checkpointed before gate delivery existed carry no `delivery` key
+    at all — those stay answerable."""
+    db = episodic.DB_PATH
+    _seed_awaiting_run("run-1", person_id=7, channel="", delivery=None, db=db)
+
+    with patch(
+        "openexecutive.workflows.inbound_resolver.parse_decision",
+        new=AsyncMock(return_value=_APPROVE),
+    ):
+        result = _run_resolver(
+            channel="telegram", channel_ref="556677", from_person_id=7, text="ok"
+        )
+
+    assert result is not None
+
+
+def test_tier1_rejection_does_not_block_a_sibling_gate_with_no_outbound_id() -> None:
+    """The predicate was a global `any()`: one delivered gate's outbound id
+    blocked an unrelated self-approval gate from ever being answered."""
+    db = episodic.DB_PATH
+    _seed_awaiting_run(
+        "delivered", person_id=7, channel="slack", outbound_message_id="T_a", db=db
+    )
+    _seed_awaiting_run("self-gate", person_id=7, channel="slack", db=db)
+
+    with patch(
+        "openexecutive.workflows.inbound_resolver.parse_decision",
+        new=AsyncMock(return_value=_APPROVE),
+    ):
+        result = _run_resolver(
+            channel="slack",
+            channel_ref="U123",
+            from_person_id=7,
+            text="approved",
+            in_reply_to="T_x",  # matches neither
+        )
+
+    # The delivered gate is ruled out by the unmatched reference; the self
+    # gate is the only candidate left, so tier 2 takes it.
+    assert result is not None
+    assert result.run_id == "self-gate"
+
+
+def test_a_gate_accepts_an_aliased_session_id() -> None:
+    """A Slack channel mention raises its gate under the rolling channel
+    session, but the answer arrives in the thread the bot's reply rooted —
+    a different id. The adapter offers both."""
+    db = episodic.DB_PATH
+    _seed_awaiting_run(
+        "run-1",
+        person_id=7,
+        channel="slack",
+        origin_session_id="slack:channel:C1:U123",
+        db=db,
+    )
+
+    with patch(
+        "openexecutive.workflows.inbound_resolver.parse_decision",
+        new=AsyncMock(return_value=_APPROVE),
+    ):
+        result = _run_resolver(
+            channel="slack",
+            channel_ref="U123",
+            from_person_id=7,
+            text="approved",
+            session_ids=[
+                "slack:thread:C1:1700000000.0",
+                "slack:channel:C1:U123",
+            ],
+        )
+
+    assert result is not None

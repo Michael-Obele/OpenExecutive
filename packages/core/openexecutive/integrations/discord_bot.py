@@ -631,38 +631,21 @@ async def _handle_message(
 
     # WaitForHuman inbound resolver — check before alert triage.
     if discord_user_id:
-        try:
-            from openexecutive.people.store import find_person_by_discord_id
-            from openexecutive.workflows.inbound_resolver import resolve_inbound_message
-            from openexecutive.workflows.resumer import (
-                apply_resolution,
-                resolution_acknowledgement,
-            )
+        from openexecutive.people.store import find_person_by_discord_id
+        from openexecutive.workflows.inbound_resolver import resolve_and_acknowledge
 
-            person = find_person_by_discord_id(discord_user_id)
-            if person is not None and person.id is not None:
-                resolution = await resolve_inbound_message(
-                    channel="discord",
-                    channel_ref=discord_user_id,
-                    from_person_id=person.id,
-                    text=text,
-                    message_id=message_id,
-                    in_reply_to=thread_id or "",
-                    session_id=session_id,
-                )
-                if resolution is not None and resolution.run_id:
-                    success = await apply_resolution(resolution.run_id, resolution)
-                    if success:
-                        await send_fn(
-                            await asyncio.to_thread(
-                                resolution_acknowledgement,
-                                resolution.run_id,
-                                resolution,
-                            )
-                        )
-                        return
-        except Exception:
-            logger.exception("Discord: inbound resolver check failed")
+        person = find_person_by_discord_id(discord_user_id)
+        if person is not None and person.id is not None and await resolve_and_acknowledge(
+            channel="discord",
+            channel_ref=discord_user_id,
+            person_id=person.id,
+            text=text,
+            send=send_fn,
+            message_id=message_id,
+            in_reply_to=thread_id or "",
+            session_ids=[session_id],
+        ):
+            return
 
     # Fork into alerts triage pipeline.
     try:

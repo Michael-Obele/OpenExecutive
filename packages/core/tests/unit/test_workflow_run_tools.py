@@ -12,6 +12,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from pydantic import BaseModel
@@ -375,3 +376,25 @@ def test_undelivered_gate_is_not_reported_as_waiting_on_them(
 
     assert out["delivery"] == "suppressed"
     assert "NOT been asked" in out["presentation_hint"]
+
+
+def test_every_delivery_status_has_a_presentation_hint() -> None:
+    """A new DeliveryStatus must not fall through to the "could not be
+    delivered" fallback and silently mis-describe itself."""
+    from typing import get_args
+
+    from openexecutive.orchestrator.workflow_run_tools import (
+        _AWAITING_HINTS,
+        _assert_hints_cover_every_delivery_status,
+    )
+    from openexecutive.workflows.gate_delivery import DeliveryStatus
+
+    assert set(get_args(DeliveryStatus)) <= set(_AWAITING_HINTS)
+
+    # And the guard actually bites.
+    with patch.dict(
+        "openexecutive.orchestrator.workflow_run_tools._AWAITING_HINTS",
+        {k: v for k, v in _AWAITING_HINTS.items() if k != "alerted"},
+        clear=True,
+    ), pytest.raises(RuntimeError, match="alerted"):
+        _assert_hints_cover_every_delivery_status()

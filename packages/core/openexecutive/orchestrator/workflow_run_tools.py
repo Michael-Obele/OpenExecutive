@@ -29,6 +29,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from openexecutive.audit import log_event as audit_log
+from openexecutive.audit.redaction import ERROR_DETAIL_LEN
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +74,34 @@ _AWAITING_HINTS: dict[str, str] = {
     ),
 }
 
-# Cap error text stored in the audit detail (kept short so audit rows stay
-# scannable) and the exception snippet surfaced back to the model.
-_AUDIT_ERR_MAXLEN = 300
+
+def _assert_hints_cover_every_delivery_status() -> None:
+    """Fail at import if a DeliveryStatus has no hint.
+
+    The hints and the `run_workflow` tool description are two hand-written
+    paraphrases of the same delivery semantics, so a new status could
+    otherwise be added with nothing forcing either to be updated — and the
+    fallback would quietly describe it as "could not be delivered".
+    """
+    from typing import get_args
+
+    from openexecutive.workflows.gate_delivery import DeliveryStatus
+
+    missing = set(get_args(DeliveryStatus)) - set(_AWAITING_HINTS)
+    if missing:
+        raise RuntimeError(
+            "_AWAITING_HINTS is missing a presentation hint for "
+            f"{sorted(missing)} — add one, and check whether "
+            "RUN_WORKFLOW_TOOL's description still describes the delivery "
+            "outcomes correctly."
+        )
+
+
+_assert_hints_cover_every_delivery_status()
+
+# The exception snippet surfaced back to the model when a workflow crashes
+# mid-run. Shorter than ERROR_DETAIL_LEN because it is quoted inside a longer
+# sentence; audit-detail truncation uses the shared cap.
 _EXC_SNIPPET_MAXLEN = 200
 
 
@@ -165,7 +191,7 @@ def _audit(tool: str, kind: str, ok: bool, summary: str, details: dict[str, Any]
 
 
 def _err(tool: str, msg: str, kind: str = "read") -> str:
-    _audit(tool, kind, False, f"{tool}: {msg}", {"error": msg[:_AUDIT_ERR_MAXLEN]})
+    _audit(tool, kind, False, f"{tool}: {msg}", {"error": msg[:ERROR_DETAIL_LEN]})
     return json.dumps({"error": msg})
 
 

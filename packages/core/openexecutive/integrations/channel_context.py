@@ -31,6 +31,12 @@ _CHANNEL_LABELS = {
     "email": "email",
 }
 
+# Channels whose adapter actually calls the wait-for-human inbound resolver.
+# Google Chat and email do not, so telling the model a sign-off "can be
+# answered here" on those would be exactly the overclaim this module exists to
+# stop. Keep this in step with the `resolve_and_acknowledge` call sites.
+_RESOLVER_CHANNELS = frozenset({"slack", "discord", "telegram"})
+
 
 def build_channel_context_block(
     channel: str, *, ui_base_url: str | None = None
@@ -63,6 +69,19 @@ def build_channel_context_block(
         f"the briefing page ({briefing_url})" if briefing_url else "the briefing page"
     )
 
+    if channel in _RESOLVER_CHANNELS:
+        signoff = (
+            "- A workflow sign-off you are explicitly waiting on CAN be "
+            "answered here: their reply in this conversation is recorded "
+            "against it.\n"
+        )
+    else:
+        signoff = (
+            f"- You cannot record a workflow sign-off from {label}. If one is "
+            "waiting on them, say where it is waiting and do not ask them to "
+            "approve it here.\n"
+        )
+
     return (
         f"You are talking to this person over {label}, not in the Open "
         "Executive web app. They cannot see the app's cards, buttons, or "
@@ -77,8 +96,7 @@ def build_channel_context_block(
         "and point them there — do not imply that replying here approves it.\n"
         "- Proposals that book something (a meeting, a calendar hold) can ONLY "
         f"be approved on {where}. You have no tool for those. Say so plainly.\n"
-        "- A workflow sign-off you are explicitly waiting on CAN be answered "
-        "here: their reply in this conversation is recorded against it.\n"
+        f"{signoff}"
         "\n"
         "Never ask for a confirmation you cannot act on. If the action needs "
         "the web app, say that in the same breath as asking — don't invite a "

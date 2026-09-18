@@ -5,6 +5,8 @@ import contextlib
 import logging
 import re
 
+from openexecutive.audit.redaction import ERROR_DETAIL_LEN
+
 logger = logging.getLogger(__name__)
 
 # Cached at startup via client.auth_test(). Used to:
@@ -132,6 +134,32 @@ def _persist_turn(
             update_session_timestamp(sid)
         except Exception:
             logger.exception("Slack: failed to persist turn for session %s", sid)
+
+
+def _session_id_aliases(
+    *,
+    mode: str,
+    channel: str,
+    user_id: str,
+    session_id: str,
+    is_threaded_reply: bool,
+) -> list[str]:
+    """Every session id this inbound message legitimately belongs to.
+
+    Normally just its own. The exception is a reply inside a thread in a
+    channel: the bot may have rooted that thread by answering this person's
+    @mention, in which case the conversation ALSO lives under the rolling
+    `slack:channel:{channel}:{user}` session — the same pair `_persist_turn`
+    double-writes history to. Without the parent id here, a gate raised on the
+    mention can never be answered in the thread it was asked in.
+
+    The widening is bounded: same person, same channel, and only for gates
+    that named a session in the first place.
+    """
+    aliases = [session_id]
+    if mode != "dm" and is_threaded_reply and channel and user_id:
+        aliases.append(f"slack:channel:{channel}:{user_id}")
+    return aliases
 
 
 def _replies_contain_bot_message(messages: list[dict], bot_user_id: str | None) -> bool:
@@ -389,49 +417,43 @@ async def create_slack_app():
             return
 
         # WaitForHuman inbound resolver — check BEFORE alert triage.
-        # If this message resolves an awaiting workflow run, skip triage.
-        if slack_user_id:
-            try:
-                from openexecutive.people.store import find_person_by_slack_id
-                from openexecutive.workflows.inbound_resolver import resolve_inbound_message
-                from openexecutive.workflows.resumer import (
-                    apply_resolution,
-                    resolution_acknowledgement,
-                )
+        # If this message answers an awaiting workflow run, skip triage.
+        if sender_person.id is not None:
+            from openexecutive.workflows.inbound_resolver import (
+                resolve_and_acknowledge,
+            )
 
-                person = await asyncio.to_thread(
-                    find_person_by_slack_id, slack_user_id
-                )
-                if person is not None and person.id is not None:
-                    resolution = await resolve_inbound_message(
-                        channel="slack",
-                        channel_ref=slack_user_id,
-                        from_person_id=person.id,
-                        text=cleaned,
-                        message_id=str(event.get("ts") or ""),
-                        # Only a reply INSIDE a thread carries a meaningful
-                        # reply reference. `thread_ts` falls back to this
-                        # message's own ts, and passing that made the resolver
-                        # treat every Slack message as an explicit reference to
-                        # nothing — which short-circuited tiers 2 and 3 and made
-                        # Slack approvals impossible (#136).
-                        in_reply_to=str(thread_ts) if is_threaded_reply else "",
-                        session_id=session_id,
-                    )
-                    if resolution is not None and resolution.run_id:
-                        success = await apply_resolution(resolution.run_id, resolution)
-                        if success:
-                            await say(
-                                text=await asyncio.to_thread(
-                                    resolution_acknowledgement,
-                                    resolution.run_id,
-                                    resolution,
-                                ),
-                                thread_ts=thread_ts,
-                            )
-                            return
-            except Exception:
-                logger.exception("Slack: inbound resolver check failed")
+            async def _say_ack(text: str) -> None:
+                await say(text=text, thread_ts=thread_ts)
+
+            if await resolve_and_acknowledge(
+                channel="slack",
+                channel_ref=slack_user_id,
+                person_id=sender_person.id,
+                text=cleaned,
+                send=_say_ack,
+                message_id=str(event.get("ts") or ""),
+                # Only a reply INSIDE a thread carries a meaningful reply
+                # reference. `thread_ts` falls back to this message's own ts,
+                # and passing that made the resolver treat every Slack message
+                # as an explicit reference to nothing — which short-circuited
+                # tiers 2 and 3 and made Slack approvals impossible (#136).
+                in_reply_to=str(thread_ts) if is_threaded_reply else "",
+                # Both ids this conversation is reachable under. A mention in
+                # a channel raises its gate under the rolling channel session,
+                # but the bot's reply roots a thread — so the answer arrives
+                # under the THREAD id. Offering only one made that gate
+                # permanently unanswerable, which is #136 one surface over.
+                # Mirrors the history double-write in `_persist_turn`.
+                session_ids=_session_id_aliases(
+                    mode=mode,
+                    channel=str(event.get("channel", "")),
+                    user_id=str(slack_user_id),
+                    session_id=session_id,
+                    is_threaded_reply=is_threaded_reply,
+                ),
+            ):
+                return
 
         # Response gate — only for thread continuations (mentions/DMs are
         # unconditional). Single-human threads bypass: every message in a
@@ -586,9 +608,15 @@ async def create_slack_app():
                         format_open_alerts_for_prompt,
                     )
 
+                    rendered_alert_ids: list[int] = []
                     briefing_context = await asyncio.to_thread(
-                        format_open_alerts_for_prompt
+                        format_open_alerts_for_prompt,
+                        rendered_ids=rendered_alert_ids,
                     )
+                    # Server-side counterpart to the trust rule in
+                    # ack_alert's description: only ids this block actually
+                    # named can be acked from here.
+                    session.trusted_alert_ids = set(rendered_alert_ids)
 
                 # On the 1:1 DM path, hydrate with the context of any recent
                 # outbound DM oe sent this user, so a reply oe solicited from
@@ -694,7 +722,7 @@ async def create_slack_app():
                         "thread_ts": thread_ts,
                         "mode": mode,
                         "outcome": "handler_error",
-                        "error": repr(exc)[:300],
+                        "error": repr(exc)[:ERROR_DETAIL_LEN],
                     },
                 )
             # Guard the apology itself. Telegram and Google Chat already do
@@ -718,6 +746,14 @@ async def create_slack_app():
         # Bolt auto-injects `client` (an AsyncWebClient) when listed in the
         # signature; we pass it through so the multi-peer thread-member
         # fetch can call conversations.replies without a separate import.
+        #
+        # Slack fires app_mention for an @-mention inside a DM too, and the
+        # `message` listener has already taken that one as mode="dm". Handling
+        # it twice meant two replies AND two different session ids, forking
+        # the conversation's history — and a gate raised on the mention copy
+        # recorded a session the user's next plain DM would never match.
+        if event.get("channel_type") == "im":
+            return
         async with inflight:
             await _handle_message(event, say, client=client, mode="mention")
 

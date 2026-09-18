@@ -611,7 +611,7 @@ async def test_dm_does_not_pass_its_own_ts_as_a_reply_reference() -> None:
 
     kwargs = resolve.await_args.kwargs
     assert kwargs["in_reply_to"] == ""
-    assert kwargs["session_id"] == "slack:dm:U123"
+    assert kwargs["session_ids"] == ["slack:dm:U123"]
     assert kwargs["channel"] == "slack"
 
 
@@ -642,7 +642,10 @@ async def test_threaded_reply_still_passes_a_real_reply_reference() -> None:
 
     kwargs = resolve.await_args.kwargs
     assert kwargs["in_reply_to"] == "1700000000.0"
-    assert kwargs["session_id"] == "slack:thread:C1:1700000000.0"
+    assert kwargs["session_ids"] == [
+        "slack:thread:C1:1700000000.0",
+        "slack:channel:C1:U123",
+    ]
 
 
 @pytest.mark.asyncio
@@ -717,3 +720,108 @@ async def test_session_declares_its_origin_channel() -> None:
     assert session.origin_channel == "slack"
     assert session.origin_channel_ref == "U123"
     assert session.caller_person_id == 7
+
+
+@pytest.mark.asyncio
+async def test_thread_reply_offers_the_parent_channel_session_too() -> None:
+    """A channel mention raises its gate under `slack:channel:{c}:{u}`, but
+    the bot's reply roots a thread — so the answer arrives under the THREAD
+    id. Offering only that id left the gate permanently unanswerable, which
+    is #136 one surface over."""
+    event = {
+        "text": "approved",
+        "user": "U123",
+        "channel": "C1",
+        "ts": "1700000500.0",
+        "thread_ts": "1700000000.0",
+    }
+    async with _listeners() as listeners:
+        with _Harness() as h:
+            h.client.conversations_replies = AsyncMock(
+                return_value={"messages": [{"user": "UBOT", "text": "shall I?"}]}
+            )
+            resolve = AsyncMock(return_value=None)
+            with patch(
+                "openexecutive.workflows.inbound_resolver.resolve_inbound_message",
+                resolve,
+            ):
+                await listeners["handle_message"](
+                    event=event, say=h.say, client=h.client
+                )
+
+    ids = resolve.await_args.kwargs["session_ids"]
+    assert "slack:thread:C1:1700000000.0" in ids
+    assert "slack:channel:C1:U123" in ids
+
+
+@pytest.mark.asyncio
+async def test_dm_offers_only_its_own_session() -> None:
+    """The channel alias must not leak into DMs — there is no parent there."""
+    async with _listeners() as listeners:
+        with _Harness() as h:
+            resolve = AsyncMock(return_value=None)
+            with patch(
+                "openexecutive.workflows.inbound_resolver.resolve_inbound_message",
+                resolve,
+            ):
+                await listeners["handle_message"](
+                    event=dict(DM_EVENT), say=h.say, client=h.client
+                )
+
+    assert resolve.await_args.kwargs["session_ids"] == ["slack:dm:U123"]
+
+
+@pytest.mark.asyncio
+async def test_at_mention_inside_a_dm_is_handled_once() -> None:
+    """Slack fires BOTH `message` (im) and `app_mention` for an @-mention in a
+    DM. Handling both meant two replies and two different session ids, forking
+    the conversation's history."""
+    event = dict(DM_EVENT, text="<@UBOT> approve the budget")
+    async with _listeners() as listeners:
+        with _Harness() as h:
+            await listeners["handle_message"](
+                event=dict(event), say=h.say, client=h.client
+            )
+            await listeners["handle_mention"](
+                event=dict(event), say=h.say, client=h.client
+            )
+
+            assert h.chat.await_count == 1
+            assert h.say.await_count == 1
+            assert list(h.store.created) == ["slack:dm:U123"]
+
+
+@pytest.mark.asyncio
+async def test_session_records_the_alert_ids_the_briefing_block_named() -> None:
+    """Server-side counterpart to ack_alert's trust rule: only ids this block
+    actually named can be acked from the channel."""
+    async with _listeners() as listeners:
+        with _Harness() as h:
+            h.person.is_principal = True
+
+            def _fake_digest(rendered_ids: list[int] | None = None, **_kw: Any) -> str:
+                if rendered_ids is not None:
+                    rendered_ids.extend([11, 12])
+                return "[11] (action) A\n[12] (action) B"
+
+            with patch(
+                "openexecutive.briefing.context.format_open_alerts_for_prompt",
+                side_effect=_fake_digest,
+            ):
+                await listeners["handle_message"](
+                    event=dict(DM_EVENT), say=h.say, client=h.client
+                )
+
+    assert h.chat.await_args.kwargs["session"].trusted_alert_ids == {11, 12}
+
+
+@pytest.mark.asyncio
+async def test_a_turn_without_a_briefing_block_trusts_no_alert_ids() -> None:
+    async with _listeners() as listeners:
+        with _Harness() as h:
+            h.person.is_principal = False
+            await listeners["handle_message"](
+                event=dict(DM_EVENT), say=h.say, client=h.client
+            )
+
+    assert h.chat.await_args.kwargs["session"].trusted_alert_ids == set()
