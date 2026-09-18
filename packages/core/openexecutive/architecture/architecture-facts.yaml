@@ -2572,31 +2572,66 @@ workflows:
     Today dashboard for the founder to see.
 
     Every adapter replies with the one shared wording from
-    `resumer.resolution_acknowledgement`, which names the decision and
-    states that the sign-off is closed and the workflow does not continue
-    on its own. The previous "Got it — your response has been recorded."
-    implied work was now in flight.
+    `resumer.resolution_acknowledgement`, which names the decision (via the
+    shared `DECISION_VERBS` map in wait_for_human.py) and then says what
+    actually happens next, keyed on whether the run carries a
+    `resume_state_json`: resuming now, stopping here because the answer was
+    a reject/defer, or — for a pause-only gate — closed out with nothing
+    further. The original "Got it — your response has been recorded."
+    implied work was in flight when none was; saying "the workflow does not
+    continue on its own" for a resumable gate would now be the same error
+    in the other direction.
 
-    NOT YET SHIPPED — full generator resume: re-entering the paused async
-    generator to run the *next* workflow step automatically is deferred
-    to "Phase 7" (see the note in `resumer.py`). Today a paused multi-step
-    workflow captures the human's decision and stops there; it does not
-    continue its remaining steps on its own. `on_timeout='auto_proceed'`
-    does not proceed either — it synthesizes a resolution through the same
-    `apply_resolution` path, so `ApprovalGateStepSpec`'s suggestion to use
-    it as a workaround for the resume gap does not actually work. Single-step approval gates
-    (the common case) are fully served by the capture-and-surface path
-    above; multi-step auto-continuation is the gap.
+    RESUME — a paused run continues on its own. Nothing serializes a
+    generator frame; that assumption is what deferred this for so long. The
+    only state alive across a dynamic workflow's steps is its inputs
+    (already in `workflow_runs.inputs`), a recomputable company-profile
+    block, the completed steps' string outputs, and the loop cursor — so the
+    engine hands the checkpoint a small JSON `WorkflowResumeState`
+    (workflow_name, gate_step_id, gate_step_index, next_step_index,
+    outputs), stored in the new `workflow_runs.resume_state_json` column,
+    and `DynamicWorkflow.resume` replays its step loop from
+    `next_step_index`. `run()` and `resume()` share one loop (`_run_steps`),
+    so a gate reached on a resumed run raises an identical pause and a
+    second gate needs no special handling.
 
-    NO BUILT-IN workflow currently yields the gate — `offer_approval` did,
-    and it was removed with the talent vertical. (`exec_search_brief` survived
-    that removal — it is an advisory CHRO brief with no gate and no pipeline
-    dependency.) Only user-created dynamic
-    workflows pause today. A dynamic workflow that pauses must be designed
-    AROUND the resume gap: yield `result` + `artifact` BEFORE the gate (the
-    runner never reaches `complete_run` on a paused run) and persist anything
-    downstream code needs, so the gate's only job is to RECORD the decision and
-    an explicit follow-up action performs the real state transition.
+    The payload rides on `WaitForHumanEvent.resume_state`, a field declared
+    `exclude=True` so it can never leak into `state_json` — the resolver
+    branches on which keys are PRESENT there, so shape stability is a
+    property of the type rather than a rule each call site must remember. A
+    gate with no payload is pause-only: the decision is recorded and the run
+    stops, which is what every caller got before resume existed.
+
+    EXECUTION — `resumer._process_resumable` claims a `resolved` run
+    carrying a payload with one guarded UPDATE (`claim_run_for_resume`:
+    resolved -> running, stamping `resumed_at` and incrementing
+    `resume_attempts`), then drives `workflow.resume(...)` to `complete_run`
+    / `fail_run`. It is reached two ways: immediately, via a task
+    `apply_resolution` kicks off so a Slack approval starts in seconds, and
+    from `_tick` every 60s as the durable backstop. Both share the claim, so
+    a run executes exactly once even with two resumers against one database.
+    `_tick` runs the executor AFTER the timeout loop, which is what finally
+    makes `on_timeout='auto_proceed'` do what its name says:
+    `_handle_timeout` resolves the run and the same tick executes it. Crash
+    recovery: a worker that dies mid-resume leaves the run in `running` with
+    a `resumed_at`, which `list_stale_resuming_runs` finds after 30 minutes
+    and requeues, bounded by `_MAX_RESUME_ATTEMPTS`.
+
+    REJECT STOPS THE RUN — `reject` and `defer` (`STOP_DECISIONS`) end the
+    run at `error` with the human's note; `approve` and the synthetic
+    `auto_proceed` continue. The decision becomes the gate step's own output
+    via `dynamic._format_resolution`, so it appears as a section IN the
+    artifact, not only in a database column. A definition edited during the
+    pause is caught before any of that: `resume` re-validates the payload's
+    version/engine/workflow name and that `steps[gate_step_index]` is still
+    the same gate, and refuses rather than resuming at a shifted index.
+
+    NO BUILT-IN workflow yields the gate — `offer_approval` did, and it was
+    removed with the talent vertical. (`exec_search_brief` survived that
+    removal — it is an advisory CHRO brief with no gate and no pipeline
+    dependency.) Only user-created dynamic workflows pause. Gates remain
+    banned in cadence-enabled dynamic workflows (`validate_definition`): a
+    cron fire has no interactive human to ask.
 
   dynamic_user_created: |
     Users create reusable workflows on the fly — from the executive chat or a
@@ -2632,9 +2667,12 @@ workflows:
     `cadence_person_id`. `workflows.dynamic_cadence` enqueues a
     `dynamic_workflow` scheduled action; the scheduler runs the workflow and
     DMs the artifact to that person, then re-chains. See the `scheduler:` key.
-    Limitation: same wait_for_human resume gap as above — a gate followed by
-    more steps pauses at awaiting_human and does not auto-continue, so gates
-    belong immediately before synthesis (validation/UI steer toward this).
+    A gate followed by more steps now resumes: the run pauses at
+    awaiting_human and, once answered, the resumer executes the remaining
+    steps and produces the artifact (see `human_in_the_loop` -> RESUME).
+    Gates no longer have to sit immediately before synthesis. They remain
+    forbidden in CADENCE-enabled definitions, though — a cron fire has no
+    interactive human, so `validate_definition` rejects them there.
   chat_launch: |
     Any workflow — built-in or custom — is launchable from a chat turn, not
     only the /jobs UI. `openexecutive.orchestrator.workflow_run_tools` wires two
@@ -2646,13 +2684,20 @@ workflows:
         via `get_workflow`, validates `inputs` against the workflow's
         input_model, persists the run (`create_run` → `complete_run`/`fail_run`),
         and streams `workflow.run(...)` to completion. It mirrors the HTTP
-        route's WaitForHumanEvent handling: an approval-gate step is delivered
-        via `gate_delivery.deliver_gate_question`, checkpointed via
-        `save_checkpoint`, and returned as `status='awaiting_human'` with a
-        `delivery` field (self / sent / suppressed / alerted / failed) rather
-        than hanging — so the same resumer/inbound_resolver path applies.
-        `_AWAITING_HINTS` picks the presentation hint from that field, so an
-        undelivered question is never reported as "waiting on them".
+        route's WaitForHumanEvent handling — literally, now: both go through
+        `workflows.gate.checkpoint_gate`, which delivers the question and
+        checkpoints the run in one place so the two copies cannot drift.
+        It returns a `GatePause`, reported as `status='awaiting_human'`
+        with a `delivery` field (self / sent / suppressed / alerted /
+        failed) and a `resumable` flag, rather than hanging. `_awaiting_hint`
+        combines the two: an undelivered question is never reported as
+        "waiting on them", and a pause-only gate is never described as
+        continuing by itself. The nine runners that CANNOT pause
+        (schedulers, evals, client rotation, onboarding, research tools)
+        call `gate.ensure_workflow_event`, which raises on a gate instead
+        of letting it be swallowed — the scheduler's dynamic-workflow
+        branch used to ignore one and store `complete_run(run_id, "(no
+        artifact)")`, a phantom success every cadence period.
     Guardrail: `_CHAT_LAUNCH_BLOCKLIST` excludes `executive_research` (it has the
     dedicated `run_executive_research` tool). Running a workflow from chat
     DELIVERS NOTHING — it renders the artifact into the conversation; the

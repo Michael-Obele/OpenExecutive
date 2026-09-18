@@ -398,3 +398,110 @@ def test_every_delivery_status_has_a_presentation_hint() -> None:
         clear=True,
     ), pytest.raises(RuntimeError, match="alerted"):
         _assert_hints_cover_every_delivery_status()
+
+
+class _ResumableGateWorkflow:
+    """A gate that carries a resume payload, i.e. a real dynamic workflow."""
+
+    name = "resumable_gate"
+    title = "Resumable Gate Workflow"
+
+    def input_model(self) -> type[BaseModel]:
+        return _StubInputs
+
+    async def run(self, inputs: BaseModel, store: Any) -> AsyncIterator[Any]:
+        from openexecutive.workflows.wait_for_human import WorkflowResumeState
+
+        yield WaitForHumanEvent(
+            person_id=3,
+            question="Approve the plan?",
+            timeout_hours=24,
+            resume_state=WorkflowResumeState(
+                workflow_name="resumable_gate",
+                gate_step_id="gate",
+                gate_step_index=1,
+                next_step_index=2,
+                outputs={"research": ("Research", "body")},
+            ),
+        )
+
+
+def _stub_sent_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _deliver(event: Any, **_kw: Any) -> tuple[Any, str]:
+        return event.model_copy(update={"channel": "slack", "channel_ref": "U1"}), "sent"
+
+    monkeypatch.setattr(
+        "openexecutive.workflows.gate_delivery.deliver_gate_question", _deliver
+    )
+
+
+def test_pause_only_gate_is_reported_as_not_resuming(
+    monkeypatch: pytest.MonkeyPatch, run_db: Path
+) -> None:
+    """`_GateWorkflow` yields a bare WaitForHumanEvent — no resume payload —
+    which is what every caller got before resume existed. The run must be
+    checkpointed as un-resumable and described that way, so the Executive does
+    not promise the principal work that will never happen."""
+    from openexecutive import workflows as wf_pkg
+    from openexecutive.workflows import persistence
+
+    monkeypatch.setattr(wf_pkg, "get_workflow", lambda name: _GateWorkflow())
+    _stub_sent_delivery(monkeypatch)
+
+    out = _call(handle_run_workflow, {"workflow": "gate", "inputs": {"topic": "x"}})
+
+    assert out["resumable"] is False
+    assert "does not continue past the gate" in out["presentation_hint"]
+    run = persistence.get_run(out["run_id"], db_path=run_db)
+    assert run is not None
+    assert run["resume_state_json"] is None
+
+
+def test_resumable_gate_is_reported_as_continuing_on_its_own(
+    monkeypatch: pytest.MonkeyPatch, run_db: Path
+) -> None:
+    from openexecutive import workflows as wf_pkg
+    from openexecutive.workflows import persistence
+
+    monkeypatch.setattr(wf_pkg, "get_workflow", lambda name: _ResumableGateWorkflow())
+    _stub_sent_delivery(monkeypatch)
+
+    out = _call(
+        handle_run_workflow, {"workflow": "resumable_gate", "inputs": {"topic": "x"}}
+    )
+
+    assert out["status"] == "awaiting_human"
+    assert out["resumable"] is True
+    assert "picks up where it left off" in out["presentation_hint"]
+
+    run = persistence.get_run(out["run_id"], db_path=run_db)
+    assert run is not None
+    assert json.loads(run["resume_state_json"])["gate_step_id"] == "gate"
+    # The payload must not leak into the checkpoint the resolver reads.
+    assert "resume_state" not in json.loads(run["state_json"])
+
+
+def test_an_undelivered_resumable_gate_says_both_things(
+    monkeypatch: pytest.MonkeyPatch, run_db: Path
+) -> None:
+    """Delivery and resumability are independent, and the hint has to be
+    honest about each: nobody was asked, AND the run will continue once they
+    are."""
+    from openexecutive import workflows as wf_pkg
+
+    monkeypatch.setattr(wf_pkg, "get_workflow", lambda name: _ResumableGateWorkflow())
+
+    async def _failed(event: Any, **_kw: Any) -> tuple[Any, str]:
+        return event.model_copy(), "failed"
+
+    monkeypatch.setattr(
+        "openexecutive.workflows.gate_delivery.deliver_gate_question", _failed
+    )
+
+    out = _call(
+        handle_run_workflow, {"workflow": "resumable_gate", "inputs": {"topic": "x"}}
+    )
+
+    hint = out["presentation_hint"]
+    assert "could not be delivered" in hint
+    assert "picks up where it left off" in hint

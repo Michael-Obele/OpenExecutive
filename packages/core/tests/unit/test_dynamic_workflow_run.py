@@ -116,6 +116,16 @@ async def test_run_pauses_at_approval_gate(monkeypatch: pytest.MonkeyPatch) -> N
     # Run stops at the gate — no artifact emitted.
     assert not any(getattr(e, "type", None) == "artifact" for e in events)
 
+    # The gate carries everything needed to pick the run back up: which step
+    # it stopped at, where to continue, and what the earlier steps produced.
+    state = gates[0].resume_state
+    assert state is not None
+    assert state.workflow_name == "weekly_watch"
+    assert state.gate_step_id == "gate"
+    assert state.gate_step_index == 1
+    assert state.next_step_index == 2
+    assert state.outputs == {"research": ("Research", "section")}
+
 
 @pytest.mark.asyncio
 async def test_run_synthesis_with_instructions_calls_specialist(

@@ -9,9 +9,17 @@ resolver (Slack / Telegram / email hooks) calls ``apply_resolution`` when
 a human replies, which stores the ``WaitForHumanResolution`` and advances
 the run to ``status='resolved'``.
 
-Phase 6 note: full generator resume (deserialising the execution frame) is
-deferred to Phase 7.  This module ships the data model and ``parse_decision``
-— the pieces needed for timeout handling and resolution recording.
+Resume
+------
+A gate that carries a :class:`WorkflowResumeState` is *resumable*: once the
+decision is recorded, ``resumer._execute_resume`` re-enters the workflow at
+the step after the gate and drives it to an artifact.  Nothing serialises a
+Python generator frame — the state is the small, plain-JSON payload below,
+and the engine replays its step loop from an index.
+
+A gate with no resume state is *pause-only*: the decision is recorded and
+the run stops there.  That is what every caller got before resume existed,
+and it is still what a workflow yielding a bare ``WaitForHumanEvent`` gets.
 """
 from __future__ import annotations
 
@@ -23,6 +31,33 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 _CONFIDENCE_THRESHOLD = 0.85
+
+
+class WorkflowResumeState(BaseModel):
+    """Everything needed to restart a paused workflow at the step after its gate.
+
+    Deliberately NOT a serialised generator frame. The only values alive
+    across a dynamic workflow's steps are its inputs (already persisted in
+    ``workflow_runs.inputs``), a company-profile block that is recomputed on
+    resume, the completed steps' outputs, and the loop cursor — all plain
+    JSON, which is why re-entering a paused run needs no frame surgery.
+
+    ``version`` and ``engine`` are checked on load so a payload written by an
+    older build, or by a different engine, is REJECTED rather than
+    misinterpreted into resuming at the wrong step.
+    """
+
+    version: Literal[1] = 1
+    engine: str = "dynamic"
+    workflow_name: str
+    gate_step_id: str
+    # Index of the gate itself, re-checked against the live definition on
+    # resume — a definition edited during the pause can move it.
+    gate_step_index: int
+    next_step_index: int
+    # step_id -> (step title, output text) for every step completed before the
+    # gate. Round-trips through JSON as a 2-array and back to a tuple.
+    outputs: dict[str, tuple[str, str]] = Field(default_factory=dict)
 
 
 class WaitForHumanEvent(BaseModel):
@@ -63,6 +98,17 @@ class WaitForHumanEvent(BaseModel):
     # another thread. Empty for web/scheduler-originated runs, which fall back
     # to channel matching.
     origin_session_id: str = ""
+    # Engine payload for continuing the run after the gate is answered.
+    # `exclude=True` is load-bearing: `state_json` is the checkpoint the
+    # inbound resolver reads, and it branches on which keys are PRESENT (a row
+    # with no `delivery` key is a pre-delivery legacy row). Excluding at the
+    # FIELD level rather than per-call means no serialisation site can leak
+    # the payload into that JSON by forgetting to. The payload has its own
+    # column, `workflow_runs.resume_state_json`.
+    # None means pause-only: the decision is recorded and the run stops.
+    resume_state: WorkflowResumeState | None = Field(
+        default=None, exclude=True, repr=False
+    )
 
 
 # Outbound channel vocabulary (`slack_dm`, `discord_dm`) differs from the
@@ -80,6 +126,30 @@ def normalize_channel(channel: str) -> str:
     """Map an outbound channel key onto its inbound equivalent."""
     key = (channel or "").strip().lower()
     return _CHANNEL_ALIASES.get(key, key)
+
+
+# The decision vocabulary, owned here because three places render it: the
+# acknowledgement the approver gets back (`resumer.resolution_acknowledgement`),
+# the section a resumed run writes into its artifact
+# (`dynamic._format_resolution`), and the branch that decides whether the run
+# continues. Two copies would drift, and a run whose artifact says "Approved"
+# while its acknowledgement says "Declined" is worse than either alone.
+DECISION_VERBS: dict[str, str] = {
+    "approve": "Approved",
+    "reject": "Declined",
+    "defer": "Deferred",
+    "auto_proceed": "Auto-approved on timeout",
+}
+
+# Decisions that STOP a resumable run rather than continuing it. A human who
+# declined or deferred did not ask for the remaining steps to be paid for and
+# delivered, so the run ends at `error` with their note.
+#
+# Note this is only reachable for a REAL verdict: `inbound_resolver` drops
+# `unrelated` replies and parser fallbacks before `apply_resolution`, so a
+# `defer` arriving here is a person deferring, never a parse failure wearing
+# a defer's clothes.
+STOP_DECISIONS = frozenset({"reject", "defer"})
 
 
 class WaitForHumanResolution(BaseModel):
