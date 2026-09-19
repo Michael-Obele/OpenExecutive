@@ -74,6 +74,46 @@ async def apply_resolution(
     return True
 
 
+# How a recorded decision reads back to the person. Deliberately NOT
+# "your response has been recorded" full stop: resolving a gate stores the
+# decision and releases the run from awaiting_human, but the workflow does NOT
+# continue from the step after the gate — generator resume is not implemented
+# (see the module docstring and wait_for_human.py). Telling someone their
+# approval is in flight when nothing further will run is the same class of lie
+# that #136 was reported for.
+_DECISION_VERBS = {
+    "approve": "Approved",
+    "reject": "Declined",
+    "defer": "Deferred",
+    "auto_proceed": "Auto-approved on timeout",
+}
+
+
+def resolution_acknowledgement(
+    run_id: str,
+    resolution: WaitForHumanResolution,
+    db_path: Path | None = None,
+) -> str:
+    """The reply a person gets after their answer resolves a gate."""
+    decision = str(resolution.parsed_decision.get("decision") or "")
+    verb = _DECISION_VERBS.get(decision, "Recorded")
+
+    title = ""
+    try:
+        run = _wf_persistence.get_run(run_id, db_path=db_path)
+        if run:
+            title = str(run.get("title") or run.get("workflow_name") or "")
+    except Exception:
+        logger.exception("resumer: could not read run %s for acknowledgement", run_id)
+
+    subject = f" — {title}" if title else ""
+    return (
+        f"{verb}{subject}. That's recorded against the sign-off and closes it "
+        "out. The workflow doesn't pick up from here on its own, so tell me if "
+        "you want me to take the next step."
+    )
+
+
 async def _handle_timeout(run: dict, now: datetime) -> None:
     """Apply the timeout policy for an expired awaiting_human run."""
 

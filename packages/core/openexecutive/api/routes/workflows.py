@@ -36,6 +36,7 @@ from openexecutive.workflows.dynamic_store import (
     set_active,
     upsert_definition,
 )
+from openexecutive.workflows.gate_delivery import deliver_gate_question
 from openexecutive.workflows.persistence import (
     complete_run,
     create_run,
@@ -243,19 +244,30 @@ async def start_workflow_run(name: str, request: Request) -> StreamingResponse:
                 # the inbound resolver records the human's reply.
                 if isinstance(event, WaitForHumanEvent):
                     until = datetime.now(UTC) + timedelta(hours=event.timeout_hours)
+                    # Ask the approver before checkpointing, so state_json
+                    # carries the channel / channel_ref / outbound_message_id
+                    # the inbound resolver matches a reply against. Without it
+                    # the gate was unanswerable on every channel (#136).
+                    gate, delivery = await deliver_gate_question(
+                        event, run_id=run_id, workflow_title=workflow.title
+                    )
                     save_checkpoint(
                         run_id=run_id,
-                        state_json=event.model_dump_json(),
-                        awaiting_person_id=event.person_id,
+                        state_json=gate.model_dump_json(),
+                        awaiting_person_id=gate.person_id,
                         awaiting_until=until,
                     )
                     paused = True
                     yield _sse({
                         "type": "awaiting_human",
                         "run_id": run_id,
-                        "person_id": event.person_id,
-                        "question": event.question,
+                        "person_id": gate.person_id,
+                        "question": gate.question,
                         "awaiting_until": until.isoformat(),
+                        # "sent" / "self" / "suppressed" / "alerted" / "failed" —
+                        # the client must not say "waiting on them" when the
+                        # question never reached them.
+                        "delivery": delivery,
                     })
                     break
 

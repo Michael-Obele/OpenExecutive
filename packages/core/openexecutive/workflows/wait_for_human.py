@@ -49,6 +49,37 @@ class WaitForHumanEvent(BaseModel):
     channel: str = ""
     # Channel-specific address used (Slack user id, email address, chat_id str).
     channel_ref: str = ""
+    # How the question actually reached the approver, set by
+    # `gate_delivery.deliver_gate_question`: self / sent / suppressed /
+    # alerted / failed. Its PRESENCE also dates the checkpoint — a row
+    # written before gate delivery existed has no `delivery` key at all,
+    # which is how the resolver tells a legacy row (safe to match loosely)
+    # from one whose delivery genuinely failed (must not be).
+    delivery: str = ""
+    # Chat session the gate was raised from, when a person launched the
+    # workflow conversationally and is themselves the approver. The inbound
+    # resolver matches such a gate ONLY against replies in that same session,
+    # so an open gate in one Slack DM cannot swallow an unrelated message in
+    # another thread. Empty for web/scheduler-originated runs, which fall back
+    # to channel matching.
+    origin_session_id: str = ""
+
+
+# Outbound channel vocabulary (`slack_dm`, `discord_dm`) differs from the
+# inbound vocabulary the adapters use when resolving a reply (`slack`,
+# `discord`). Canonicalise on WRITE so `state_json` only ever holds inbound
+# keys — normalising at read time instead would leave two conventions in the
+# database.
+_CHANNEL_ALIASES = {
+    "slack_dm": "slack",
+    "discord_dm": "discord",
+}
+
+
+def normalize_channel(channel: str) -> str:
+    """Map an outbound channel key onto its inbound equivalent."""
+    key = (channel or "").strip().lower()
+    return _CHANNEL_ALIASES.get(key, key)
 
 
 class WaitForHumanResolution(BaseModel):
@@ -75,9 +106,14 @@ _SYSTEM_PROMPT = (
 
 _SHAPE_PROMPTS: dict[str, str] = {
     "approve_reject": (
-        'Return: {"decision": "approve|reject|defer", "note": "<brief reason, max 100 chars>"}\n'
+        'Return: {"decision": "approve|reject|defer|unrelated", '
+        '"note": "<brief reason, max 100 chars>"}\n'
         "Rules: approve = yes/ok/agreed/sounds good/LGTM; reject = no/denied/decline; "
-        "defer = maybe later/need more info/not now. When ambiguous, choose defer."
+        "defer = maybe later/need more info/not now. "
+        "unrelated = the message is not a response to this question at all "
+        "(a new request, a different topic, small talk) — use it whenever the "
+        "message does not read as an answer to THIS question, even loosely. "
+        "When the message IS an answer but its verdict is ambiguous, choose defer."
     ),
     "free_text": (
         'Return: {"text": "<exact reply text, max 500 chars>"}'
@@ -91,6 +127,27 @@ _SHAPE_PROMPTS: dict[str, str] = {
     ),
 }
 
+# Appended to every shape. Without it only `approve_reject` could decline to
+# answer, and the three other shapes had NO relevance check at all: an open
+# free_text gate turned the person's next unrelated message into its answer
+# and closed the sign-off ("what's on my calendar?" recorded verbatim), and a
+# numeric gate swallowed any message containing a number.
+_UNRELATED_CLAUSE = (
+    '\n\nIF the message is not a response to the question at all — a new '
+    "request, a different topic, small talk, or a reply meant for someone "
+    'else — ignore the shape above and return exactly: {"decision": '
+    '"unrelated"}. Prefer this whenever the message does not read as an '
+    "answer to THIS question."
+)
+
+# Marks a parse_decision result as the fallback rather than a real verdict.
+# The previous sentinel was `note == "parse_error"`, which the model itself
+# can emit — a human replying "no, your parser threw a parse_error" could
+# produce it, and a genuine rejection would then be silently discarded.
+# A dunder-ish key under our own namespace is not something the shape prompts
+# ask for, so the model has no reason to produce it.
+PARSE_FAILED_KEY = "__oe_parse_failed__"
+
 _FALLBACKS: dict[str, dict[str, Any]] = {
     "approve_reject": {"decision": "defer", "note": "parse_error"},
     "free_text": {"text": ""},
@@ -99,8 +156,14 @@ _FALLBACKS: dict[str, dict[str, Any]] = {
 }
 
 
-async def parse_decision(text: str, expected_shape: str) -> dict[str, Any]:
+async def parse_decision(
+    text: str, expected_shape: str, question: str = ""
+) -> dict[str, Any]:
     """Parse a human reply into a structured decision dict.
+
+    ``question`` is the gate's own question. Without it the parser sees only
+    the reply, so a bare "yes" — which may have been answering the Executive
+    about something else entirely — can never be judged ``unrelated``.
 
     Uses the Council-configurable ``utility_fast`` model (default
     ``settings.routing_model``) for low-latency parsing. Returns a safe
@@ -110,7 +173,10 @@ async def parse_decision(text: str, expected_shape: str) -> dict[str, Any]:
 
     from openexecutive.agents.utility_fast import get_fast_model
 
-    shape_prompt = _SHAPE_PROMPTS.get(expected_shape, _SHAPE_PROMPTS["free_text"])
+    shape_prompt = (
+        _SHAPE_PROMPTS.get(expected_shape, _SHAPE_PROMPTS["free_text"])
+        + _UNRELATED_CLAUSE
+    )
     fallback = _FALLBACKS.get(expected_shape, {"text": ""})
 
     try:
@@ -130,7 +196,13 @@ async def parse_decision(text: str, expected_shape: str) -> dict[str, Any]:
                     "content": (
                         f"Parse this reply (expected shape: {expected_shape}):\n\n"
                         f"{shape_prompt}\n\n"
-                        f"Reply to parse:\n{text[:1000]}"
+                        + (
+                            f"The question it should be answering:\n"
+                            f"{question[:500]}\n\n"
+                            if question
+                            else ""
+                        )
+                        + f"Reply to parse:\n{text[:1000]}"
                     ),
                 }
             ],
@@ -147,4 +219,4 @@ async def parse_decision(text: str, expected_shape: str) -> dict[str, Any]:
         return _json.loads(raw)
     except Exception:
         logger.exception("parse_decision: failed for shape=%r text=%r", expected_shape, text[:80])
-        return dict(fallback)
+        return {**fallback, PARSE_FAILED_KEY: True}

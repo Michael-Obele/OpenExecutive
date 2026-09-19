@@ -12,6 +12,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from pydantic import BaseModel
@@ -22,6 +23,20 @@ from openexecutive.orchestrator.workflow_run_tools import (
 )
 from openexecutive.workflows.base import WorkflowEvent
 from openexecutive.workflows.wait_for_human import WaitForHumanEvent
+
+
+@pytest.fixture(autouse=True)
+def _no_audit_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep `_audit` off the default ./episodic_memory.db.
+
+    Every run_workflow path writes a tool_invocation row. Unpatched, those
+    rows land in the repo-root DB and leak into other modules' assertions on a
+    full-suite run (see the audit-log note in CLAUDE.md).
+    """
+    monkeypatch.setattr(
+        "openexecutive.orchestrator.workflow_run_tools.audit_log",
+        lambda *_a, **_kw: None,
+    )
 
 
 def _call(fn: Callable[[dict[str, Any]], Awaitable[str]], payload: dict[str, Any]) -> dict[str, Any]:
@@ -249,3 +264,137 @@ def test_run_workflow_create_run_failure_fails_fast(
     assert "could not start run" in out["error"]
     # No awaiting_human claim was made.
     assert out.get("status") != "awaiting_human"
+
+
+def test_run_workflow_reports_knowledge_store_failure_and_fails_the_run(
+    monkeypatch: pytest.MonkeyPatch, run_db: Path
+) -> None:
+    """A store that won't construct must not escape this handler.
+
+    `ChromaDBStore(...)` used to sit outside the try, so an init failure
+    propagated out of the tool handler, through the orchestrator's tool gather,
+    and surfaced to the user as a generic "I encountered an error" with the run
+    row stranded at 'running' (#136). It must come back as a tool error, and
+    the run it already created must be marked failed.
+    """
+    from openexecutive import workflows as wf_pkg
+    from openexecutive.workflows import persistence
+
+    monkeypatch.setattr(wf_pkg, "get_workflow", lambda name: _StubWorkflow())
+
+    def _explode(**_kwargs: Any) -> Any:
+        raise RuntimeError("chroma refused to open")
+
+    monkeypatch.setattr(
+        "openexecutive.knowledge.store.ChromaDBStore", _explode
+    )
+
+    out = _call(handle_run_workflow, {"workflow": "stub", "inputs": {"topic": "x"}})
+    assert "error" in out
+    assert "knowledge store unavailable" in out["error"]
+
+    # The run row exists and is failed, not left at 'running'.
+    runs = persistence.list_runs(workflow_name="stub", db_path=run_db)
+    assert runs, "create_run should have written a row before the store failed"
+    assert runs[0]["status"] == "error"
+
+
+def test_run_workflow_description_does_not_claim_the_briefs_dispatch() -> None:
+    """The description told the model that morning_brief and
+    end_of_day_digest DM the principal when run, and to confirm before firing
+    them. `handle_run_workflow` delivers nothing — delivery is scheduler-only
+    — so the model solicited a confirmation on a false premise (#136).
+
+    `executive_reflection` genuinely does execute tool calls, so the warning
+    has to be narrowed to it, not deleted.
+    """
+    from openexecutive.orchestrator.workflow_run_tools import RUN_WORKFLOW_TOOL
+
+    desc = RUN_WORKFLOW_TOOL["description"]
+    assert "morning_brief and end_of_day_digest DM the principal" not in desc
+    assert "does NOT deliver DMs" in desc.replace("\n", " ")
+    assert "executive_reflection" in desc
+
+
+def test_awaiting_human_checkpoint_carries_routing_fields(
+    monkeypatch: pytest.MonkeyPatch, run_db: Path
+) -> None:
+    """state_json used to be written with empty channel/channel_ref, so the
+    inbound resolver's channel filter could never match a reply (#136)."""
+    import json as _json
+
+    from openexecutive import workflows as wf_pkg
+    from openexecutive.workflows import persistence
+
+    monkeypatch.setattr(wf_pkg, "get_workflow", lambda name: _GateWorkflow())
+
+    async def _fake_deliver(event: Any, **_kw: Any) -> tuple[Any, str]:
+        return (
+            event.model_copy(
+                update={
+                    "channel": "slack",
+                    "channel_ref": "U123",
+                    "outbound_message_id": "1700000000.5",
+                }
+            ),
+            "sent",
+        )
+
+    monkeypatch.setattr(
+        "openexecutive.workflows.gate_delivery.deliver_gate_question", _fake_deliver
+    )
+
+    out = _call(handle_run_workflow, {"workflow": "gate", "inputs": {"topic": "x"}})
+    assert out["status"] == "awaiting_human"
+    assert out["delivery"] == "sent"
+
+    run = persistence.get_run(out["run_id"], db_path=run_db)
+    assert run is not None
+    state = _json.loads(run["state_json"])
+    assert state["channel"] == "slack"
+    assert state["channel_ref"] == "U123"
+    assert state["outbound_message_id"] == "1700000000.5"
+
+
+def test_undelivered_gate_is_not_reported_as_waiting_on_them(
+    monkeypatch: pytest.MonkeyPatch, run_db: Path
+) -> None:
+    """When the question never reached the approver, the presentation hint
+    must not tell the principal it is waiting on their reply."""
+    from openexecutive import workflows as wf_pkg
+
+    monkeypatch.setattr(wf_pkg, "get_workflow", lambda name: _GateWorkflow())
+
+    async def _suppressed(event: Any, **_kw: Any) -> tuple[Any, str]:
+        return event.model_copy(), "suppressed"
+
+    monkeypatch.setattr(
+        "openexecutive.workflows.gate_delivery.deliver_gate_question", _suppressed
+    )
+
+    out = _call(handle_run_workflow, {"workflow": "gate", "inputs": {"topic": "x"}})
+
+    assert out["delivery"] == "suppressed"
+    assert "NOT been asked" in out["presentation_hint"]
+
+
+def test_every_delivery_status_has_a_presentation_hint() -> None:
+    """A new DeliveryStatus must not fall through to the "could not be
+    delivered" fallback and silently mis-describe itself."""
+    from typing import get_args
+
+    from openexecutive.orchestrator.workflow_run_tools import (
+        _AWAITING_HINTS,
+        _assert_hints_cover_every_delivery_status,
+    )
+    from openexecutive.workflows.gate_delivery import DeliveryStatus
+
+    assert set(get_args(DeliveryStatus)) <= set(_AWAITING_HINTS)
+
+    # And the guard actually bites.
+    with patch.dict(
+        "openexecutive.orchestrator.workflow_run_tools._AWAITING_HINTS",
+        {k: v for k, v in _AWAITING_HINTS.items() if k != "alerted"},
+        clear=True,
+    ), pytest.raises(RuntimeError, match="alerted"):
+        _assert_hints_cover_every_delivery_status()

@@ -175,3 +175,75 @@ def test_tick_processes_expired_runs() -> None:
 def test_tick_no_runs_is_no_op() -> None:
     # No awaiting runs — must not raise.
     asyncio.run(_tick(datetime.now(UTC)))
+
+
+# ---------------------------------------------------------------------------
+# Acknowledgement wording (#136)
+# ---------------------------------------------------------------------------
+
+
+def test_acknowledgement_names_the_decision_and_the_limit(tmp_path: Path) -> None:
+    """"Got it — your response has been recorded." implied the workflow was
+    now proceeding. It is not: apply_resolution stores the decision and
+    releases the run, and nothing downstream runs (generator resume is
+    unimplemented). Saying otherwise is the same class of overclaim #136 was
+    filed for."""
+    from openexecutive.workflows.resumer import resolution_acknowledgement
+
+    db = tmp_path / "runs.db"
+    wf_persistence.create_run("run-1", "vendor_review", "Vendor Review", {}, db_path=db)
+
+    text = resolution_acknowledgement(
+        "run-1",
+        WaitForHumanResolution(
+            run_id="run-1",
+            reply_text="yes",
+            source_channel="slack",
+            parsed_decision={"decision": "approve", "note": ""},
+            person_id=7,
+        ),
+        db_path=db,
+    )
+
+    assert text.startswith("Approved")
+    assert "Vendor Review" in text
+    assert "doesn't pick up from here on its own" in text
+
+
+def test_acknowledgement_reflects_a_rejection(tmp_path: Path) -> None:
+    from openexecutive.workflows.resumer import resolution_acknowledgement
+
+    db = tmp_path / "runs.db"
+    wf_persistence.create_run("run-1", "vendor_review", "Vendor Review", {}, db_path=db)
+
+    text = resolution_acknowledgement(
+        "run-1",
+        WaitForHumanResolution(
+            run_id="run-1",
+            reply_text="no",
+            source_channel="slack",
+            parsed_decision={"decision": "reject", "note": "too expensive"},
+            person_id=7,
+        ),
+        db_path=db,
+    )
+
+    assert text.startswith("Declined")
+
+
+def test_acknowledgement_survives_a_missing_run(tmp_path: Path) -> None:
+    from openexecutive.workflows.resumer import resolution_acknowledgement
+
+    text = resolution_acknowledgement(
+        "nope",
+        WaitForHumanResolution(
+            run_id="nope",
+            reply_text="yes",
+            source_channel="slack",
+            parsed_decision={"decision": "approve"},
+            person_id=7,
+        ),
+        db_path=tmp_path / "missing.db",
+    )
+
+    assert text.startswith("Approved")
