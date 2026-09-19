@@ -5,8 +5,8 @@ of one client company:
 
 - ``state.db`` — transactionally-consistent copy of the shared SQLite DB
   (``VACUUM INTO`` on save, online backup API on restore). This carries chat
-  history, scheduled actions, onboarding plans, talent pipeline, departments,
-  people, watchlist — everything the stores keep.
+  history, scheduled actions, departments, people, watchlist — everything the
+  stores keep.
 - ``profile.yaml`` / ``docs/`` / ``skills/`` — the company directory artifacts.
 - ``mcp_servers.json`` — per-client external MCP tools (e.g. one client's
   Crayon credentials). The MCP gateway reads this at process startup, so a
@@ -119,6 +119,12 @@ _BLANK_WIPE_TABLES = (
     "watchlist",
     "page_watch_state",
     "outbound_context",
+    # Legacy talent / staff-onboarding tables. Both features are gone and
+    # nothing writes these any more, but the rows may still exist on upgraded
+    # installs and they carry candidate PII (names, employers, screening
+    # summaries, offer comp) — keep wiping them so a blank slot never inherits
+    # a previous client's pipeline. Existence-guarded, so a no-op on fresh
+    # installs where the tables were never created.
     "onboarding_tasks",
     "onboarding_plans",
     "onboarding_templates",
@@ -546,25 +552,53 @@ def _ensure_schemas() -> None:
     from openexecutive.departments.store import initialize_db as init_departments
     from openexecutive.fixtures.store import initialize_db as init_fixtures
     from openexecutive.knowledge.review_store import ReviewStore
+    from openexecutive.memory.episodic import cancel_orphaned_talent_reminders
     from openexecutive.memory.episodic import initialize_db as init_episodic
     from openexecutive.monitoring.store import initialize_db as init_monitoring
     from openexecutive.people.store import initialize_db as init_people
-    from openexecutive.staff_onboarding.store import initialize_db as init_onboarding
-    from openexecutive.talent.store import initialize_db as init_talent
 
     # Pass the path explicitly everywhere: some initializers bind their
     # DB_PATH default at import time, which would ignore a runtime override.
     db_path = _episodic_db_path()
     init_episodic(db_path)
+    # A parked slot's state.db may predate the talent removal; give it the
+    # same one-shot reminder sweep the live DB gets at boot.
+    try:
+        swept = cancel_orphaned_talent_reminders(db_path)
+    except Exception:
+        logger.exception("client-slots: orphaned-reminder sweep failed")
+    else:
+        if swept:
+            logger.info("client-slots: cancelled %d orphaned talent reminder(s)", swept)
     init_alerts(db_path)
     init_fixtures(db_path)
     initialize_overrides_db(db_path)
     init_people(db_path)
-    init_talent(db_path)
-    init_onboarding(db_path)
     init_departments(db_path)
     init_monitoring(db_path)
     ReviewStore.initialize_db(db_path)
+    # Register shipped knowledge as trusted defaults too — without this a
+    # freshly activated slot has an empty review_items table until the next
+    # process restart, so its knowledge page and review stats read as empty.
+    ReviewStore.sync_builtin_registrations(db_path)
+    # External sources as well, mirroring the lifespan. A slot captured from a
+    # pre-existing database carries `external:*` rows; the backfill below only
+    # promotes rows a sync has flagged as shipped, so skipping this would leave
+    # them `pending` — and pending is now withheld from retrieval.
+    try:
+        from openexecutive.knowledge.external_sources import load_manifest
+
+        ingested = [
+            {"id": src.id, "domains": src.domains}
+            for src in load_manifest()
+            if src.cache_dir.exists() and any(src.cache_dir.iterdir())
+        ]
+        if ingested:
+            ReviewStore.sync_external_registrations(ingested, db_path)
+    except Exception:
+        logger.exception("slot schema init: sync_external_registrations failed")
+    # Must follow both syncs: it only promotes rows they have flagged.
+    ReviewStore.backfill_trusted_defaults(db_path)
 
 
 def _reseed_blank_defaults(*, seed_departments: bool = True) -> None:
@@ -585,12 +619,6 @@ def _reseed_blank_defaults(*, seed_departments: bool = True) -> None:
             seed_default_departments()
         except Exception:
             logger.exception("client-slots: seed_default_departments failed")
-    try:
-        from openexecutive.staff_onboarding.seed import seed_default_templates
-
-        seed_default_templates()
-    except Exception:
-        logger.exception("client-slots: seed_default_templates failed")
     try:
         from openexecutive.scheduler.runner import seed_principal_briefs
 
