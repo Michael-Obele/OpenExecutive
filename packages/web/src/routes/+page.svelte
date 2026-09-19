@@ -3,6 +3,7 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import Chat from '$lib/components/Chat.svelte';
+	import Briefing from '$lib/components/Briefing.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import type { ChatMessage, DebugEvent, ReviewStats, SessionSummary } from '$lib/api.js';
 	import {
@@ -180,63 +181,23 @@
 	</aside>
 	<div class="flex min-w-0 flex-1 flex-col">
 		{#if mode === 'briefing'}
-			<div class="flex-1 overflow-y-auto px-4 py-8 sm:px-6">
-				<div class="mx-auto max-w-3xl">
-					<h1 class="text-2xl font-semibold tracking-tight text-fg">
-						{#if firstName}Good morning, {firstName}.{:else}Briefing.{/if}
-					</h1>
-					<p class="mt-2 text-sm text-fg-muted">
-						What's happened and what needs you — proposals, department health, and people with open
-						items.
-					</p>
-					{#if health && !health.company_profile_loaded}
-						<div class="mt-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
-							<p class="text-sm text-amber-200">
-								Company profile not set up yet. <a
-									href="/onboard"
-									class="underline hover:no-underline">Set it up now</a
-								>.
-							</p>
-						</div>
-					{/if}
-					<div class="mt-8 grid gap-4 sm:grid-cols-2">
-						<button
-							type="button"
-							onclick={() => handleContinueFromBriefing('Give me the morning briefing.')}
-							class="cursor-pointer rounded-xl border border-line bg-surface-elevated px-4 py-4 text-left transition-colors hover:bg-surface-overlay"
-						>
-							<p class="text-sm font-medium text-fg">Morning briefing</p>
-							<p class="mt-1 text-xs text-fg-muted">Ask the Executive for today's priorities.</p>
-						</button>
-						<button
-							type="button"
-							onclick={handleNewChat}
-							class="cursor-pointer rounded-xl border border-line bg-surface-elevated px-4 py-4 text-left transition-colors hover:bg-surface-overlay"
-						>
-							<p class="text-sm font-medium text-fg">New chat</p>
-							<p class="mt-1 text-xs text-fg-muted">Start a fresh conversation.</p>
-						</button>
+			<!-- Briefing-first landing: the whole home page content for this mode.
+			     The company-profile nudge stays a sibling so the briefing keeps the
+			     rest of the column's height (same wrapper the chat branch uses). -->
+			{#if health && !health.company_profile_loaded}
+				<div class="px-4 sm:px-6">
+					<div class="mt-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+						<p class="text-sm text-amber-200">
+							Company profile not set up yet. <a
+								href="/onboard"
+								class="underline hover:no-underline">Set it up now</a
+							>.
+						</p>
 					</div>
-					{#if sessions.length > 0}
-						<div class="mt-8">
-							<h2 class="text-sm font-semibold text-fg">Recent chats</h2>
-							<div class="mt-3 space-y-1">
-								{#each sessions.slice(0, 5) as s (s.session_id)}
-									<button
-										type="button"
-										onclick={() => void handleSelectSession(s.session_id)}
-										class="flex w-full cursor-pointer items-center justify-between rounded-lg border border-line bg-surface-elevated px-3 py-2.5 text-left transition-colors hover:bg-surface-overlay"
-									>
-										<span class="truncate text-sm text-fg">{s.title || 'Untitled chat'}</span>
-										<span class="ml-2 shrink-0 text-xs text-fg-subtle"
-											>{formatRelativeTime(s.updated_at)}</span
-										>
-									</button>
-								{/each}
-							</div>
-						</div>
-					{/if}
 				</div>
+			{/if}
+			<div class="flex min-h-0 flex-1 flex-col">
+				<Briefing onContinue={handleContinueFromBriefing} showHeader {firstName} />
 			</div>
 		{:else}
 			{#key activeSessionId ?? 'new'}

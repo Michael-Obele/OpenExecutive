@@ -2,8 +2,27 @@
 @import 'tw-animate-css';
 @import 'shadcn-svelte/tailwind.css';
 @import '@fontsource-variable/dm-sans';
+@plugin '@tailwindcss/typography';
 
 @custom-variant dark (&:is(.dark *));
+
+/* Prose mapped onto the OE dark theme — mirrors the `typography` block in
+   packages/ui/tailwind.config.ts so ported markdown renders identically. */
+@layer base {
+	.prose {
+		--tw-prose-body: rgb(var(--fg-muted));
+		--tw-prose-headings: rgb(var(--fg));
+		--tw-prose-bold: rgb(var(--fg));
+		--tw-prose-code: rgb(var(--accent));
+		--tw-prose-links: rgb(var(--accent));
+		--tw-prose-bullets: rgb(var(--fg-subtle));
+		--tw-prose-counters: rgb(var(--fg-subtle));
+		--tw-prose-quotes: rgb(var(--fg-muted));
+		--tw-prose-hr: rgb(var(--border-default));
+		--tw-prose-th-borders: rgb(var(--border-strong));
+		--tw-prose-td-borders: rgb(var(--border-default));
+	}
+}
 
 :root {
 	--background: oklch(1 0 0);

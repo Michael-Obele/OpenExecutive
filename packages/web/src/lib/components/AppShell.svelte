@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import AskOEPanel from '$lib/components/askoe/AskOEPanel.svelte';
+	import { setAskOEState } from '$lib/components/askoe/askoe.svelte.js';
 	import BrandMark from '$lib/components/BrandMark.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import UserBadge from '$lib/components/UserBadge.svelte';
@@ -23,6 +25,22 @@
 
 	let drawerOpen = $state(false);
 	let pathname = $derived(page.url.pathname);
+
+	// Ask OE — page-aware assistant panel. Provided here so every shell route
+	// can reach it; exempt routes never render the panel.
+	const askoe = setAskOEState();
+
+	// Ctrl/Cmd + . toggles the panel from anywhere in the shell.
+	$effect(() => {
+		function onKeyDown(e: KeyboardEvent) {
+			if (e.key === '.' && (e.metaKey || e.ctrlKey)) {
+				e.preventDefault();
+				askoe.toggle();
+			}
+		}
+		window.addEventListener('keydown', onKeyDown);
+		return () => window.removeEventListener('keydown', onKeyDown);
+	});
 
 	// Routes that own their full layout — sign-in, onboarding wizard,
 	// chat home (owns its own sidebar), API routes.
@@ -268,5 +286,9 @@
 				</button>
 			</nav>
 		</div>
+
+		<!-- Ask OE — page-aware assistant panel, docked right on lg+,
+		     right sheet below. Renders nothing while closed. -->
+		<AskOEPanel />
 	</div>
 {/if}

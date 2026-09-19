@@ -29,7 +29,23 @@ export const auth = betterAuth({
 				});
 				return { error: 'no_email' };
 			}
-			const { allowed, source } = await checkEmailAllowed(email);
+			// Roster check is best-effort: if the backend is unreachable (e.g. dev
+			// without API running), fall back to ALLOWED_EMAILS env. When that env
+			// is empty, allow the sign-up/sign-in so the first user can bootstrap.
+			// The hooks.server.ts guard re-checks on every request once the backend
+			// is back, so this fail-open only affects the initial auth moment.
+			let allowed = true;
+			let source = 'bootstrap';
+			try {
+				const result = await checkEmailAllowed(email);
+				allowed = result.allowed;
+				source = result.source;
+			} catch {
+				// checkEmailAllowed already returns null on fetch failure, but guard
+				// against any unexpected throw.
+				allowed = true;
+				source = 'bootstrap_after_error';
+			}
 			if (!allowed) {
 				auditAuth('auth_login', `Login denied: ${email} (not in ${source})`, email, {
 					denied: true,

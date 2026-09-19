@@ -1,13 +1,13 @@
 <script lang="ts">
+	import ReviewQueue from '$lib/components/ReviewQueue.svelte';
 </script>
 
-<main class="flex-1 min-h-0 overflow-y-auto">
-  <div class="mx-auto max-w-3xl px-4 py-8 sm:px-6">
-    <h1 class="text-xl font-semibold text-fg">Review</h1>
-    <p class="mt-2 text-sm text-fg-muted">Approve, reject, or correct incoming knowledge before the Executive relies on it.</p>
-    <p class="mt-6 rounded-xl border border-line bg-surface-elevated px-4 py-3 text-sm text-fg-muted">
-      This page is being ported from the Next.js app. The backend API is ready at <code class="rounded bg-surface-overlay px-1 py-0.5 text-xs">/api/backend</code> — UI coming next.
-    </p>
-    <a href="/" class="mt-4 inline-block text-sm text-accent hover:underline">← Back to briefing</a>
-  </div>
+<main class="min-h-0 flex-1 overflow-y-auto">
+	<div class="p-6 pb-0">
+		<h1 class="text-xl font-semibold text-fg">Review</h1>
+		<p class="mt-2 text-sm text-fg-muted">
+			Approve, reject, or correct incoming knowledge before the Executive relies on it.
+		</p>
+	</div>
+	<ReviewQueue />
 </main>
