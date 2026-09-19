@@ -21,6 +21,7 @@ from openexecutive.memory.episodic import (
     reschedule_action,
 )
 from openexecutive.orchestrator.mcp_gateway import MCPGateway
+from openexecutive.workflows.gate import ensure_workflow_event
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +349,7 @@ async def _execute_action(
             workflow = DepartmentCheckInWorkflow()
             artifact = ""
             async for event in workflow.run(inputs=wf_inputs, store=store):
+                event = ensure_workflow_event(event, site="scheduler.dept_cadence")
                 if event.type == "artifact" and event.content:
                     artifact = event.content
                 elif event.type == "error" and event.message:
@@ -1132,17 +1134,20 @@ async def _run_dynamic_workflow(action: ScheduledAction, now: datetime) -> None:
         store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
         artifact = ""
         async for event in workflow.run(inputs=wf_inputs, store=store):
-            etype = getattr(event, "type", None)
-            content = getattr(event, "content", None)
-            if etype == "artifact" and content:
-                artifact = content
-            elif etype == "error":
-                message = getattr(event, "message", None)
-                if message:
-                    raise RuntimeError(message)
-            # A WaitForHumanEvent (approval gate) has no `type`; a cadence run
-            # can't pause for a human, so we ignore the gate and finish with
-            # whatever was assembled.
+            # The only scheduler branch that can receive a DYNAMIC workflow, so
+            # the only one that can be handed an approval gate. A cadence fire
+            # has no human in the loop, and `validate_definition` forbids gates
+            # in cadence-enabled workflows for exactly that reason — but a
+            # definition saved before that rule, or edited while a scheduled
+            # row was pending, still lands here. This used to ignore the gate
+            # and store `complete_run(run_id, "(no artifact)")`: a phantom
+            # successful run, every period, with nothing in it. Raising instead
+            # lets the handler below record a real failure.
+            event = ensure_workflow_event(event, site="scheduler.dynamic_workflow")
+            if event.type == "artifact" and event.content:
+                artifact = event.content
+            elif event.type == "error" and event.message:
+                raise RuntimeError(event.message)
         complete_run(run_id, artifact or "(no artifact)")
     except Exception as exc:
         logger.exception("scheduler: dynamic_workflow %r (action %d) failed", name, action.id)
@@ -1222,6 +1227,7 @@ async def _run_principal_brief(action: ScheduledAction, now: datetime) -> None:
         fingerprint: str | None = None
         suppressed = False
         async for event in workflow.run(inputs=wf_inputs, store=store):
+            event = ensure_workflow_event(event, site="scheduler.principal_brief")
             if event.type == "artifact" and event.content:
                 artifact = event.content
             elif event.type == "result" and event.data and event.data.get("brief_fingerprint"):
@@ -1317,6 +1323,7 @@ async def _run_executive_reflection(
         store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
         artifact = ""
         async for event in workflow.run(inputs=wf_inputs, store=store):
+            event = ensure_workflow_event(event, site="scheduler.executive_reflection")
             if event.type == "artifact" and event.content:
                 artifact = event.content
             elif event.type == "error" and event.message:

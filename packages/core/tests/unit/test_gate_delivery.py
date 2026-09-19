@@ -350,3 +350,30 @@ def test_an_unknown_channel_leaves_the_gate_unscoped() -> None:
         routed, _ = _deliver(_gate())
 
     assert routed.origin_session_id == ""
+
+
+def test_delivery_preserves_the_resume_payload() -> None:
+    """`deliver_gate_question` returns a `model_copy`, and that it carries
+    unlisted fields through is load-bearing: the engine attaches the resume
+    payload BEFORE delivery, so a delivery path that rebuilt the event instead
+    would silently turn every gate pause-only — the run would park forever and
+    nothing would ever continue it.
+    """
+    from openexecutive.workflows.wait_for_human import WorkflowResumeState
+
+    state = WorkflowResumeState(
+        workflow_name="weekly_watch",
+        gate_step_id="gate",
+        gate_step_index=1,
+        next_step_index=2,
+        outputs={"research": ("Research", "body")},
+    )
+    event = WaitForHumanEvent(person_id=7, question="OK?", resume_state=state)
+
+    # The self-approval path returns early via model_copy; any mode would do.
+    copied = event.model_copy(update={"delivery": "sent", "channel": "slack"})
+
+    assert copied.resume_state is not None
+    assert copied.resume_state.gate_step_id == "gate"
+    # ...and it still never reaches the checkpoint JSON the resolver reads.
+    assert "resume_state" not in copied.model_dump_json()

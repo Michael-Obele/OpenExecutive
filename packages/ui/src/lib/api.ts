@@ -1055,23 +1055,82 @@ export interface WorkflowSample {
   inputs: Record<string, unknown>;
 }
 
+/** Every status `workflow_runs.status` can hold. `awaiting_human`, `resolved`
+ *  and `timed_out` have been served for a while; the union only ever listed
+ *  three, so the others reached the UI as unhandled strings. */
+export type WorkflowRunStatus =
+  | "running"
+  | "done"
+  | "error"
+  | "awaiting_human"
+  | "resolved"
+  | "timed_out";
+
+/** Statuses the run will not move on from by itself. Anything else means a
+ *  poll is worth repeating: `running` is working, `awaiting_human` is waiting
+ *  on a person, and `resolved` is queued for the resumer to pick up. */
+export const TERMINAL_RUN_STATUSES: ReadonlySet<WorkflowRunStatus> = new Set([
+  "done",
+  "error",
+  "timed_out",
+]);
+
+/** How the gate's question actually reached the approver. Anything other than
+ *  `sent` or `self` means nobody was asked, and the UI must not imply
+ *  otherwise. */
+export type GateDelivery = "self" | "sent" | "suppressed" | "alerted" | "failed";
+
 export interface WorkflowRunSummary {
   run_id: string;
   workflow_name: string;
   title: string;
-  status: "running" | "done" | "error";
+  status: WorkflowRunStatus;
   created_at: string;
   updated_at: string;
+}
+
+/** Which steps a paused run already finished. The server sends this in place
+ *  of the raw resume payload, which carries every completed step's full text
+ *  and would otherwise ride on every poll. */
+export interface ResumeProgress {
+  gate_step_id: string;
+  completed_step_ids: string[];
 }
 
 export interface WorkflowRunDetail extends WorkflowRunSummary {
   inputs: Record<string, unknown>;
   artifact: string | null;
   error: string | null;
+  // Checkpoint columns the run record has always carried; the detail route
+  // returns the whole row, so these were already on the wire untyped.
+  awaiting_person_id?: number | null;
+  awaiting_until?: string | null;
+  state_json?: string | null;
+  resolution_json?: string | null;
+  resume_progress?: ResumeProgress | null;
+}
+
+/** The serialized gate in `state_json`, for rendering what a paused run is
+ *  waiting on. Every field is optional: older checkpoints predate some of
+ *  them, which is exactly how the server tells legacy rows apart. */
+export interface GateState {
+  question?: string;
+  person_id?: number;
+  expected_reply_shape?: string;
+  delivery?: GateDelivery;
+  channel?: string;
 }
 
 export interface WorkflowEvent {
-  type: "run_created" | "step_start" | "step_done" | "artifact" | "done" | "error";
+  type:
+    | "run_created"
+    | "step_start"
+    | "step_done"
+    | "result"
+    | "artifact"
+    | "done"
+    | "error"
+    | "awaiting_human";
   run_id?: string;
   title?: string;
   workflow?: string;
@@ -1082,6 +1141,17 @@ export interface WorkflowEvent {
   sources?: string[];
   message?: string;
   steps?: WorkflowStepDef[];
+  /** `result` events only. */
+  data?: Record<string, unknown>;
+  // `awaiting_human` only. A paused run emits NO `done` or `error` — this
+  // frame is the last one, which `terminal` says explicitly so a client
+  // doesn't sit waiting for an end that never comes.
+  person_id?: number;
+  question?: string;
+  awaiting_until?: string;
+  delivery?: GateDelivery;
+  resumable?: boolean;
+  terminal?: boolean;
 }
 
 export async function listWorkflows(): Promise<WorkflowMeta[]> {
