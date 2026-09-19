@@ -1,0 +1,73 @@
+# Open Executive MCP server — Fly.io app config (HTTP transport).
+#
+# Deploy from the repo ROOT (the build context must include packages/mcp):
+#   fly launch --no-deploy --copy-config --name <your-app>   # first time only
+#   fly secrets set BACKEND_SHARED_SECRET=... BACKEND_BASE_URL=https://<your-api>
+#   fly deploy
+#
+# Cost model and the scale-to-zero tradeoff: docs/fly-io-costs.md.
+#
+# ── Read this before making the app public ───────────────────────────────────
+# This server has NO authentication of its own. It proxies to the backend with
+# BACKEND_SHARED_SECRET, so anyone who can reach /mcp can act on the company.
+# The safe deployment is therefore a *private* one: do not allocate a public IP
+# (`fly ips allocate-v4`), and reach the app over the private network instead:
+#
+#   fly proxy 8787:8787 -a <your-app>        # then point the client at
+#                                            # http://localhost:8787/mcp
+#   # or over WireGuard: http://<your-app>.flycast:8787/mcp
+#
+# If you must expose it publicly, put an authenticating proxy in front of it
+# first (Fly has no built-in auth for a plain service) — or, better, set
+# MCP_AUTH_TOKEN: every /mcp request must then carry `Authorization: Bearer
+# <token>`, which makes even a public deployment safe on its own.
+#
+# `fly launch` DOES often allocate a public IP for a config declaring an
+# [http_service], so verify rather than assume — a dedicated v4 is both public
+# and $2/month:
+#
+#   fly ips list -a <your-app>
+#   fly ips release <address> -a <your-app>
+
+app = "openexecutive-mcp"
+primary_region = "lhr"    # London — change to the region nearest the backend
+
+[build]
+dockerfile = "docker/Dockerfile.mcp"
+
+[env]
+MCP_PORT = "8787"
+# BACKEND_BASE_URL is a per-environment value: set it as a secret so the same
+# image can point at a local, staging or production backend without a rebuild.
+
+[http_service]
+internal_port = 8787
+force_https = true
+# Scale to zero: a stopped Machine costs only its rootfs — about $0.01–0.03/month
+# for this image (see docs/fly-io-costs.md) instead of $1.94/month. The tradeoff
+# is a 1–3s cold start on the first request after an idle period. Switch to
+# "suspend" for faster resumes, or set min_machines_running = 1 to keep it warm
+# for $1.94/month.
+auto_stop_machines = "stop"
+auto_start_machines = true
+min_machines_running = 0
+
+[http_service.concurrency]
+# MCP clients send one request per tool call: concurrency is tiny and long
+# (streaming) calls are the norm, so keep the limits far below the default
+# 200/250 or the proxy will scale out Machines we do not want to pay for.
+type = "requests"
+soft_limit = 10
+hard_limit = 20
+
+[[vm]]
+# The smallest preset the app needs: this process is an HTTP proxy with a
+# Valibot schema and no in-memory state, and it runs comfortably in 256MB.
+cpu_kind = "shared"
+cpus = 1
+memory = "256mb"
+
+[deploy]
+# Give in-flight MCP requests a chance to finish; the server closes its
+# listener on SIGTERM (see packages/mcp/src/http.ts).
+kill_timeout = "10s"

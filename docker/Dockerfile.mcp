@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1
+#
+# Open Executive MCP server — HTTP transport.
+#
+# Build from the repo ROOT (the build context must include packages/mcp):
+#   docker build -f docker/Dockerfile.mcp -t openexecutive-mcp .
+#
+# Bun executes the TypeScript directly, so there is no compile step: the image
+# is a pinned Bun runtime, `packages/mcp`, and its production dependencies.
+# That keeps the rootfs small, which matters because a stopped Fly Machine is
+# billed by rootfs size ($0.15/GB/30 days) — see docs/fly-io-costs.md.
+
+FROM oven/bun:1.4-alpine AS deps
+WORKDIR /app
+# Manifests first: editing a source file then no longer invalidates the
+# dependency layer, so rebuilds stay fast.
+COPY packages/mcp/package.json packages/mcp/bun.lock ./
+RUN bun install --frozen-lockfile --production
+
+FROM oven/bun:1.4-alpine AS runtime
+WORKDIR /app
+
+# Unprivileged: the Bun image ships a `bun` user, and this server only ever
+# makes outbound HTTP calls — it never needs root or a writable filesystem.
+COPY --from=deps --chown=bun:bun /app/node_modules ./node_modules
+COPY --chown=bun:bun packages/mcp/package.json packages/mcp/tsconfig.json ./
+COPY --chown=bun:bun packages/mcp/src ./src
+
+# `PORT` is the fallback the entrypoint reads for container hosts that inject
+# it (Fly); MCP_PORT wins when both are set. MCP_HOST is 0.0.0.0 only because the
+# port is published into the namespace from outside — the host default is
+# loopback (see packages/mcp/src/http.ts).
+ENV NODE_ENV=production \
+    MCP_PORT=8787 \
+    MCP_HOST=0.0.0.0 \
+    BACKEND_BASE_URL=http://api:8000
+
+USER bun
+EXPOSE 8787
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:8787/health || exit 1
+
+CMD ["bun", "run", "src/http.ts"]

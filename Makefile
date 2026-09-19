@@ -1,4 +1,4 @@
-.PHONY: dev stop test lint eval docker clean install discord
+.PHONY: dev stop test lint eval docker docker-mcp clean install discord
 
 install:
 	cd packages/core && uv sync
@@ -43,6 +43,11 @@ docker:
 
 docker-down:
 	docker compose $(COMPOSE_ENV_FILE) -f docker/docker-compose.yml down
+
+# The MCP server alone, on http://127.0.0.1:8787/mcp — for when the backend runs
+# some other way (or remotely) and only the agent surface needs a container.
+docker-mcp:
+	docker compose $(COMPOSE_ENV_FILE) -f docker/docker-compose.yml up --build mcp
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true

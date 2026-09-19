@@ -2495,8 +2495,12 @@ talent:
     oe://talent/engagements resource plus list_candidates / get_candidate /
     match_candidates / find_similar_candidates tools that call talent.store /
     talent.graph directly (NOT the chat handlers). The `talent` specialist's
-    advice is reachable there via consult_specialist. Writes and workflow
-    execution are not exposed over MCP.
+    advice is reachable there via consult_specialist. This in-API server is
+    READ-ONLY: writes and workflow execution are not exposed here. They are
+    exposed by the *second*, standalone MCP server in `packages/mcp` (TMCP,
+    TypeScript, STDIO + HTTP on :8787), which multiplexes 101 actions into 8
+    domain resources behind an `action` enum and reaches the company only over
+    the HTTP API — never SQLite/YAML directly. Reference: `docs/mcp.md`.
   graph: |
     Phase 2 — semantic candidate matching (openexecutive.talent.graph). Each
     non-archived candidate is indexed into a dedicated ChromaDB collection

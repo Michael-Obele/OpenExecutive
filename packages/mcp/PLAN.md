@@ -1,17 +1,36 @@
 # MCP Expansion Plan — Making Every Route AI-Editable
 
-> **Status:** `packages/mcp` scaffolded via `bun create tmcp` (Valibot + STDIO + HTTP, TS).
-> Onboarding tools are implemented. This plan covers the rest.
+> **Status: COMPLETE.** Every phase below is implemented and verified against a live
+> backend — but **not** as one tool per route. The routes listed here are reachable as
+> **actions inside 8 resource-oriented tools** (one per domain, `action` enum); see
+> `docs/mcp.md` for the design, the tool table and the safety tiers. This file is kept
+> as the route → action inventory and the record of why the work was ordered this way.
+>
+> **Divergences from the plan as written:**
+>
+> - Tools are `oe_company`, `oe_people`, `oe_departments`, `oe_knowledge`,
+>   `oe_artifacts`, `oe_talent`, `oe_watchlist`, `oe_operations` — 101 actions total.
+> - Domains the plan did not name were folded into the nearest tool rather than
+>   dropped: episodic memory + today/activity + `POST /chat` into `oe_company`; offers
+>   into `oe_talent`; review annotations and audit sessions/usage into `oe_operations`.
+> - Phase F's `oe://` resources were **not** mirrored as MCP resources. Their reads are
+>   actions (`oe_company get_profile`/`get_today`/`list_memories`, `oe_people list`,
+>   `oe_departments list`) — MCP resource support is uneven across clients and two ways
+>   to read the same data is one too many.
+> - Deployment is done: `docker/Dockerfile.mcp`, a `mcp` compose service, `fly.toml`,
+>   and the cost analysis in `docs/fly-io-costs.md`.
+> - The only item still open is §7 — retiring the Python server.
 
 ## 1. What exists today
 
-| Layer                                              | State                                                                                                                                                     |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/mcp`                                     | TMCP server (TS, Valibot, STDIO + HTTP via `srvx`). `src/index.ts` is the single entrypoint for both transports.                                          |
-| `src/server.ts`                                    | `createServer()` — shared server instance. Both transports import it so they never drift.                                                                 |
-| `src/backend.ts`                                   | Thin HTTP client for the FastAPI backend (`x-api-key` auth, same as the UI proxy).                                                                        |
-| `src/tools/onboarding.ts`                          | 7 tools: `get_company_profile`, `get_onboarding_session`, `onboard_start`, `onboard_message`, `onboard_draft`, `onboard_commit`, `patch_company_profile`. |
-| `packages/core/openexecutive/mcp_server/server.py` | Legacy Python MCP server (FastMCP, read-only). Kept for now; will be superseded by `packages/mcp` once parity is reached.                                 |
+| Layer                                                                                       | State                                                                                                                                            |
+| ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/mcp`                                                                              | TMCP server (TS, Valibot, STDIO + HTTP via `srvx`). `src/index.ts` is the single entrypoint for both transports.                                 |
+| `src/server.ts`                                                                             | `createServer()` — shared server instance. Both transports import it so they never drift.                                                        |
+| `src/backend.ts`                                                                            | Thin HTTP client for the FastAPI backend (`x-api-key` auth, same as the UI proxy).                                                               |
+| `src/tools/registry.ts`                                                                     | `ActionSpec` table → one Valibot discriminated-union schema + one generic handler. Adding an endpoint is a table row, not a new tool definition. |
+| `src/tools/{company,people,departments,knowledge,artifacts,talent,watchlist,operations}.ts` | The 8 domain tools — 101 actions multiplexed behind `action` enums.                                                                               |
+| `packages/core/openexecutive/mcp_server/server.py`                                          | Legacy Python MCP server (FastMCP, read-only). Kept for now; will be superseded by `packages/mcp` once parity is reached.                        |
 
 Every MCP tool goes through the **HTTP API**, never direct SQLite/YAML — so validation, auth, and audit stay identical.
 
@@ -23,7 +42,10 @@ Every MCP tool goes through the **HTTP API**, never direct SQLite/YAML — so va
 4. **Full-state returns** — every write returns the updated entity so the agent can verify.
 5. **No new backend routes** — wrap what already exists. If a route is missing, add it to `packages/core/openexecutive/api/routes/*` first, then expose it.
 
-## 3. Tool inventory (by route)
+## 3. Action inventory (by backend route)
+
+> Executed as **actions** inside the 8 domain tools rather than as one tool per route.
+> Every row below is reachable from MCP today; `docs/mcp.md` maps each row to its tool.
 
 ### Phase A — Company state (highest leverage, smallest surface)
 
@@ -123,7 +145,13 @@ Each phase: add `src/tools/<domain>.ts` → register in `src/server.ts` → `bun
 ## 5. Auth & deployment
 
 - **Local (STDIO):** `bun run src/index.ts` — no auth needed, runs as the local user.
-- **Remote (HTTP):** `srvx` on any Node/Bun host. Gate with `x-api-key: $BACKEND_SHARED_SECRET` (same as the UI proxy). The Python server's `_UNAUTHENTICATED_PATHS` pattern applies — `/health` stays open, everything else requires the secret.
+- **Remote (HTTP):** `srvx` on any Node/Bun host. Docker: `docker/Dockerfile.mcp`;
+  Fly.io: `fly.toml` (cost model: `docs/fly-io-costs.md`).
+  **The transport authenticates nothing** — it _forwards_ `x-api-key:
+$BACKEND_SHARED_SECRET` to the backend, so anything that can reach `/mcp` can act on
+  the company. Both compose and `fly.toml` bind it to loopback / the private network for
+  that reason; put an authenticating proxy in front if it has to be public. The only
+  open path is `/health`, which returns no configuration.
 - **No new secrets** — reuse `BACKEND_SHARED_SECRET` and `BACKEND_BASE_URL` from the existing `.env`.
 
 ## 6. Testing
@@ -131,7 +159,11 @@ Each phase: add `src/tools/<domain>.ts` → register in `src/server.ts` → `bun
 - **Python side:** extend `tests/unit/test_mcp_server.py` (or add `tests/unit/test_mcp_onboarding.py`) — mock `backend` calls, assert tool registration and serialization.
 - **TMCP side:** `bunx tsc --noEmit` is the type gate. For integration, hit the live backend with `BACKEND_SHARED_SECRET` set and assert round-trips (create → read → update → archive).
 
-## 7. Migration from the Python MCP server
+## 7. Migration from the Python MCP server (still open)
+
+> **Remaining work.** `packages/mcp` now covers more than the Python server does, with
+> one exception: in-process specialist consultation (`consult_specialist`), which has no
+> HTTP route to wrap. Nothing below has been started.
 
 Once `packages/mcp` reaches parity on reads, the Python server at `packages/core/openexecutive/mcp_server/server.py` can be retired:
 

@@ -32,6 +32,26 @@ services:
       timeout: 10s
       retries: 3
 
+  mcp:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.mcp
+    # Bound to loopback deliberately, same reasoning as the API: the MCP server
+    # has no auth of its own and proxies with the backend's shared secret, so
+    # publishing it on 0.0.0.0 would let anything that can reach the port act
+    # on the company. Expose it through a reverse proxy if it must be remote.
+    ports:
+      - "127.0.0.1:8787:8787"
+    # Deliberately NO env_file here: this container only makes outbound HTTP
+    # calls with the shared secret. It has no business holding the Anthropic
+    # key, bot tokens and IMAP credentials that the repo-root .env carries.
+    environment:
+      - BACKEND_BASE_URL=http://api:8000
+      - BACKEND_SHARED_SECRET=${BACKEND_SHARED_SECRET:-}
+      - MCP_PORT=8787
+    depends_on:
+      - api
+
   ui:
     image: node:22-alpine
     working_dir: /app
