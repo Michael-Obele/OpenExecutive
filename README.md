@@ -3,9 +3,22 @@
 [![CI](https://github.com/SenteLabsAI/OpenExecutive/actions/workflows/ci.yml/badge.svg)](https://github.com/SenteLabsAI/OpenExecutive/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Next.js 15](https://img.shields.io/badge/Next.js-15-black.svg)](https://nextjs.org/)
+[![SvelteKit 2](https://img.shields.io/badge/SvelteKit-2-FF3E00.svg)](https://kit.svelte.dev/)
+[![MCP](https://img.shields.io/badge/MCP-TMCP-6B7280.svg)](packages/mcp/)
 
-An AI system that acts as your company's virtual executive team — a senior advisor with Harvard MBA-level knowledge, customized for your specific business.
+### Your company deserves an executive team — even before you can afford one.
+
+**Open Executive is an open-source AI executive that knows your business, remembers every decision, and gives you the same advice a senior leadership team would — on demand, in every tool you already use.**
+
+One coherent voice. Eight specialists behind it. Your company context in every answer. And now, fully editable by any AI agent via API or MCP.
+
+<p>
+
+**[Get Started in 5 Minutes](#quick-start)** · **[Watch Demo](https://youtu.be/O_g97xxVTMk)** · **[How It Works](#how-it-works)** · **[MCP for AI Agents](#mcp--ai-editable-company-state)**
+
+</p>
+
+---
 
 ## Demo
 
@@ -13,87 +26,139 @@ An AI system that acts as your company's virtual executive team — a senior adv
 
 A walkthrough of Open Executive in action — [watch on YouTube](https://youtu.be/O_g97xxVTMk).
 
+---
+
+## The Problem
+
+Early-stage companies make executive-level decisions every week — fundraising, hiring, positioning, operations — without an executive team to pressure-test them. Generic AI gives generic answers. Hiring advisors is slow and expensive. Context gets lost between tools.
+
+## The Solution
+
+Open Executive gives you a **virtual executive team that already knows your company**. Describe your business once, and every future answer is grounded in your actual profile, documents, and past decisions — not a generic template.
+
+- **Knows your business** — company profile, uploaded docs, and goals shape every response.
+- **Remembers what it told you** — episodic memory of decisions, initiatives, and advice across sessions.
+- **Speaks with one voice** — eight specialists debate internally; you hear a single, coherent executive.
+- **Works where you work** — web, Slack, email, Telegram, Google Chat, Discord, CLI, and now any AI agent via MCP.
+- **Stays current** — any AI can update your company state as things change, via API or MCP.
+
+---
+
 ## What It Does
 
-Developed by [sentelabs.ai](https://sentelabs.ai) Open Executive provides a single coherent executive voice backed by eight specialist AI agents:
+Eight specialist agents, one executive voice. The internal architecture is never exposed to the user.
 
-- **Chief Strategy Officer** — competitive analysis, M&A, market positioning, OKRs
-- **Chief Financial Officer** — financial modeling, fundraising, unit economics, cash flow
-- **Chief HR/People Officer** — hiring, compensation, performance, culture
-- **General Counsel** — contracts, IP, employment law basics, compliance
-- **Chief Operating Officer** — process design, vendor management, operational scaling
-- **Chief Marketing Officer** — GTM strategy, brand, communications, PR
-- **Chief Product Officer** — roadmap, prioritization, product strategy
-- **Board Communications Director** — board decks, investor relations, governance
+| Specialist                        | What They Cover                                            |
+| --------------------------------- | ---------------------------------------------------------- |
+| **Chief Strategy Officer**        | Competitive analysis, M&A, market positioning, OKRs        |
+| **Chief Financial Officer**       | Financial modeling, fundraising, unit economics, cash flow |
+| **Chief HR / People Officer**     | Hiring, compensation, performance, culture                 |
+| **General Counsel**               | Contracts, IP, employment law basics, compliance           |
+| **Chief Operating Officer**       | Process design, vendor management, operational scaling     |
+| **Chief Marketing Officer**       | GTM strategy, brand, communications, PR                    |
+| **Chief Product Officer**         | Roadmap, prioritization, product strategy                  |
+| **Board Communications Director** | Board decks, investor relations, governance                |
 
-All responses come from one consistent executive voice. The internal agent architecture is never exposed to the user. Beyond Q&A, the system maintains episodic memory of past decisions and initiatives across sessions, and a built-in scheduler can proactively surface follow-ups and time-sensitive actions.
+Beyond Q&A, the system maintains **episodic memory** of past decisions and initiatives, and a built-in **scheduler** proactively surfaces follow-ups and time-sensitive actions.
 
-## Architecture
+---
+
+## How It Works
+
+### 1. Describe your business
+
+Onboarding takes a few minutes — via a guided interview or a step-by-step form. Add your pitch deck, financial model, or strategy docs. Any AI agent can also do this for you via MCP.
+
+### 2. Ask anything
+
+Chat from the web, Slack, email, or any MCP-connected AI. The Executive routes your question to the right specialists in parallel, each retrieving relevant context from your knowledge base.
+
+### 3. Get a grounded answer
+
+Specialists return domain-expert analysis. The Executive synthesizes it into one coherent response — specific to your company, with memory of what it recommended last month.
 
 ```
-User message
-    ↓
-Executive Orchestrator (claude-sonnet-5)
-    ↓ tool use → parallel specialist calls
-CSO / CFO / CHRO / GC / COO / CMO / CPO / Board
-    ↓ each specialist retrieves relevant context from ChromaDB
-Built-in MBA knowledge + Your company documents
-    ↓
-Synthesized executive response
+You → Executive Orchestrator → parallel specialist calls (CSO / CFO / CHRO / GC / COO / CMO / CPO / Board)
+                                    ↓ each retrieves from ChromaDB
+                              Built-in MBA knowledge + Your company documents
+                                    ↓
+                         Synthesized executive response
 ```
 
-**Knowledge** — Two retrieval layers per specialist call: (1) built-in MBA-level Markdown (`knowledge/builtin/`, git-tracked) seeded into ChromaDB at startup, and (2) your uploaded company documents chunked and stored in a separate `company_docs` collection. RAG context is injected into the user turn, never the cached system prompt.
+**Knowledge** — Two retrieval layers per specialist: (1) built-in MBA-level Markdown (`knowledge/builtin/`, git-tracked) and (2) your uploaded company documents in a separate `company_docs` collection. RAG context is injected into the user turn, never the cached system prompt.
 
-**Episodic memory** — After every response, a background `claude-haiku-4-5` pass extracts key decisions, initiatives, and advice into SQLite. The next session opens with a `<past_decisions>` block so the Executive remembers what it recommended last month.
+**Episodic memory** — After every response, a background `claude-haiku-4-5` pass extracts decisions, initiatives, and advice into SQLite. The next session opens with a `<past_decisions>` block.
 
-**Scheduler** — A built-in job runner claims due actions via `UPDATE … RETURNING` to prevent double-firing. The API must run as a single instance; do not horizontally scale it without gating the scheduler first.
+**Scheduler** — Claims due actions via `UPDATE … RETURNING` to prevent double-firing. Single-instance API only.
 
-**Prompt caching** — The system prompt is structured so the Executive persona, company profile, and knowledge index are cached separately (up to 85% cache hit rate after the first few turns). No dynamic content ever goes in a cached block.
+**Prompt caching** — Persona, company profile, and knowledge index are cached separately (up to 85% hit rate after the first few turns).
 
 See [docs/architecture.md](docs/architecture.md) for the full design.
 
+---
+
+## MCP — AI-Editable Company State
+
+Open Executive is now **editable by any AI agent** — not just through the browser.
+
+Any AI connected via **MCP (Model Context Protocol)** can read and update your company state as things happen: new hires, pivots, funding rounds, department changes. No manual form-filling.
+
+| Capability                | How                                                                          |
+| ------------------------- | ---------------------------------------------------------------------------- |
+| **Onboarding**            | Any free-text description → interview → draft → commit. Works for any input. |
+| **Company profile**       | Read and patch any field at any time.                                        |
+| **People & departments**  | Full CRUD via API; MCP tools wrap the same routes.                           |
+| **Knowledge & artifacts** | Upload, search, and manage documents.                                        |
+| **Talent & watchlist**    | Manage searches, candidates, and watchlist items.                            |
+
+**Two transports, one server** — `packages/mcp` (TMCP + Valibot) exposes every tool over both **STDIO** (local: Claude Code, Cursor) and **HTTP** (remote: `http://localhost:8787/mcp`). Both go through the same HTTP API, so validation and audit stay identical.
+
+See [`packages/mcp/PLAN.md`](packages/mcp/PLAN.md) for the full tool inventory and expansion phases.
+
+---
+
 ## Tech Stack
 
-| Layer | Choice |
-|---|---|
-| LLM backbone | Anthropic Claude API |
-| Default model | `claude-sonnet-5` (Executive + most specialists) |
-| Deep reasoning | `claude-opus-5` (CSO, CFO, GC, Board — with extended thinking) |
-| Backend | Python 3.11 + FastAPI |
-| Package manager | `uv` |
-| Vector store | ChromaDB (local, embedded) |
-| Episodic memory | SQLite |
-| Web UI | Next.js 15 (App Router) + Tailwind |
-| License | Apache 2.0 |
+| Layer           | Choice                                                                                                                          |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| LLM backbone    | **DeepSeek** (OpenAI-compatible) — swappable to Anthropic Claude, OpenRouter, or any local model                                |
+| Default model   | `deepseek-flash` · Deep reasoning: `deepseek-v4-pro` · Routing: `deepseek-flash`                                                |
+| Backend         | Python 3.11 + FastAPI · `uv`                                                                                                    |
+| Web UI          | **SvelteKit 2 + Svelte 5 (Bun)** — migrating from Next.js 15 · Tailwind v4 + shadcn-svelte · Better Auth · Drizzle + PostgreSQL |
+| MCP Server      | **TMCP (TypeScript) + Valibot** · STDIO + Streamable HTTP (`srvx`) · `packages/mcp`                                             |
+| Vector store    | ChromaDB (local, embedded)                                                                                                      |
+| Episodic memory | SQLite + Honcho (optional per-person memory)                                                                                    |
+| License         | Apache 2.0                                                                                                                      |
 
 ## Repo Layout
 
 ```
 openexecutive/
 ├── packages/
-│   ├── core/
+│   ├── core/                  # Python backend — all agent, API, and workflow logic
 │   │   └── openexecutive/
-│   │       ├── orchestrator/     # Executive persona + routing loop
-│   │       ├── agents/           # 8 specialist agents
-│   │       ├── knowledge/        # ChromaDB store + RAG pipeline
-│   │       ├── memory/           # Company profile + episodic memory
-│   │       ├── onboarding/       # Wizard state machine + profile builder
-│   │       ├── prompts/          # Persona + domain prompts + cache manager
-│   │       ├── api/              # FastAPI app + routes
-│   │       ├── integrations/     # Slack, Email, Telegram, Google Chat, Discord
-│   │       ├── scheduler/        # Background job runner (single-instance)
-│   │       ├── alerts/           # Proactive alert system
-│   │       ├── audit/            # Audit logging
-│   │       ├── architecture/     # Internal architecture utilities
-│   │       ├── workflows/        # Multi-step workflow definitions
-│   │       └── cli.py            # Click CLI
-│   └── ui/                       # Next.js 15 web UI
-├── evals/                        # Eval scenarios + LLM-as-judge runner
-├── fixtures/                     # Demo company fixtures (profiles, docs, rosters)
-├── scripts/                      # Operator scripts (Google auth)
-├── docker/                       # Dockerfile(s) + docker-compose.yml
-└── docs/                         # Architecture + deployment docs
+│   │       ├── orchestrator/  # Executive persona + routing loop
+│   │       ├── agents/        # 8 specialist agents
+│   │       ├── knowledge/     # ChromaDB store + RAG pipeline
+│   │       ├── memory/        # Company profile + episodic memory
+│   │       ├── onboarding/    # Interview + wizard + profile builder
+│   │       ├── prompts/       # Persona + domain prompts + cache manager
+│   │       ├── api/           # FastAPI app + routes
+│   │       ├── mcp_server/    # Legacy Python MCP server (read-only, being superseded)
+│   │       ├── integrations/  # Slack, Email, Telegram, Google Chat, Discord
+│   │       ├── scheduler/     # Background job runner (single-instance)
+│   │       ├── alerts/        # Proactive alert system
+│   │       └── workflows/     # Multi-step workflow definitions
+│   ├── web/                   # SvelteKit 2 + Svelte 5 web UI (Bun)
+│   ├── mcp/                   # TMCP MCP server — AI-editable company state (Bun, Valibot)
+│   └── ui/                    # Legacy Next.js 15 UI (frozen, reference only)
+├── evals/                     # Eval scenarios + LLM-as-judge runner
+├── fixtures/                  # Demo company fixtures
+├── docker/                    # Dockerfile(s) + docker-compose.yml
+└── docs/                      # Architecture + deployment docs
 ```
+
+---
 
 ## Quick Start
 
@@ -102,45 +167,70 @@ openexecutive/
 git clone https://github.com/SenteLabsAI/OpenExecutive.git
 cd OpenExecutive
 
-# Set your Anthropic API key
+# Set your DeepSeek API key (or any provider — see Configuration)
 cp .env.example .env
-# Edit .env and add ANTHROPIC_API_KEY=sk-ant-...
-# For the web UI's Google sign-in, also fill in the AUTH_* block
-# (see docs/auth.md for the Google Cloud Console steps).
+# Edit .env — for DeepSeek (default):
+#   LOCAL_MODELS_ENABLED=true
+#   LOCAL_BASE_URL=https://api.deepseek.com
+#   LOCAL_API_KEY=sk-... (from https://platform.deepseek.com/api_keys)
+#   LOCAL_MODELS=deepseek-flash,deepseek-v4-pro
+# For the web UI sign-in, also fill in the AUTH_* block (see docs/auth.md).
 
-# Start everything
+# Start everything — API + web + MCP
 make dev
 ```
 
-All configuration lives in that repo-root `.env` — `make dev` and `make docker`
-both load it for the API *and* the UI (Auth.js needs `AUTH_SECRET` /
-`AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` at runtime). A
-`packages/ui/.env.local` is also read for UI-only keys, but for keys present
-in both files the root `.env` takes precedence.
+All configuration lives in the repo-root `.env` — `make dev` loads it for the API, web, and MCP server. `make stop` kills all three.
 
-Open http://localhost:3000 to start chatting with your executive. The API runs on port 8000 and the UI on 3000.
+| Service    | URL                       | Port |
+| ---------- | ------------------------- | ---- |
+| Web UI     | http://localhost:5173     | 5173 |
+| API        | http://localhost:8000     | 8000 |
+| MCP (HTTP) | http://localhost:8787/mcp | 8787 |
 
-> **First run:** requires Python 3.11+ and Node 22+. The initial `uv sync` pulls heavy
-> ML dependencies (ChromaDB + sentence-transformers/PyTorch), and the first boot
-> downloads a small embedding model (~90 MB) to build the local vector index — so the
-> first `make dev` takes a few minutes before the app is ready. Subsequent starts are fast.
+> **First run:** requires Python 3.11+ and Bun. The initial `uv sync` pulls heavy ML dependencies (ChromaDB + sentence-transformers/PyTorch), and the first boot downloads a small embedding model (~90 MB) — so the first `make dev` takes a few minutes. Subsequent starts are fast.
 
 **For contributors not using `make`:**
 
 ```bash
-cd packages/core
-uv sync
-source .venv/bin/activate
+# API
+cd packages/core && uv sync && source .venv/bin/activate
 uvicorn openexecutive.api.main:app --reload --port 8000
 
-# In a second terminal
-cd packages/ui && npm install && npm run dev
+# Web
+cd packages/web && bun install && bun run dev
+
+# MCP (STDIO for local agents, or HTTP for remote)
+cd packages/mcp && bun install && bun run src/index.ts   # STDIO
+cd packages/mcp && bun run src/http.ts                    # HTTP on 8787
 ```
+
+**VS Code / Cursor MCP config** — `.vscode/mcp.json` is already set up for both transports:
+
+```json
+{
+  "servers": {
+    "open-executive": {
+      "command": "bun",
+      "args": ["run", "${workspaceFolder}/packages/mcp/src/index.ts"],
+      "type": "stdio"
+    },
+    "open-executive-http": {
+      "url": "http://localhost:8787/mcp",
+      "type": "http"
+    }
+  }
+}
+```
+
+`BACKEND_SHARED_SECRET` is optional for local dev (gate off). Set it on any public deployment.
+
+---
 
 ## Run the Discord Bot
 
 1. Create a Discord application at https://discord.com/developers/applications
-2. Enable the **Message Content** privileged intent (Bot → Privileged Gateway Intents)
+2. Enable the **Message Content** privileged intent
 3. Invite the bot with `bot` + `applications.commands` scopes
 4. Set env vars in `.env`: `DISCORD_BOT_TOKEN`, `DISCORD_APP_ID`, `DISCORD_GUILD_IDS`
 5. Run the API normally — the bot starts as part of the FastAPI lifespan when `DISCORD_BOT_TOKEN` is set:
@@ -149,29 +239,16 @@ cd packages/ui && npm install && npm run dev
 make dev
 ```
 
-The bot is embedded in the API process (alongside the email poller, scheduler, and resumer) so it shares the same SQLite database and ChromaDB vector store under `/data` in production. Skip the token to disable.
+The bot shares the same SQLite and ChromaDB store. `make discord` runs it standalone for iteration without restarting the API.
 
-For iterating on bot-only code without restarting the API, `make discord` runs the bot as a standalone process against the same local DB.
+Users can DM the bot, `@mention` it in a channel, or use `/ask` and `/today` slash commands.
 
-Users can DM the bot, `@mention` it in a channel (replies in a thread), or use `/ask` and `/today` slash commands. Slash commands sync to `DISCORD_GUILD_IDS` instantly on startup; leave blank for global registration (up to 1-hour propagation delay).
-
-### Deploying to production
-
-The bot runs inside the existing API process — no extra service. Set these on the API and restart it:
-
-```
-DISCORD_BOT_TOKEN=...
-DISCORD_APP_ID=...
-DISCORD_GUILD_IDS=...
-```
-
-Discord user access is managed via the /people UI — add a Person row with `discord_user_id` set.
-
-The bot starts on the next lifespan boot. To disable it, unset `DISCORD_BOT_TOKEN` and restart.
+---
 
 ## Onboarding Your Company
 
-The first time you visit the app, you'll be guided through a wizard to set up your company profile:
+The first time you visit the app, you'll be guided through setup:
+
 - Company basics (name, industry, stage, team size)
 - Business model and revenue
 - Competitive landscape
@@ -179,23 +256,30 @@ The first time you visit the app, you'll be guided through a wizard to set up yo
 - Culture and values
 - Optional: financial position, document upload
 
-After onboarding, the Executive will reference your specific company context in every response.
+Or let **any AI agent do it for you** — describe your business in free text via MCP (`onboard_start` → `onboard_message` → `onboard_commit`), and the interview handles the rest.
+
+After onboarding, the Executive references your specific company context in every response — and any AI can keep it current as things change.
+
+---
 
 ## Interfaces
 
-| Interface | How to Use |
-|-----------|-----------|
-| **Web UI** | `http://localhost:3000` |
-| **Slack** | Mention `@OpenExecutive` or DM the app |
-| **Email** | CC or email the configured address (IMAP/SMTP poller) |
-| **Telegram** | Message the configured bot |
-| **Google Chat** | Mention the app in a space |
-| **Discord** | DM the bot, `@mention` it in a channel, or use `/ask` / `/today` slash commands |
-| **CLI** | `openexecutive chat` |
+| Interface        | How to Use                                                 |
+| ---------------- | ---------------------------------------------------------- |
+| **Web UI**       | http://localhost:5173                                      |
+| **MCP (any AI)** | STDIO or `http://localhost:8787/mcp` — see `packages/mcp/` |
+| **Slack**        | Mention `@OpenExecutive` or DM the app                     |
+| **Email**        | CC or email the configured address (IMAP/SMTP poller)      |
+| **Telegram**     | Message the configured bot                                 |
+| **Google Chat**  | Mention the app in a space                                 |
+| **Discord**      | DM, `@mention`, or `/ask` / `/today` slash commands        |
+| **CLI**          | `openexecutive chat`                                       |
+
+---
 
 ## Document Upload
 
-Upload your pitch deck, financial model, strategy docs, or any company documents via the web UI or API. The Executive will reference them when relevant.
+Upload your pitch deck, financial model, or strategy docs via the web UI, API, or MCP. The Executive will reference them when relevant.
 
 ```bash
 # Via CLI
@@ -205,128 +289,104 @@ openexecutive upload deck.pdf model.xlsx strategy.md
 curl -X POST http://localhost:8000/documents \
   -F "file=@deck.pdf" \
   -F "domain=strategy"
+
+# Via MCP (any AI agent)
+# → upload_document tool in packages/mcp (Phase C)
 ```
+
+---
 
 ## Deployment
 
-Two containers — the FastAPI backend and the Next.js UI — plus one persistent
-volume at `/data`. [docker/docker-compose.yml](docker/docker-compose.yml) is the
-reference topology and also what `make docker` runs locally, so the local and
-deployed shapes match.
+Two containers — the FastAPI backend and the SvelteKit web UI — plus one persistent volume at `/data`. [docker/docker-compose.yml](docker/docker-compose.yml) is the reference topology and also what `make docker` runs locally.
 
-> **⚠️ Single-instance only**: the scheduler claims rows via `UPDATE … RETURNING`,
-> which is not safe across processes. A second API replica double-fires every
-> scheduled action. Pin the API to one instance. The UI is stateless.
+> **⚠️ Single-instance only**: the scheduler claims rows via `UPDATE … RETURNING`. Pin the API to one instance. The web UI is stateless.
 
-Set `ANTHROPIC_API_KEY`, `BACKEND_SHARED_SECRET`, `BACKEND_ALLOWED_ORIGINS` and
-`OE_PUBLIC_DEPLOYMENT=1` on any internet-reachable instance. See
-[docs/deployment.md](docs/deployment.md) for the full guide — persistent state,
-health-check timing, resource sizing, operations, and common failure modes.
+Set `ANTHROPIC_API_KEY`, `BACKEND_SHARED_SECRET`, `BACKEND_ALLOWED_ORIGINS` and `OE_PUBLIC_DEPLOYMENT=1` on any internet-reachable instance. See [docs/deployment.md](docs/deployment.md) for the full guide.
 
 ### Access control
 
-The deployed UI is gated behind Google sign-in with an email allow-list, and the public API is protected by a shared-secret header between the UI proxy and the FastAPI backend. See [docs/auth.md](docs/auth.md) for the full setup (Google Cloud Console steps, required environment variables, adding/removing users, rotating secrets, and a debugging table).
+Google sign-in with an email allow-list (Better Auth) + shared-secret header between the UI proxy and the FastAPI backend. See [docs/auth.md](docs/auth.md).
+
+---
 
 ## Configuration
 
-All settings via environment variables. Minimum required: `ANTHROPIC_API_KEY` —
-*unless* you configure a local or OpenRouter backend instead (see [Running on
-Local Models](#running-on-local-models)). At least one provider must be set or
-the app refuses to start.
+All settings via environment variables. Minimum required: one provider — DeepSeek (`LOCAL_*`), Anthropic (`ANTHROPIC_API_KEY`), or OpenRouter (`OPENROUTER_*`). See [Running on Local Models](#running-on-local-models). At least one provider must be set.
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `ANTHROPIC_API_KEY` | Yes¹ | — | Anthropic API key |
-| `DEFAULT_MODEL` | No | `claude-sonnet-5` | Executive + most specialists |
-| `DEEP_REASONING_MODEL` | No | `claude-opus-5` | CSO, CFO, GC, Board |
-| `VECTOR_STORE_PATH` | No | `./chroma_db` | ChromaDB directory |
-| `EPISODIC_DB_PATH` | No | `./episodic_memory.db` | SQLite for episodic memory |
-| `COMPANY_PROFILE_PATH` | No | `./company/profile.yaml` | Company profile |
-| `ENABLE_CACHING` | No | `true` | Anthropic prompt caching |
-| `ROUTING_MODEL` | No | `claude-haiku-4-5` | Model for intent routing |
-| `SLACK_BOT_TOKEN` | No | — | Slack bot OAuth token |
-| `SLACK_APP_TOKEN` | No | — | Slack socket mode token |
-| `EXEC_EMAIL_ADDRESS` | No | — | Executive Gmail address (Gmail MCP OAuth) |
-| `EMAIL_POLL_INTERVAL_SECONDS` | No | `60` | How often to poll for new email |
-| `TELEGRAM_BOT_TOKEN` | No | — | Telegram bot token (from @BotFather) |
-| `TELEGRAM_WEBHOOK_SECRET` | No | — | Random string for webhook validation |
-| `DISCORD_BOT_TOKEN` | No | — | Discord bot token (Developer Portal → Bot tab) |
-| `DISCORD_APP_ID` | No | — | Discord application ID (General Information tab) |
-| `DISCORD_GUILD_IDS` | No | — | Comma-separated guild IDs for dev slash-command registration |
-| `DISCORD_NOTIFY_CHANNEL_ID` | No | — | Default channel ID for outbound notifications |
-| `GOOGLE_CHAT_PROJECT_NUMBER` | No | — | GCP project number for Google Chat |
-| `GOOGLE_CHAT_SERVICE_ACCOUNT_FILE` | No | — | Path to service account JSON key |
-| `GOOGLE_OAUTH_CLIENT_ID` | No | — | Google OAuth client ID (Gmail MCP) |
-| `GOOGLE_OAUTH_CLIENT_SECRET` | No | — | Google OAuth client secret (Gmail MCP) |
-| `OPENROUTER_ENABLED` | No | `false` | Route Claude calls through OpenRouter and unlock non-Anthropic models per-agent in the Council UI |
-| `OPENROUTER_API_KEY` | No | — | Required when `OPENROUTER_ENABLED=true` |
-| `OPENROUTER_CATALOG_ENABLED` | No | `true` | Fetch OpenRouter's live `/models` catalog at startup to populate the Council dropdown; falls back to a built-in list on failure |
-| `OPENROUTER_CATALOG_PROVIDERS` | No | `openai,google,anthropic,meta-llama,deepseek,x-ai` | Vendor prefixes surfaced from the live catalog |
-| `OPENROUTER_CATALOG_PER_PROVIDER` | No | `6` | Newest tool-capable paid models per vendor (`0` = no cap) |
-| `OPENROUTER_CATALOG_REFRESH_S` | No | `21600` | Background re-fetch cadence in seconds (`0` = startup only) |
-| `LOCAL_MODELS_ENABLED` | No | `false` | Route selected slugs to a local OpenAI-compatible server (Ollama, LM Studio, vLLM, llama.cpp) |
-| `LOCAL_BASE_URL` | No | — | Local server URL incl. version path, e.g. `http://localhost:11434/v1`. Required when `LOCAL_MODELS_ENABLED=true` |
-| `LOCAL_API_KEY` | No | — | Optional bearer token (vLLM / gateways); Ollama & LM Studio need none |
-| `LOCAL_MODELS` | No | — | Comma-separated local model slugs to surface in the Council UI and route locally, e.g. `llama3.3,qwen2.5` |
-| `LOCAL_TIMEOUT_S` | No | `300` | Per-call timeout for local generation, in seconds |
-| `HONCHO_ENABLED` | No | `false` | Per-person memory layer ([honcho.dev](https://honcho.dev)) — a peer card shared across all channels |
-| `HONCHO_API_KEY` | No | — | Required when `HONCHO_ENABLED=true` |
-| `HONCHO_BASE_URL` | No | — | Self-hosted Honcho endpoint |
-| `ENABLE_WEB_SEARCH` | No | `true`² | Let the Executive and specialists answer with live web results (news, market data, competitor moves) alongside your uploaded documents |
-| `WEB_SEARCH_MAX_USES` | No | `2` | Max billed searches per agent per turn |
+| Variable                     | Required | Default                  | Description                                                   |
+| ---------------------------- | -------- | ------------------------ | ------------------------------------------------------------- |
+| `ANTHROPIC_API_KEY`          | Yes¹     | —                        | Anthropic API key (when using Claude)                         |
+| `LOCAL_API_KEY`              | Yes¹     | —                        | DeepSeek / gateway API key (when `LOCAL_MODELS_ENABLED=true`) |
+| `DEFAULT_MODEL`              | No       | `deepseek-flash`         | Executive + most specialists                                  |
+| `DEEP_REASONING_MODEL`       | No       | `deepseek-v4-pro`        | CSO, CFO, GC, Board                                           |
+| `VECTOR_STORE_PATH`          | No       | `./chroma_db`            | ChromaDB directory                                            |
+| `EPISODIC_DB_PATH`           | No       | `./episodic_memory.db`   | SQLite for episodic memory                                    |
+| `COMPANY_PROFILE_PATH`       | No       | `./company/profile.yaml` | Company profile                                               |
+| `ENABLE_CACHING`             | No       | `true`                   | Anthropic prompt caching                                      |
+| `ROUTING_MODEL`              | No       | `deepseek-flash`         | Model for intent routing                                      |
+| `SLACK_BOT_TOKEN`            | No       | —                        | Slack bot OAuth token                                         |
+| `SLACK_APP_TOKEN`            | No       | —                        | Slack socket mode token                                       |
+| `EXEC_EMAIL_ADDRESS`         | No       | —                        | Executive Gmail address                                       |
+| `TELEGRAM_BOT_TOKEN`         | No       | —                        | Telegram bot token                                            |
+| `DISCORD_BOT_TOKEN`          | No       | —                        | Discord bot token                                             |
+| `GOOGLE_CHAT_PROJECT_NUMBER` | No       | —                        | GCP project number                                            |
+| `GOOGLE_OAUTH_CLIENT_ID`     | No       | —                        | Google OAuth client ID                                        |
+| `OPENROUTER_ENABLED`         | No       | `false`                  | Route Claude calls through OpenRouter                         |
+| `LOCAL_MODELS_ENABLED`       | No       | `false`                  | Route to a local OpenAI-compatible server                     |
+| `LOCAL_BASE_URL`             | No       | —                        | Local server URL, e.g. `http://localhost:11434/v1`            |
+| `HONCHO_ENABLED`             | No       | `false`                  | Per-person memory layer ([honcho.dev](https://honcho.dev))    |
+| `ENABLE_WEB_SEARCH`          | No       | `true`²                  | Live web results alongside your docs                          |
+| `MCP_PORT`                   | No       | `8787`                   | MCP HTTP server port                                          |
 
 See [.env.example](.env.example) for the full list.
 
-> ¹ `ANTHROPIC_API_KEY` is required only when you serve Claude models directly.
-> It can be omitted entirely if you run on local models (`LOCAL_MODELS_ENABLED`)
-> or route through OpenRouter (`OPENROUTER_ENABLED`).
+> ¹ One provider is required: DeepSeek via `LOCAL_API_KEY` + `LOCAL_MODELS_ENABLED`, Anthropic via `ANTHROPIC_API_KEY`, or OpenRouter via `OPENROUTER_API_KEY`. DeepSeek is the default (`deepseek-flash` / `deepseek-v4-pro` via `https://api.deepseek.com`).
 
-> ² The application default is on, but **[.env.example](.env.example) ships
-> `ENABLE_WEB_SEARCH=false`** so a fresh setup incurs no per-search charges —
-> if the agents tell you they can't search the web or read the news, flip it
-> to `true` in your `.env` and restart. Uses Anthropic's server-side
-> `web_search` tool, so it applies to Claude models (local models can't use
-> it). `WEB_SEARCH_ALLOWED_DOMAINS` / `WEB_SEARCH_BLOCKED_DOMAINS` scope where
-> it may look (set at most one).
+> ² Ships as `ENABLE_WEB_SEARCH=false` in `.env.example` so a fresh setup incurs no per-search charges. Flip to `true` and restart to enable.
 
-## Running on Local Models
+---
 
-Open Executive can run against any **OpenAI-compatible** local server — Ollama,
-LM Studio, vLLM, or llama.cpp — instead of (or alongside) the Anthropic API.
-Local model slugs route to your server through the same provider abstraction the
-hosted models use; no agent or orchestrator code changes.
+## Running on DeepSeek (Default) and Other Models
+
+Open Executive ships configured for **DeepSeek** (`deepseek-flash` / `deepseek-v4-pro` via `https://api.deepseek.com`) — just add your API key. Swap to any other provider without code changes.
+
+### DeepSeek (default)
 
 ```bash
-# 1. Pull a capable, tool-use-friendly model (example: Ollama)
+# In .env — already the default LOCAL_* values
+LOCAL_MODELS_ENABLED=true
+LOCAL_BASE_URL=https://api.deepseek.com
+LOCAL_API_KEY=sk-...  # from https://platform.deepseek.com/api_keys
+LOCAL_MODELS=deepseek-flash,deepseek-v4-pro
+```
+
+### Other providers
+
+Any **OpenAI-compatible** server works — Ollama, LM Studio, vLLM, llama.cpp, or a hosted gateway. Anthropic Claude and OpenRouter are also supported directly.
+
+#### Local models (Ollama example)
+
+```bash
+# 1. Pull a capable model
 ollama pull llama3.3
 
-# 2. In .env — point at the local server and list the slugs to expose
+# 2. In .env
 LOCAL_MODELS_ENABLED=true
-LOCAL_BASE_URL=http://localhost:11434/v1   # Ollama default
+LOCAL_BASE_URL=http://localhost:11434/v1
 LOCAL_MODELS=llama3.3
 
-# 3. (Optional) run with NO Anthropic key — make local the default everywhere
+# 3. (Optional) run with NO Anthropic key
 DEFAULT_MODEL=llama3.3
 DEEP_REASONING_MODEL=llama3.3
 ROUTING_MODEL=llama3.3
-# ...and leave ANTHROPIC_API_KEY unset
 ```
 
-The listed slugs appear in the **Council UI** model dropdown, so you can also run
-a hybrid setup — keep the Executive on Claude while flipping individual
-specialists to a local model per-agent.
+The listed slugs appear in the **Council UI** dropdown — run a hybrid setup with the Executive on Claude and individual specialists on a local model.
 
-**Caveats.** Server-side web search (`ENABLE_WEB_SEARCH`) and Anthropic prompt
-caching / extended thinking have no local equivalent and are automatically
-disabled for local models. Multi-agent routing leans heavily on tool use, so
-pick a model that's strong at it (e.g. Llama 3.3 70B, Qwen2.5) — small models
-may route poorly. `LOCAL_API_KEY` is only needed if your server (vLLM, or a
-gateway) requires a bearer token; Ollama and LM Studio need none.
+**Caveats.** Web search and prompt caching have no local equivalent and are disabled for local models. Pick a model strong at tool use (Llama 3.3 70B, Qwen2.5).
 
 ### Using a hosted OpenAI-compatible gateway
-
-The `LOCAL_*` settings are not limited to localhost — the same recipe works with
-any **hosted** OpenAI-compatible endpoint (an aggregator or inference gateway):
 
 ```bash
 LOCAL_MODELS_ENABLED=true
@@ -335,56 +395,52 @@ LOCAL_API_KEY=your-gateway-key
 LOCAL_MODELS=vendor/model-a,vendor/model-b
 ```
 
-The listed slugs are sent to the gateway verbatim and appear in the Council UI
-dropdown, exactly like local slugs. Gateways that speak OpenRouter's request
-format and model namespace can alternatively be used through the OpenRouter
-path (`OPENROUTER_ENABLED=true` + `OPENROUTER_API_KEY` +
-`OPENROUTER_BASE_URL=https://gateway.example.com/v1`), which keeps that path's
-Claude-name translation and feature handling.
+Everything the Executive processes is sent to whichever endpoint you configure — point these settings only at a provider you trust.
 
-The local-model caveats above apply to the `LOCAL_*` path unchanged, plus one
-that matters more for hosted endpoints: everything the Executive processes —
-company profile, documents, conversations — is sent to whichever endpoint you
-configure here. Point these settings only at a provider you trust with that
-data.
+---
 
 ## Adding a New Specialist Agent
 
 1. Create `packages/core/openexecutive/agents/your_agent.py` extending `BaseAgent`
 2. Add a system prompt constant in `packages/core/openexecutive/prompts/domain_prompts.py`
-3. Register in `packages/core/openexecutive/orchestrator/router.py` — add to `SPECIALIST_REGISTRY` and the `specialist` enum in `SPECIALIST_TOOLS`
+3. Register in `packages/core/openexecutive/orchestrator/router.py`
 4. Add domain alias to `DOMAIN_ALIASES` in `packages/core/openexecutive/knowledge/retriever.py`
 5. Add knowledge docs to `knowledge/builtin/your_domain/`
 6. Add at least 2 eval scenarios to `evals/scenarios/`
 7. Submit a PR — CI requires all of the above
 
+---
+
 ## Development
 
 ```bash
-make dev          # Start FastAPI + Next.js
+make dev          # Start API (8000) + web (5173) + MCP (8787)
+make stop         # Stop all three
 make test         # Run Python tests
 make eval         # Run eval suite
 make lint         # Run ruff + mypy
 make docker       # Build and run Docker stack
-
-# Unit tests only (no API calls required)
-pytest packages/core/tests/unit/ -v
 ```
+
+---
 
 ## Evaluation System
 
-`evals/` contains 29 scenarios covering all 8 domains, scored by `claude-opus-4-7` as an LLM-as-judge. Each scenario defines a query, simulated company context, expected topics, required specialist routing, and a domain-specific rubric. Five scoring dimensions (persona coherence, domain accuracy, company context utilization, routing quality, actionability) are each rated 1–5. The CI gate requires ≥ 3.5/5 average; any dimension dropping > 10% vs `main` fails the PR.
+`evals/` contains 29 scenarios covering all 8 domains, scored by `claude-opus-4-7` as an LLM-as-judge. Five scoring dimensions (persona coherence, domain accuracy, company context utilization, routing quality, actionability) rated 1–5. CI gate: ≥ 3.5/5 average; any dimension dropping > 10% vs `main` fails the PR.
+
+---
 
 ## Privacy
 
-Everything in `company/` is gitignored — the profile YAML, uploaded documents, and the ChromaDB vector store. None of this leaves your local machine (or your own volume in cloud deployments) except as part of prompts sent to the Anthropic API. Anthropic does not train on API data.
+Everything in `company/` is gitignored — profile YAML, uploaded documents, and ChromaDB store. None leaves your local machine (except as part of prompts sent to the Anthropic API). Anthropic does not train on API data.
+
+---
 
 ## Contributing
 
-See [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md). All PRs must include:
-- Working implementation (no stubs)
-- Tests for new behavior
-- Eval scenarios for new agents or prompt changes
+See [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md). All PRs must include working implementation, tests, and eval scenarios for new agents or prompt changes.
+
+---
 
 ## License
 
