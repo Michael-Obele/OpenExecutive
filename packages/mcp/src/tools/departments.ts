@@ -119,7 +119,9 @@ const actions: ActionSpec[] = [
       discord_channel_id: nullableText(
         "Discord channel id. Pass null to clear it.",
       ),
-      telegram_chat_id: nullableText("Telegram chat id. Pass null to clear it."),
+      telegram_chat_id: nullableText(
+        "Telegram chat id. Pass null to clear it.",
+      ),
       watched_entities: optionalList(
         "Entities the monitoring pipeline watches for this department (max 50). Replaces the stored list.",
       ),

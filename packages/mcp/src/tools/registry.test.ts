@@ -220,7 +220,11 @@ describe("generic handler", () => {
   test("refuses an update that supplies no fields", async () => {
     // Every PATCH route needs at least one field; some answer 400 and others
     // return 200 unchanged, so the guard makes both cases loud.
-    const result = await call("oe_departments", { action: "update", slug: "finance" }, 4);
+    const result = await call(
+      "oe_departments",
+      { action: "update", slug: "finance" },
+      4,
+    );
     expect(result.isError).toBe(true);
     expect(result.text).toMatch(/at least one field/);
     expect(calls).toHaveLength(0);
@@ -251,13 +255,20 @@ describe("generic handler", () => {
             );
             // Error *after* the queued chunk is read: `controller.error()`
             // discards anything still queued, which would test nothing.
-            setTimeout(() => controller.error(new Error("socket reset mid-stream")), 10);
+            setTimeout(
+              () => controller.error(new Error("socket reset mid-stream")),
+              10,
+            );
           },
         }),
         { status: 200, headers: { "content-type": "text/event-stream" } },
       );
 
-    const result = await call("oe_company", { action: "ask", message: "hi" }, 8);
+    const result = await call(
+      "oe_company",
+      { action: "ask", message: "hi" },
+      8,
+    );
     const payload = JSON.parse(result.text);
     expect(payload.reply).toBe("half an answer");
     expect(payload.session_id).toBe("S9");
