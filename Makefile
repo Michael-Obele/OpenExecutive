@@ -2,23 +2,24 @@
 
 install:
 	cd packages/core && uv sync
-	cd packages/ui && npm install
+	cd packages/web && bun install
 
 # Both dev recipe lines source the repo-root .env into the process env:
-# - the UI needs it because Next.js only auto-loads packages/ui/.env*, so
-#   Auth.js never saw AUTH_SECRET etc. (issue #44);
+# - the web needs it because SvelteKit only auto-loads packages/web/.env*, so
+#   Better Auth never saw BETTER_AUTH_SECRET etc.;
 # - the API needs it because BACKEND_SHARED_SECRET / BACKEND_ALLOWED_ORIGINS
 #   are read from os.environ, not pydantic Settings — dotenv alone doesn't
 #   surface them, silently leaving the API gate open.
-# Note: exported values win over packages/ui/.env.local for duplicate keys.
+# Note: exported values win over packages/web/.env.local for duplicate keys.
 # .env values must be shell-safe: quote anything containing spaces or `$`.
 dev:
 	@echo "Starting Open Executive..."
 	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; cd packages/core && uv run uvicorn openexecutive.api.main:app --reload --port 8000 &
-	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; cd packages/ui && npm run dev
+	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; cd packages/web && bun run dev &
+	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; cd packages/mcp && MCP_PORT=8787 bun run src/http.ts
 
 stop:
-	@lsof -ti :8000 -ti :3000 2>/dev/null | xargs kill -9 2>/dev/null || true
+	@lsof -ti :8000 -ti :5173 -ti :8787 2>/dev/null | xargs kill -9 2>/dev/null || true
 	@echo "Stopped."
 
 test:
@@ -47,7 +48,7 @@ clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	rm -rf packages/core/.venv packages/core/.mypy_cache packages/core/.ruff_cache
-	rm -rf packages/ui/node_modules packages/ui/.next
+	rm -rf packages/web/node_modules packages/web/.svelte-kit packages/web/build
 
 discord:
 	cd packages/core && uv run python -m openexecutive.integrations.discord_bot

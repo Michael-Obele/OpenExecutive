@@ -1,0 +1,17 @@
+{
+	"servers": {
+		"open-executive": {
+			"command": "bun",
+			"args": ["run", "${workspaceFolder}/packages/mcp/src/index.ts"],
+			"type": "stdio",
+			"env": {
+				"BACKEND_BASE_URL": "http://localhost:8000",
+				"BACKEND_SHARED_SECRET": "${env:BACKEND_SHARED_SECRET}"
+			}
+		},
+		"open-executive-http": {
+			"url": "http://localhost:8787/mcp",
+			"type": "http"
+		}
+	}
+}
