@@ -167,6 +167,54 @@ def test_request_translates_anthropic_tools_to_openai_functions() -> None:
     }
 
 
+def test_request_maps_forced_any_tool_choice_to_required() -> None:
+    """Anthropic ``{"type":"any"}`` ("you must call some tool") has to become
+    OpenAI's ``"required"``.
+
+    Passing ``"any"`` through verbatim made OpenAI-compatible backends reject the
+    entire request with a 422 (``tool_choice: expected one of `none`, `auto`,
+    `required` or a tool``). That surfaced as a 502 from
+    ``POST /onboard/interview/start``, because the interview forces a tool on
+    every non-final turn."""
+    body = to_openai_request(
+        "deepseek-v4.1-flash",
+        {
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {
+                    "name": "ask_question",
+                    "description": "Ask the next onboarding question.",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+            "tool_choice": {"type": "any"},
+        },
+    )
+    assert body["tool_choice"] == "required"
+
+
+def test_request_passes_auto_tool_choice_through_as_string() -> None:
+    """``{"type":"auto"}`` is spelled the same way in both APIs."""
+    body = to_openai_request(
+        "deepseek-v4.1-flash",
+        {
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": {"type": "auto"},
+        },
+    )
+    assert body["tool_choice"] == "auto"
+
+
+def test_request_omits_tool_choice_when_absent() -> None:
+    """No ``tool_choice`` in → none out, so a caller that never forces a tool
+    keeps the backend's own default."""
+    body = to_openai_request(
+        "deepseek-v4.1-flash",
+        {"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert "tool_choice" not in body
+
+
 def test_request_preserves_tool_cache_control_when_present() -> None:
     """When a tool entry carries cache_control (Anthropic's tools-prefix
     caching marker), the translated tool entry preserves it so OpenRouter

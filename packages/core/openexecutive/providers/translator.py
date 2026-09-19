@@ -433,6 +433,30 @@ def to_openai_request(model_slug: str, anthropic_kwargs: dict[str, Any]) -> dict
     if tool_choice is not None:
         body["tool_choice"] = _translate_tool_choice(tool_choice)
 
+    # Thinking-capable OpenAI-compatible models (DeepSeek's thinking family:
+    # ``deepseek-flash``, ``deepseek-reasoner``) reject ANY forced tool_choice
+    # — ``"required"`` and named-function objects alike — with a 400
+    # ("Thinking mode does not support this tool_choice"). They think by
+    # default, so a request that never mentions ``thinking`` is still a
+    # thinking request. Disabling thinking is the only way to force a tool on
+    # these models, and it is also the semantically right trade: a forced tool
+    # turn wants a schema-shaped answer (a question, a draft), not a chain of
+    # thought.
+    #
+    # Verified empirically against https://api.deepseek.com (2026-09-18):
+    #   deepseek-flash + required + thinking disabled → 200, tool called
+    #   deepseek-flash + required + thinking on      → 400
+    #   deepseek-flash + auto (+/- thinking)         → 200, tool called
+    #   deepseek-chat   + required (non-thinking)    → 200, tool called
+    # Non-forced turns (``auto`` / ``none`` / absent) are untouched — thinking
+    # stays on where the model wants it.
+    #
+    # The field is only meaningful to DeepSeek-style backends; other
+    # OpenAI-compatible servers ignore unknown fields, so sending it
+    # unconditionally on forced-tool turns is safe.
+    if _is_forced_tool_choice(body.get("tool_choice")):
+        body["thinking"] = {"type": "disabled"}
+
     # Deep reasoning: the Council checkbox sets Anthropic-native ``thinking``
     # + ``output_config.effort``; feature_gate leaves them in place only for
     # models that can reason, and here they become OpenRouter's ``reasoning``.
@@ -453,13 +477,40 @@ def to_openai_request(model_slug: str, anthropic_kwargs: dict[str, Any]) -> dict
 
 def _translate_tool_choice(tc: Any) -> Any:
     """``{"type":"tool","name":"X"}`` → ``{"type":"function","function":{"name":"X"}}``.
-    Pass-through for ``{"type":"any"}`` and ``{"type":"auto"}``."""
+
+    ``{"type":"any"}`` → ``"required"``. Anthropic's ``any`` means "you must call
+    one of these tools"; OpenAI and its compatible backends have no field that
+    spells it that way — they accept only ``none`` | ``auto`` | ``required`` or a
+    specific tool object, and reject the literal string ``"any"`` with a 422
+    (observed against the DeepSeek gateway: *"tool_choice: expected one of
+    `none`, `auto`, `required` or a tool"*). ``required`` is the exact semantic
+    equivalent, so the forced-tool-turn paths (e.g. the onboarding interview,
+    which sends ``{"type":"any"}`` on every non-final turn) translate cleanly
+    instead of 502-ing.
+
+    ``{"type":"auto"}`` → ``"auto"``.
+    """
     if isinstance(tc, dict):
         if tc.get("type") == "tool" and "name" in tc:
             return {"type": "function", "function": {"name": tc["name"]}}
-        if tc.get("type") in ("any", "auto"):
-            return tc.get("type")
+        if tc.get("type") == "any":
+            return "required"
+        if tc.get("type") == "auto":
+            return "auto"
     return tc
+
+
+def _is_forced_tool_choice(tc: Any) -> bool:
+    """True when the (already translated) ``tool_choice`` forces a tool call.
+
+    ``"required"`` and named-function objects (``{"type":"function",...}``)
+    both force; ``"auto"``, ``"none"``, and anything absent do not.
+    """
+    if tc == "required":
+        return True
+    if isinstance(tc, dict) and tc.get("type") == "function":
+        return True
+    return False
 
 
 # --------------------------------------------------------------------------
