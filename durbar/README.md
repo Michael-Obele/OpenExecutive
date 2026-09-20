@@ -166,6 +166,11 @@ briefings, memory, the scheduler, the dashboard — is in scope.
 
 ## Status
 
+> **Continuing this work?** Read [`AGENTS.md`](./AGENTS.md) (how to work here) and
+> [`PORT-PLAN.md`](./PORT-PLAN.md) — the complete remaining scope: 31 workflows,
+> the 153-path API surface, the dashboard, the MCP server, sequencing, and every
+> decision already made.
+
 Ported and verified so far:
 
 - [x] Consolidated schema (13 tables) with idempotent migrations

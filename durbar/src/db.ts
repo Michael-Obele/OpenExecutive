@@ -60,13 +60,37 @@ export function migrate(db: Db): void {
 if (import.meta.main) {
   const path = process.env['DURBAR_DB_PATH'] ?? './durbar.db';
   const db = openDb(path);
+
+  // FTS5 creates five shadow tables per virtual table (`_config`, `_content`,
+  // `_data`, `_docsize`, `_idx`). They are implementation detail; counting them
+  // makes the schema look a third larger than it is. Resolved from the FTS5
+  // tables actually present rather than by suffix alone, so a real table that
+  // happens to end in `_data` is not silently hidden.
+  const ftsTables = db
+    .query<{ name: string }, []>(
+      `SELECT name FROM sqlite_master
+        WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%fts5%'`,
+    )
+    .all()
+    .map((row) => row.name);
+
+  const shadows = new Set(
+    ftsTables.flatMap((name) =>
+      ['config', 'content', 'data', 'docsize', 'idx'].map(
+        (suffix) => `${name}_${suffix}`,
+      ),
+    ),
+  );
+
   const tables = db
     .query<{ name: string }, []>(
       `SELECT name FROM sqlite_master WHERE type='table'
        AND name NOT LIKE 'sqlite_%' ORDER BY name`,
     )
     .all()
-    .map((row) => row.name);
+    .map((row) => row.name)
+    .filter((name) => !shadows.has(name));
+
   console.log(`initialised ${path}`);
   console.log(`tables (${tables.length}): ${tables.join(', ')}`);
   db.close();
