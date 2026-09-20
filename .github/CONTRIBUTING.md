@@ -19,6 +19,7 @@
 ## PR Requirements
 
 All PRs must:
+
 1. Pass CI (ruff, mypy, unit tests)
 2. Include working code — no stubs, no placeholders
 3. Include tests for new behavior
@@ -31,13 +32,14 @@ All PRs must:
 
 ## Adding a New Specialist Agent
 
-See [CLAUDE.md](../CLAUDE.md#adding-a-new-specialist-agent) for the step-by-step guide.
+See [AGENTS.md](../AGENTS.md#adding-a-specialist-mirror-this-whole-list-when-porting) for the step-by-step guide.
 
 ## Improving the Knowledge Base
 
 The `knowledge/` directory contains Markdown files with executive expertise. Contributions here are very welcome.
 
 Requirements:
+
 - Accurate and up-to-date information
 - Cite sources for specific claims
 - Domain-tagged with the correct folder
@@ -57,10 +59,10 @@ The deep source-of-truth notes behind the page live in
 
 **When your PR materially changes a documented topic, update BOTH in the same
 PR**: the relevant `architecture-facts.yaml` key, and the affected
-`prebuilt/<section_id>.json`. This applies equally to *changes* under an
+`prebuilt/<section_id>.json`. This applies equally to _changes_ under an
 existing topic (e.g. adding a new integration channel, changing a documented
 endpoint's response shape) — not just brand-new topics. The topic → section-id
-map and full procedure are in [CLAUDE.md](../CLAUDE.md#architecture-docs);
+map and full procedure are in [AGENTS.md](../AGENTS.md#architecture-docs);
 common cases:
 
 - New or changed integration channel → `integrations`
@@ -79,6 +81,7 @@ auto-reflected in the `agents` facts and need no YAML edit.
 ## Prompt Changes
 
 Prompt changes to `executive_persona.py` or `domain_prompts.py` require:
+
 1. A before/after comparison in the PR description
 2. Eval suite run showing no regression (score drop ≤10% on existing scenarios)
 3. At least 2 new eval scenarios if adding new behavior
@@ -86,6 +89,7 @@ Prompt changes to `executive_persona.py` or `domain_prompts.py` require:
 ## Reporting Issues
 
 Use GitHub Issues. Include:
+
 - What you asked the Executive
 - What you expected
 - What you got

@@ -19,7 +19,7 @@ See .github/CONTRIBUTING.md for the full contribution guide.
 - [ ] UI builds if touched (`cd packages/ui && npx tsc --noEmit`)
 - [ ] Eval scenarios added for a new agent or prompt change (if applicable)
 - [ ] Architecture docs updated if a documented topic changed
-      (see the "Architecture Docs" section in `CLAUDE.md`)
+      (see the "Architecture docs" section in `AGENTS.md`)
 - [ ] No secrets, credentials, or personal data committed
 
 ## Notes for reviewers
