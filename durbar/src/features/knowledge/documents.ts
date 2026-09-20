@@ -16,7 +16,7 @@
  * is what makes the failure library searchable by situation.
  */
 
-export type KnowledgeKind = 'domain' | 'failure' | 'skill';
+export type KnowledgeKind = "domain" | "failure" | "skill";
 
 export interface KnowledgeSection {
   /** `##` heading, or '' for the text before the first one. */
@@ -54,7 +54,7 @@ export function parseFrontmatter(raw: string): Record<string, string> {
     const value = match[2];
     if (key === undefined || value === undefined) continue;
 
-    fields[key] = value.trim().replace(/^["']|["']$/g, '');
+    fields[key] = value.trim().replace(/^["']|["']$/g, "");
   }
 
   return fields;
@@ -66,9 +66,9 @@ export function parseInlineList(value: string | undefined): string[] {
   const match = value.match(/^\[(.*)\]$/);
   if (!match?.[1]) return [];
   return match[1]
-    .split(',')
-    .map((item) => item.trim().replace(/^["']|["']$/g, ''))
-    .filter((item) => item !== '');
+    .split(",")
+    .map((item) => item.trim().replace(/^["']|["']$/g, ""))
+    .filter((item) => item !== "");
 }
 
 /**
@@ -81,13 +81,13 @@ export function parseInlineList(value: string | undefined): string[] {
  */
 export function splitSections(body: string): KnowledgeSection[] {
   const sections: KnowledgeSection[] = [];
-  let heading = '';
+  let heading = "";
   let buffer: string[] = [];
   let inFence = false;
 
   const flush = (): void => {
-    const text = buffer.join('\n').trim();
-    if (text !== '' || heading !== '') sections.push({ heading, body: text });
+    const text = buffer.join("\n").trim();
+    if (text !== "" || heading !== "") sections.push({ heading, body: text });
     buffer = [];
   };
 
@@ -97,7 +97,7 @@ export function splitSections(body: string): KnowledgeSection[] {
     const isHeading = !inFence && /^##\s+/.test(line);
     if (isHeading) {
       flush();
-      heading = line.replace(/^##\s+/, '').trim();
+      heading = line.replace(/^##\s+/, "").trim();
       continue;
     }
     buffer.push(line);
@@ -105,13 +105,15 @@ export function splitSections(body: string): KnowledgeSection[] {
   flush();
 
   // Drop a leading empty preamble so `##`-first documents don't index a blank.
-  return sections.filter((section) => section.body !== '' || section.heading !== '');
+  return sections.filter(
+    (section) => section.body !== "" || section.heading !== "",
+  );
 }
 
 function inferKind(relativePath: string): KnowledgeKind {
-  if (relativePath.startsWith('failures/')) return 'failure';
-  if (relativePath.startsWith('skills/')) return 'skill';
-  return 'domain';
+  if (relativePath.startsWith("failures/")) return "failure";
+  if (relativePath.startsWith("skills/")) return "skill";
+  return "domain";
 }
 
 /**
@@ -120,14 +122,17 @@ function inferKind(relativePath: string): KnowledgeKind {
  * `failures/product/quibi.md` is the *second* segment, since the first is the
  * kind.
  */
-function inferDomain(relativePath: string, fields: Record<string, string>): string {
-  if (fields['domain']) return fields['domain'];
-  if (fields['category']) return fields['category'];
+function inferDomain(
+  relativePath: string,
+  fields: Record<string, string>,
+): string {
+  if (fields["domain"]) return fields["domain"];
+  if (fields["category"]) return fields["category"];
 
-  const segments = relativePath.split('/');
+  const segments = relativePath.split("/");
   const kind = inferKind(relativePath);
-  if (kind === 'domain') return segments[0] ?? 'general';
-  return segments[1] ?? 'general';
+  if (kind === "domain") return segments[0] ?? "general";
+  return segments[1] ?? "general";
 }
 
 function firstTitle(body: string): string {
@@ -135,7 +140,7 @@ function firstTitle(body: string): string {
     const match = line.match(/^#\s+(.*)$/);
     if (match?.[1]) return match[1].trim();
   }
-  return '';
+  return "";
 }
 
 function summarise(
@@ -143,40 +148,45 @@ function summarise(
   fields: Record<string, string>,
   body: string,
 ): string {
-  if (kind === 'skill') {
+  if (kind === "skill") {
     // `when_to_use` describes applicability; `description` describes content.
     // Both help, and they are short, so join them.
-    return [fields['description'], fields['when_to_use']]
+    return [fields["description"], fields["when_to_use"]]
       .filter((part): part is string => Boolean(part))
-      .join(' — ');
+      .join(" — ");
   }
 
-  if (kind === 'failure') {
-    const types = parseInlineList(fields['failure_type']).join(', ');
+  if (kind === "failure") {
+    const types = parseInlineList(fields["failure_type"]).join(", ");
     return [
-      fields['company'],
-      fields['year'] ? `(${fields['year']})` : '',
-      fields['topic'],
-      types ? `— ${types}` : '',
+      fields["company"],
+      fields["year"] ? `(${fields["year"]})` : "",
+      fields["topic"],
+      types ? `— ${types}` : "",
     ]
-      .filter((part) => part !== '' && part !== undefined)
-      .join(' ');
+      .filter((part) => part !== "" && part !== undefined)
+      .join(" ");
   }
 
   // Plain domain doc: the first prose paragraph is the closest thing to a
   // summary, and it beats indexing the title twice.
-  const withoutTitle = body.replace(/^#\s+.*$/m, '').trim();
-  const paragraph = withoutTitle.split(/\n\s*\n/)[0] ?? '';
-  return paragraph.replace(/\s+/g, ' ').slice(0, 300);
+  const withoutTitle = body.replace(/^#\s+.*$/m, "").trim();
+  const paragraph = withoutTitle.split(/\n\s*\n/)[0] ?? "";
+  return paragraph.replace(/\s+/g, " ").slice(0, 300);
 }
 
-export function parseDocument(raw: string, relativePath: string): KnowledgeDocument {
+export function parseDocument(
+  raw: string,
+  relativePath: string,
+): KnowledgeDocument {
   const frontmatterMatch = raw.match(FRONTMATTER);
-  const fields = frontmatterMatch?.[1] ? parseFrontmatter(frontmatterMatch[1]) : {};
+  const fields = frontmatterMatch?.[1]
+    ? parseFrontmatter(frontmatterMatch[1])
+    : {};
   const body = frontmatterMatch ? raw.slice(frontmatterMatch[0].length) : raw;
 
   const kind = inferKind(relativePath);
-  const title = firstTitle(body) || fields['name'] || relativePath;
+  const title = firstTitle(body) || fields["name"] || relativePath;
 
   return {
     kind,

@@ -15,13 +15,13 @@
  * GC disagreed" is a failure, not transparency. The machinery is invisible.
  */
 
-import type { Db } from '../../db.ts';
-import type { Provider } from '../../providers.ts';
+import type { Db } from "../../db.ts";
+import type { Provider } from "../../providers.ts";
 import {
   renderFailureCases,
   renderKnowledge,
   searchKnowledge,
-} from '../knowledge/knowledge.ts';
+} from "../knowledge/knowledge.ts";
 import {
   SPECIALISTS,
   SPECIALIST_KEYS,
@@ -67,15 +67,15 @@ export interface CouncilDeps {
  */
 export function specialistDomain(key: SpecialistKey): string {
   const map: Record<SpecialistKey, string> = {
-    cso: 'strategy',
-    cfo: 'finance',
-    chro: 'hr',
-    gc: 'legal',
-    coo: 'operations',
-    cmo: 'marketing',
-    cpo: 'product',
-    board_comms: 'board',
-    talent: 'hr',
+    cso: "strategy",
+    cfo: "finance",
+    chro: "hr",
+    gc: "legal",
+    coo: "operations",
+    cmo: "marketing",
+    cpo: "product",
+    board_comms: "board",
+    talent: "hr",
   };
   return map[key];
 }
@@ -201,16 +201,16 @@ export function buildSpecialistPrompt(
     const reference = renderKnowledge(
       searchKnowledge(deps.db, question, { domain, limit: 3 }),
     );
-    if (reference !== '') parts.push(reference);
+    if (reference !== "") parts.push(reference);
 
     const failures = renderFailureCases(
-      searchKnowledge(deps.db, question, { domain, kind: 'failure', limit: 2 }),
+      searchKnowledge(deps.db, question, { domain, kind: "failure", limit: 2 }),
     );
-    if (failures !== '') parts.push(failures);
+    if (failures !== "") parts.push(failures);
   }
 
   parts.push(question);
-  return parts.join('\n\n');
+  return parts.join("\n\n");
 }
 
 /** One specialist's take. Failures are contained so one cannot sink the turn. */
@@ -222,8 +222,11 @@ export async function consult(
   const specialist = SPECIALISTS[key];
 
   const messages = [
-    { role: 'system' as const, content: specialist.prompt },
-    { role: 'user' as const, content: buildSpecialistPrompt(key, question, deps) },
+    { role: "system" as const, content: specialist.prompt },
+    {
+      role: "user" as const,
+      content: buildSpecialistPrompt(key, question, deps),
+    },
   ];
 
   try {

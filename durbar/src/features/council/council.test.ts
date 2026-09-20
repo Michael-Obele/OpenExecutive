@@ -303,11 +303,10 @@ describe("knowledge wiring", () => {
 
   test("puts the question last, after the reference material", () => {
     // The model should reach the question with the material already read.
-    const prompt = buildSpecialistPrompt(
-      "cfo",
-      "What is our burn multiple?",
-      { provider: fakeProvider(), db },
-    );
+    const prompt = buildSpecialistPrompt("cfo", "What is our burn multiple?", {
+      provider: fakeProvider(),
+      db,
+    });
     expect(prompt.trimEnd().endsWith("What is our burn multiple?")).toBe(true);
   });
 
