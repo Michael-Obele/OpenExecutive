@@ -1,0 +1,27 @@
+# Runtime state — never commit
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# Deps
+node_modules/
+# NOTE: bun.lock is deliberately NOT ignored. This is an application with
+devDependencies, so the lockfile must be committed for `bun install` to be
+reproducible.
+
+# Build output
+dist/
+build/
+.svelte-kit/
+.netlify/
+
+# Local config
+.env
+.env.local
+.env.*.local
+
+# OS / editor
+.DS_Store
+*.swp

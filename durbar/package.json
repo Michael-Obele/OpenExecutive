@@ -1,0 +1,25 @@
+{
+  "name": "durbar",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "A self-hostable AI executive team: specialists, briefings, and company memory that run on your own machine.",
+  "license": "Apache-2.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "test": "bun test",
+    "check": "bunx tsc --noEmit",
+    "db:init": "bun run src/db.ts --init"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^7.0.0"
+  }
+}

@@ -1,0 +1,241 @@
+/**
+ * Consolidated schema.
+ *
+ * The reference implementation (OpenExecutive, Python) has no single schema
+ * file — roughly 40 tables are created ad-hoc across 18 store modules, so the
+ * shape of the database can only be learned by reading all of them. This file
+ * is the consolidation: one place, one migration list, SQLite.
+ *
+ * Each table records where it came from so the port stays auditable. Column
+ * names, defaults and constraints are copied from the Python DDL rather than
+ * re-invented, because those defaults are load-bearing (e.g. `authority_level`
+ * defaulting to `propose_only` is what makes a new department safe by default).
+ *
+ * Known upstream defect, deliberately not reproduced: `voice_personas` is
+ * created in BOTH `memory/episodic.py` and `personas/loader.py` upstream, so
+ * whichever module runs first wins and a column change in one silently
+ * diverges. It has a single owner here.
+ */
+
+export const SCHEMA_VERSION = 1;
+
+export interface Migration {
+  readonly id: number;
+  readonly name: string;
+  /** Idempotent: every statement must be safe to re-run. */
+  readonly statements: readonly string[];
+}
+
+export const MIGRATIONS: readonly Migration[] = [
+  {
+    id: 1,
+    name: 'core',
+    statements: [
+      // ── departments ────────────────────────────────────────────────────
+      // from: departments/store.py
+      `CREATE TABLE IF NOT EXISTS departments (
+        slug TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        specialist_key TEXT,
+        charter_mission TEXT NOT NULL DEFAULT '',
+        charter_scope_json TEXT NOT NULL DEFAULT '[]',
+        charter_out_of_scope_json TEXT NOT NULL DEFAULT '[]',
+        authority_level TEXT NOT NULL DEFAULT 'propose_only',
+        head_person_id INTEGER,
+        head_persona_slug TEXT,
+        cadences_json TEXT NOT NULL DEFAULT '{}',
+        headcount INTEGER,
+        budget_usd REAL,
+        updated_at TEXT NOT NULL
+      )`,
+
+      `CREATE TABLE IF NOT EXISTS department_goals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        department_slug TEXT NOT NULL,
+        period_type TEXT NOT NULL DEFAULT 'quarter',
+        period_value TEXT NOT NULL,
+        key_result TEXT NOT NULL,
+        target TEXT NOT NULL,
+        current TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'on_track',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_reviewed_at TEXT,
+        FOREIGN KEY (department_slug) REFERENCES departments(slug)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_goals_dept
+        ON department_goals(department_slug)`,
+      `CREATE INDEX IF NOT EXISTS idx_goals_status
+        ON department_goals(status)`,
+
+      `CREATE TABLE IF NOT EXISTS departments_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )`,
+
+      // ── people ─────────────────────────────────────────────────────────
+      // from: people/store.py
+      `CREATE TABLE IF NOT EXISTS people (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        full_name TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT '',
+        is_principal INTEGER NOT NULL DEFAULT 0,
+        department_slugs_json TEXT NOT NULL DEFAULT '[]',
+        email TEXT,
+        slack_user_id TEXT,
+        telegram_chat_id TEXT,
+        discord_user_id TEXT,
+        preferred_channel TEXT NOT NULL DEFAULT 'any',
+        response_sla_hours INTEGER NOT NULL DEFAULT 24,
+        on_leave_until TEXT,
+        reports_to_person_id INTEGER,
+        archived INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (reports_to_person_id) REFERENCES people(id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_people_principal
+        ON people(is_principal) WHERE archived = 0`,
+
+      `CREATE TABLE IF NOT EXISTS person_authority_scope (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        person_id INTEGER NOT NULL,
+        scope_token TEXT NOT NULL,
+        UNIQUE(person_id, scope_token),
+        FOREIGN KEY (person_id) REFERENCES people(id) ON DELETE CASCADE
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_pas_person
+        ON person_authority_scope(person_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_pas_scope
+        ON person_authority_scope(scope_token)`,
+
+      `CREATE TABLE IF NOT EXISTS person_availability (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        person_id INTEGER NOT NULL,
+        weekdays_json TEXT NOT NULL DEFAULT '[]',
+        start_local TEXT NOT NULL,
+        end_local TEXT NOT NULL,
+        timezone TEXT NOT NULL DEFAULT 'UTC',
+        FOREIGN KEY (person_id) REFERENCES people(id) ON DELETE CASCADE
+      )`,
+
+      // ── alerts (proposals awaiting a decision) ─────────────────────────
+      // from: alerts/store.py
+      `CREATE TABLE IF NOT EXISTS alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        external_id TEXT,
+        source TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        headline TEXT NOT NULL,
+        body TEXT NOT NULL,
+        suggested_action TEXT DEFAULT '',
+        topic_tags TEXT DEFAULT '[]',
+        channels_attempted TEXT DEFAULT '[]',
+        channels_delivered TEXT DEFAULT '[]',
+        dedup_key TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'unread',
+        created_at TEXT NOT NULL,
+        UNIQUE(source, external_id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_alerts_status
+        ON alerts(status, created_at DESC)`,
+
+      `CREATE TABLE IF NOT EXISTS mute_topics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pattern TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+      )`,
+
+      `CREATE TABLE IF NOT EXISTS user_preferences (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        severity_threshold TEXT NOT NULL DEFAULT 'medium',
+        quiet_hours_start TEXT DEFAULT '',
+        quiet_hours_end TEXT DEFAULT '',
+        quiet_hours_tz TEXT DEFAULT 'UTC',
+        channels_enabled TEXT NOT NULL DEFAULT 'web',
+        updated_at TEXT NOT NULL
+      )`,
+
+      // ── audit ──────────────────────────────────────────────────────────
+      // from: audit/logger.py
+      `CREATE TABLE IF NOT EXISTS audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        session_id TEXT,
+        turn_id TEXT,
+        actor TEXT,
+        summary TEXT NOT NULL,
+        details_json TEXT
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_log(session_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_audit_type ON audit_log(event_type)`,
+
+      // ── briefings ──────────────────────────────────────────────────────
+      // from: briefing/narrative_cache.py
+      // `scope` is the PRIMARY KEY, and it doubles as the watermark for
+      // "since the last brief I actually delivered" — see sinceFor().
+      `CREATE TABLE IF NOT EXISTS briefing_narrative (
+        scope TEXT PRIMARY KEY,
+        input_hash TEXT NOT NULL,
+        narrative_text TEXT NOT NULL,
+        generated_at TEXT NOT NULL
+      )`,
+
+      // ── workflow runs ──────────────────────────────────────────────────
+      // from: workflows/persistence.py
+      `CREATE TABLE IF NOT EXISTS workflow_runs (
+        run_id        TEXT PRIMARY KEY,
+        workflow_name TEXT NOT NULL,
+        title         TEXT NOT NULL,
+        status        TEXT NOT NULL,
+        inputs        TEXT NOT NULL,
+        artifact      TEXT,
+        error         TEXT,
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_runs_workflow
+        ON workflow_runs(workflow_name, created_at DESC)`,
+
+      // ── migration bookkeeping ──────────────────────────────────────────
+      `CREATE TABLE IF NOT EXISTS schema_migrations (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      )`,
+    ],
+  },
+
+  {
+    id: 2,
+    name: 'knowledge',
+    statements: [
+      // Full-text index over the curated knowledge corpus, replacing the
+      // reference implementation's ChromaDB + local ONNX embedding stack.
+      //
+      // FTS5 is not a like-for-like swap for embeddings — it matches terms, not
+      // meaning, so a query using different vocabulary than the documents will
+      // miss. It is the right trade here because the corpus is 96 curated files
+      // that use the domain's own vocabulary, and the alternative cost 3.8 GB of
+      // torch/CUDA to embed them on a CPU.
+      //
+      // One row per *section*, not per file: a whole 140-line document returned
+      // as a single hit floods the prompt and buries the relevant passage.
+      //
+      // Metadata columns are UNINDEXED so MATCH searches prose only — a query
+      // for "board" should not match every row whose domain happens to be
+      // `board`. Verified that equality filters still work on UNINDEXED columns.
+      `CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+        kind UNINDEXED,
+        domain UNINDEXED,
+        path UNINDEXED,
+        title,
+        summary,
+        body,
+        tokenize = 'porter unicode61'
+      )`,
+    ],
+  },
+];
