@@ -1,4 +1,4 @@
-<script module>
+<script module lang="ts">
 	function formatARR(arr: number | null): string {
 		if (arr == null) return '—';
 		if (arr >= 1_000_000_000) return `$${(arr / 1_000_000_000).toFixed(1)}B`;
