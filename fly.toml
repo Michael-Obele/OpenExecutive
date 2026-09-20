@@ -5,7 +5,8 @@
 #   fly secrets set BACKEND_SHARED_SECRET=... BACKEND_BASE_URL=https://<your-api>
 #   fly deploy
 #
-# Cost model and the scale-to-zero tradeoff: docs/fly-io-costs.md.
+# Cost model and the scale-to-zero tradeoff: "Cost and scale-to-zero" in
+# docs/deployment.md.
 #
 # ── Read this before making the app public ───────────────────────────────────
 # This server has NO authentication of its own. It proxies to the backend with
@@ -24,7 +25,7 @@
 #
 # `fly launch` DOES often allocate a public IP for a config declaring an
 # [http_service], so verify rather than assume — a dedicated v4 is both public
-# and $2/month:
+# and billed:
 #
 #   fly ips list -a <your-app>
 #   fly ips release <address> -a <your-app>
@@ -43,11 +44,11 @@ MCP_PORT = "8787"
 [http_service]
 internal_port = 8787
 force_https = true
-# Scale to zero: a stopped Machine costs only its rootfs — about $0.01–0.03/month
-# for this image (see docs/fly-io-costs.md) instead of $1.94/month. The tradeoff
-# is a 1–3s cold start on the first request after an idle period. Switch to
-# "suspend" for faster resumes, or set min_machines_running = 1 to keep it warm
-# for $1.94/month.
+# Scale to zero: a stopped Machine is billed only for its rootfs, a small fraction
+# of a running one (see "Cost and scale-to-zero" in docs/deployment.md; check
+# current pricing for exact rates). The tradeoff is a 1–3s cold start on the first
+# request after an idle period. Switch to "suspend" for faster resumes, or set
+# min_machines_running = 1 to keep it warm and pay for a full Machine.
 auto_stop_machines = "stop"
 auto_start_machines = true
 min_machines_running = 0

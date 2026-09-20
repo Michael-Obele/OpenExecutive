@@ -8,7 +8,7 @@
 # Bun executes the TypeScript directly, so there is no compile step: the image
 # is a pinned Bun runtime, `packages/mcp`, and its production dependencies.
 # That keeps the rootfs small, which matters because a stopped Fly Machine is
-# billed by rootfs size ($0.15/GB/30 days) — see docs/fly-io-costs.md.
+# billed for its rootfs. See "Cost and scale-to-zero" in docs/deployment.md.
 
 FROM oven/bun:1.4-alpine AS deps
 WORKDIR /app

@@ -73,9 +73,9 @@ handler.
 docker build -f ../docker/Dockerfile.mcp -t openexecutive-mcp ..   # context = repo root
 ```
 
-`fly.toml` (repo root) deploys the HTTP transport with scale-to-zero. Read
-`docs/fly-io-costs.md` first — the MCP server should not run continuously, and a stopped
-Machine costs about **$0.01–0.03/month** (rootfs only).
+`fly.toml` (repo root) deploys the HTTP transport with scale-to-zero. The MCP server
+should not run continuously: a stopped Machine is billed for its rootfs only, a small
+fraction of a running one. See "Cost and scale-to-zero" in `docs/deployment.md`.
 
 > The HTTP transport has **no authentication of its own** — it proxies with
 > `BACKEND_SHARED_SECRET`, so anything that can reach `/mcp` can act on the company.

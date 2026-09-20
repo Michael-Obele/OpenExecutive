@@ -18,7 +18,7 @@
 >   `oe_departments list`) — MCP resource support is uneven across clients and two ways
 >   to read the same data is one too many.
 > - Deployment is done: `docker/Dockerfile.mcp`, a `mcp` compose service, `fly.toml`,
->   and the cost analysis in `docs/fly-io-costs.md`.
+>   and the cost/scale-to-zero notes in `docs/deployment.md`.
 > - The only item still open is §7 — retiring the Python server.
 
 ## 1. What exists today
@@ -146,7 +146,7 @@ Each phase: add `src/tools/<domain>.ts` → register in `src/server.ts` → `bun
 
 - **Local (STDIO):** `bun run src/index.ts` — no auth needed, runs as the local user.
 - **Remote (HTTP):** `srvx` on any Node/Bun host. Docker: `docker/Dockerfile.mcp`;
-  Fly.io: `fly.toml` (cost model: `docs/fly-io-costs.md`).
+  Fly.io: `fly.toml` (cost model: `docs/deployment.md`).
   **The transport authenticates nothing** — it _forwards_ `x-api-key:
 $BACKEND_SHARED_SECRET` to the backend, so anything that can reach `/mcp` can act on
   the company. Both compose and `fly.toml` bind it to loopback / the private network for

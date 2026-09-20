@@ -124,6 +124,35 @@ crash loop that looks like a deploy failure.
 ONNX embedder and Chroma writes run concurrently. One shared CPU is sufficient;
 the workload is I/O-bound on the Anthropic API.
 
+## Cost and scale-to-zero
+
+Platform rates change, so this section describes the *shape* of the bill rather
+than quoting figures: check the provider's current pricing page before
+committing money, and keep the operator-specific breakdown (what this deployment
+actually costs, reserved capacity, region choices) in your own gitignored notes
+rather than in this repo.
+
+What drives the bill, in order of impact:
+
+- **A running Machine.** Billed per second while it is up, so an always-on app is
+  the dominant line item. The API must run continuously — it serves the scheduler
+  and the inbound webhooks.
+- **A stopped Machine's rootfs.** A stopped Machine is still billed for its image
+  size, which is why `docker/Dockerfile.mcp` keeps the MCP image minimal. For a
+  small Bun image this is a rounding error next to a running Machine.
+- **Volumes.** Billed even while the Machine that mounts them is stopped, so do
+  not leave an oversized volume attached to something that is usually off.
+- **Addresses and certificates.** A dedicated IPv4 is a fixed monthly charge per
+  app; TLS certificates are charged per hostname past a free allowance.
+
+The MCP server therefore **scales to zero** (`auto_stop_machines = "stop"`,
+`min_machines_running = 0` in `fly.toml`): idle costs almost nothing, and the
+price is a 1–3s cold start on the first request. Two alternatives trade that away
+— `"suspend"` for a faster resume, or `min_machines_running = 1` to keep it warm
+and pay for a full Machine. Choose per environment, and question any stop/suspend
+setting if a scheduled caller cannot tolerate a cold start: a caller the platform
+cannot wake needs a warm Machine.
+
 ---
 
 ## Google Workspace credentials

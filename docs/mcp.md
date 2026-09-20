@@ -139,9 +139,10 @@ The image is 40.8 MB (Bun alpine + 13 production packages) and runs as the unpri
 
 ### Fly.io
 
-`fly.toml` at the repo root deploys the HTTP transport with scale-to-zero. Read
-`docs/fly-io-costs.md` first — the short version is that the MCP server should not run
-continuously, and a stopped Machine costs about $0.01–0.03/month.
+`fly.toml` at the repo root deploys the HTTP transport with scale-to-zero. The MCP
+server should not run continuously: a stopped Machine is billed only for its rootfs,
+a small fraction of a running one. See "Cost and scale-to-zero" in `docs/deployment.md`
+and re-check current rates on the provider's pricing page.
 
 ```bash
 fly launch --no-deploy --copy-config --name <your-app>   # first time only
