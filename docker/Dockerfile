@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.11-slim AS api
 
 WORKDIR /app
@@ -11,6 +12,16 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install uv
+
+# `sentence-transformers` pulls `torch`, whose Linux wheels depend on the CUDA
+# stack — 43 `nvidia-*` packages totalling several GB. Those wheels individually
+# exceed uv's 30s default HTTP timeout, and the failure surfaces as
+# "Failed to download nvidia-cublas" / "network timeout" rather than anything
+# pointing at the real cause. Raise the ceiling for every uv/uvx invocation
+# below (the extensible-mcp pre-warm, the locked install, and fastembed).
+# NOTE: this machine has no NVIDIA GPU, so those CUDA wheels are size-only —
+# see the CPU-torch note in docs/deployment.md before changing this.
+ENV UV_HTTP_TIMEOUT=600
 
 # Pre-warm the extensible-mcp gateway so the API does not have to clone
 # from GitHub on every cold start. We use the EXACT invocation the
@@ -37,7 +48,8 @@ COPY packages/core/pyproject.toml packages/core/uv.lock ./
 # masked failures while also needing README.md copied here — which busts the
 # cache (full dep install + baked embedding models below) on every README
 # edit (#81). Let a real break fail loudly.
-RUN uv export --locked --no-dev --no-emit-project -q -o requirements.txt \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv export --locked --no-dev --no-emit-project -q -o requirements.txt \
     && uv pip install --system -r requirements.txt
 
 # Bake the embedding model the MCP gateway loads at startup
@@ -49,8 +61,15 @@ RUN uv export --locked --no-dev --no-emit-project -q -o requirements.txt \
 # instead of the network. Runs right after the dependency install so the
 # layer is reused unless pyproject/uv.lock change, and before the offline flags
 # (set further down) so the build itself can still reach the Hub.
+#
+# Downloaded with huggingface_hub, NOT sentence_transformers. Both fetch the same
+# files for this repo, but sentence-transformers pulls in torch plus 15 nvidia-*
+# CUDA packages (~3.8 GB) that nothing in this image imports: there is no GPU
+# here, and the runtime consumer is fastembed/onnxruntime (see the bake below).
+# This one change is most of the image size — don't reintroduce the dependency
+# for the convenience of `SentenceTransformer(...)`.
 ENV HF_HOME=/opt/hf-cache
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('sentence-transformers/all-MiniLM-L6-v2')"
 
 # Bake the model the MCP gateway ACTUALLY loads at startup. The gateway proxies
 # extensible-mcp (launched via uvx), whose tool-search index uses fastembed —
