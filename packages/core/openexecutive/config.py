@@ -287,7 +287,13 @@ class Settings(BaseSettings):
         # because hosted Honcho doesn't need an operator-set URL.
         return self
 
-    chat_stream_timeout_s: float = Field(120.0, alias="CHAT_STREAM_TIMEOUT_S")
+    # Whole-turn wall-clock budget for POST /chat, covering the parallel
+    # specialist fan-out AND the synthesis that follows it. A broad cross-domain
+    # question routes 4 specialists and can run past two minutes on a slow
+    # model, so the previous 120s default cut such turns off with zero text
+    # streamed: the work completed server-side and nothing reached the client.
+    # Scope a question to one function, or lower this, for a tighter ceiling.
+    chat_stream_timeout_s: float = Field(300.0, alias="CHAT_STREAM_TIMEOUT_S")
 
     # Extra wall-clock allowance added to chat_stream_timeout_s when a request
     # opts in to Committee review. Committee adds three reviewer calls + one

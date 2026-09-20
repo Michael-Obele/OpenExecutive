@@ -697,8 +697,9 @@ async def directional_chat(
     Bounded at 30s. Longer than prefetch's 3s budget because the model
     deliberately invoked this tool, but still a ceiling — without one a
     Honcho hang would pin the entire tool-call loop until
-    CHAT_STREAM_TIMEOUT_S fires (~2 min), starving every other tool
-    call in the same turn.
+    CHAT_STREAM_TIMEOUT_S fires, starving every other tool call in the
+    same turn. (Deliberately duration-agnostic: that setting's default
+    has changed once already.)
     """
     t0 = time.monotonic()
     settings = get_settings()
