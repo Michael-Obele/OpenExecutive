@@ -238,4 +238,49 @@ export const MIGRATIONS: readonly Migration[] = [
       )`,
     ],
   },
+
+  {
+    id: 3,
+    name: 'scheduler',
+    statements: [
+      // The proactive half: rows that come due on their own.
+      //
+      // Upstream reaches this shape via `CREATE TABLE` followed by a series of
+      // `ALTER TABLE ... ADD COLUMN` migrations (`kind`, `assigned_to_person_id`,
+      // `awaiting_response_since`, `scope_key`, `required_scope`), plus
+      // `department`/`session_id` added to every table by a loop. The columns are
+      // declared together here because a fresh schema has no history to preserve —
+      // the set is what matters, not the archaeology that produced it.
+      `CREATE TABLE IF NOT EXISTS scheduled_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,
+        run_at TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        channel_ref TEXT NOT NULL,
+        intent_text TEXT NOT NULL,
+        originating_session_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT DEFAULT '',
+        department TEXT NOT NULL DEFAULT '',
+        session_id TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL DEFAULT 'ad_hoc',
+        assigned_to_person_id INTEGER,
+        awaiting_response_since TEXT,
+        scope_key TEXT,
+        required_scope TEXT
+      )`,
+
+      // The claim query is `status = 'pending' AND run_at <= ? ORDER BY run_at`,
+      // so the index is on exactly that.
+      `CREATE INDEX IF NOT EXISTS idx_scheduled_due
+        ON scheduled_actions(status, run_at)`,
+
+      // Partial index: only nudge rows ever set scope_key, so this stays small
+      // regardless of how many ordinary actions accumulate.
+      `CREATE INDEX IF NOT EXISTS idx_scheduled_scope_key
+        ON scheduled_actions(scope_key, created_at DESC)
+        WHERE scope_key IS NOT NULL`,
+    ],
+  },
 ];

@@ -116,6 +116,29 @@ background in the prompt, and failure cases are emitted inside a
 Rebuilding the index takes **~106 ms** for all 96 documents, so it happens on
 every boot and can never drift from the corpus on disk.
 
+## The scheduler
+
+This is what makes Durbar proactive rather than a question-answering box. A
+`scheduled_actions` row comes due on its own and runs.
+
+**Recurrence is chaining, not cron.** A daily brief delivers, then enqueues its
+own next occurrence. There is no cron expression anywhere — the schedule is
+data, and a missed day cannot drift the series. Seeding at startup is deduped,
+so a restart never stacks a second brief for the same morning.
+
+Four semantics carry the weight, and each is a silent failure if wrong:
+
+| Behaviour | Why it matters |
+| --- | --- |
+| **Claim is atomic and increments `attempts`** | `UPDATE … RETURNING` flips rows to `running` in one statement, so a second tick cannot re-claim and double-send. The increment happens *at claim*, which is what makes the backoff keys line up. |
+| **A deferral is not a failure** | If an action cannot run yet — no principal configured, say — it is rescheduled and the claim's increment is *undone*. Without that, three deferrals would exhaust the attempt budget and the action would fail permanently on its first real run. |
+| **Failure backs off, then gives up** | 30s, then 5m, then `failed`. A permanently broken action must not retry forever. |
+| **A crashed `running` row is swept back to `pending`** | Only `pending` rows are ever claimed, so a process killed mid-dispatch would otherwise strand the action forever. |
+
+Handler errors are contained: one broken action does not stop the batch, and an
+unknown `kind` fails loudly rather than vanishing. A tick that outlives its
+interval does not overlap the next one.
+
 ## Not built yet — ask and it gets built
 
 These are **deliberately deferred**, not forgotten. The reference implementation
@@ -150,7 +173,8 @@ Ported and verified so far:
 - [x] `morning_brief` — context gathering, synthesis, watermarking, persistence
 - [x] **Council** — nine specialists, routing, parallel consultation, one-voice synthesis
 - [x] **Knowledge** — 96 documents, FTS5 retrieval, failure cases wired to the prompts
-- [x] Test suite for the above (**72 tests**)
+- [x] **Scheduler** — atomic claiming, deferral vs failure, daily chaining
+- [x] Test suite for the above (**105 tests**)
 
 Next: `executive_research` and the scheduler (the proactive half).
 
@@ -169,9 +193,11 @@ src/
     ├── council/
     │   ├── specialists.ts   the nine domain prompts (ported verbatim)
     │   └── council.ts       select -> consult -> synthesize
-    └── knowledge/
-        ├── documents.ts     parses the three corpus shapes
-        └── knowledge.ts     FTS5 index, search, prompt rendering
+    ├── knowledge/
+    │   ├── documents.ts     parses the three corpus shapes
+    │   └── knowledge.ts     FTS5 index, search, prompt rendering
+    └── scheduler/
+        └── scheduler.ts     claim, retry, defer, chain
 ```
 
 Two conventions worth knowing:

@@ -20,6 +20,14 @@ import {
 } from "./features/briefings/morning-brief.ts";
 import { convene } from "./features/council/council.ts";
 import { indexCorpus, loadCorpus } from "./features/knowledge/knowledge.ts";
+import {
+  DEFAULT_MORNING_TIME,
+  pendingActions,
+  PRINCIPAL_BRIEF_MORNING,
+  runDue,
+  seedDaily,
+  startScheduler,
+} from "./features/scheduler/scheduler.ts";
 
 export interface AppContext {
   readonly settings: Settings;
@@ -153,6 +161,24 @@ export function createApp(
         return json(result, 200, cors);
       }
 
+      const schedulerActionsPath = "/features/scheduler/actions";
+      const schedulerTickPath = "/features/scheduler/tick";
+
+      if (url.pathname === schedulerActionsPath && request.method === "GET") {
+        return json(pendingActions(db), 200, cors);
+      }
+
+      // Manual trigger. Useful for a first run without waiting for 08:00, and
+      // for verifying delivery on a fresh install.
+      if (url.pathname === schedulerTickPath && request.method === "POST") {
+        const ran = await runDue({
+          db,
+          provider,
+          morningTime: settings.morningBriefTime,
+        });
+        return json({ ran }, 200, cors);
+      }
+
       return json({ error: "not found", path: url.pathname }, 404, cors);
     } catch (error) {
       // Surface the message: a bare 500 on a model call is undiagnosable, and
@@ -176,6 +202,13 @@ if (import.meta.main) {
   const documents = loadCorpus();
   const sections = indexCorpus(db, documents);
 
+  // Seed the daily brief (deduped, so a restart cannot stack a second one) and
+  // start the tick loop. This is what makes the service proactive: without it,
+  // nothing ever speaks first.
+  const briefTime = settings.morningBriefTime || DEFAULT_MORNING_TIME;
+  seedDaily(db, PRINCIPAL_BRIEF_MORNING, briefTime);
+  const scheduler = startScheduler({ db, provider, morningTime: briefTime });
+
   const server = Bun.serve({
     port: settings.port,
     fetch: createApp({ settings, db, provider }),
@@ -188,4 +221,15 @@ if (import.meta.main) {
   console.log(
     `knowledge: ${documents.length} documents, ${sections} sections indexed`,
   );
+  console.log(
+    `scheduler: brief at ${briefTime} UTC, ${pendingActions(db).length} action(s) pending`,
+  );
+
+  const shutdown = (): void => {
+    scheduler.stop();
+    db.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }

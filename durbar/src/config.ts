@@ -37,6 +37,11 @@ export interface Settings {
    * is hosted separately (Netlify/Vercel) from the server (Fly/Render).
    */
   readonly allowedOrigins: readonly string[];
+  /**
+   * UTC time (HH:MM) the daily brief is delivered. Upstream calls this
+   * PRINCIPAL_BRIEF_MORNING_TIME and defaults to 08:00.
+   */
+  readonly morningBriefTime: string;
   readonly provider: ProviderConfig;
 }
 
@@ -117,6 +122,7 @@ export function loadSettings(): Settings {
       .split(',')
       .map((origin) => origin.trim())
       .filter((origin) => origin !== ''),
+    morningBriefTime: optional('PRINCIPAL_BRIEF_MORNING_TIME', '08:00'),
     provider: providerFrom(raw),
   };
 }
