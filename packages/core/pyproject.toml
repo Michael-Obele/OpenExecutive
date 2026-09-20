@@ -21,7 +21,12 @@ dependencies = [
     "openpyxl>=3.1.0",
     "slack-bolt>=1.18.0",
     "discord.py>=2.4.0",
-    "sentence-transformers>=3.0.0",
+    # Fetching the embedding model for the Docker bake ONLY (docker/Dockerfile).
+    # Deliberately NOT sentence-transformers: nothing in this package imports it,
+    # and it drags in torch + 15 nvidia-* CUDA packages (~3.8 GB) for a workload
+    # that runs on CPU via fastembed/onnxruntime. huggingface_hub only downloads
+    # files. See the size note in docs/deployment.md before changing this.
+    "huggingface-hub>=0.26.0",
     "httpx>=0.27.0",
     "aiofiles>=23.2.0",
     "python-multipart>=0.0.9",
