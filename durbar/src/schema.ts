@@ -495,4 +495,321 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE audit_log ADD COLUMN department TEXT`,
     ],
   },
+
+  {
+    id: 9,
+    name: "task6_state_api",
+    statements: [
+      // ── talent ─────────────────────────────────────────────────────────
+      // from: talent/store.py
+      `CREATE TABLE IF NOT EXISTS engagements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        role_title TEXT NOT NULL,
+        department TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'open',
+        location TEXT NOT NULL DEFAULT '',
+        comp_band TEXT NOT NULL DEFAULT '',
+        must_haves TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        archived INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_engagements_archived ON engagements(archived)`,
+      `CREATE TABLE IF NOT EXISTS candidates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        engagement_id INTEGER NOT NULL,
+        full_name TEXT NOT NULL,
+        current_title TEXT NOT NULL DEFAULT '',
+        current_company TEXT NOT NULL DEFAULT '',
+        location TEXT NOT NULL DEFAULT '',
+        email TEXT,
+        linkedin_url TEXT,
+        source TEXT NOT NULL DEFAULT '',
+        stage TEXT NOT NULL DEFAULT 'lead',
+        fit_score INTEGER,
+        screening_summary TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        archived INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_candidates_engagement ON candidates(engagement_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_candidates_stage ON candidates(stage)`,
+      `CREATE INDEX IF NOT EXISTS idx_candidates_archived ON candidates(archived)`,
+      `CREATE TABLE IF NOT EXISTS offers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        candidate_id INTEGER NOT NULL,
+        engagement_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft',
+        comp_summary TEXT NOT NULL DEFAULT '',
+        package_md TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '',
+        expires_at TEXT,
+        extended_at TEXT NOT NULL DEFAULT '',
+        decided_at TEXT NOT NULL DEFAULT '',
+        approval_run_id TEXT NOT NULL DEFAULT '',
+        approved_by_person_id INTEGER,
+        nudge_action_ids_json TEXT NOT NULL DEFAULT '[]',
+        archived INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+        FOREIGN KEY (engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_offers_candidate ON offers(candidate_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_offers_status ON offers(status)`,
+      `CREATE INDEX IF NOT EXISTS idx_offers_archived ON offers(archived)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_offers_one_open ON offers(candidate_id) WHERE archived = 0 AND status IN ('draft', 'pending_approval', 'extended')`,
+
+      // ── watchlist ──────────────────────────────────────────────────────
+      // from: monitoring/store.py
+      `CREATE TABLE IF NOT EXISTS watchlist (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        slug TEXT NOT NULL UNIQUE,
+        signal_type TEXT NOT NULL,
+        target TEXT NOT NULL,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        trigger_json TEXT NOT NULL DEFAULT '{}',
+        cadence TEXT NOT NULL DEFAULT '15min',
+        severity_floor TEXT NOT NULL DEFAULT 'low',
+        severity_ceiling TEXT NOT NULL DEFAULT 'urgent',
+        route_to_specialist TEXT NOT NULL DEFAULT '',
+        route_to_department TEXT NOT NULL DEFAULT '',
+        route_to_person_id INTEGER,
+        mode TEXT NOT NULL DEFAULT 'active',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        last_polled_at TEXT,
+        baselined_at TEXT,
+        last_fired_at TEXT,
+        fired_count INTEGER NOT NULL DEFAULT 0,
+        dismiss_count INTEGER NOT NULL DEFAULT 0,
+        trust_score REAL NOT NULL DEFAULT 1.0,
+        notes TEXT NOT NULL DEFAULT '',
+        origin TEXT NOT NULL DEFAULT 'manual'
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_watchlist_enabled_type ON watchlist(enabled, signal_type)`,
+      `CREATE TABLE IF NOT EXISTS external_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        watchlist_id INTEGER NOT NULL REFERENCES watchlist(id),
+        source_kind TEXT NOT NULL,
+        source_external_id TEXT NOT NULL,
+        captured_at TEXT NOT NULL,
+        published_at TEXT,
+        normalized_summary TEXT NOT NULL,
+        raw_payload_json TEXT NOT NULL DEFAULT '{}',
+        provenance_url TEXT NOT NULL,
+        severity_hint TEXT NOT NULL DEFAULT 'low',
+        dedup_key TEXT NOT NULL UNIQUE,
+        processed_at TEXT,
+        processed_outcome TEXT,
+        promoted_alert_id INTEGER,
+        enrichment_json TEXT NOT NULL DEFAULT '{}'
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_signals_captured ON external_signals(captured_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_signals_watchlist ON external_signals(watchlist_id, captured_at DESC)`,
+      `CREATE TABLE IF NOT EXISTS page_watch_state (
+        slug TEXT PRIMARY KEY,
+        content_hash TEXT NOT NULL,
+        text_snapshot TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS monitoring_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS watchlist_declines (
+        normalized_target TEXT PRIMARY KEY,
+        entity TEXT NOT NULL DEFAULT '',
+        signal_type TEXT NOT NULL DEFAULT '',
+        slug TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        declined_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS watchlist_policy_outcomes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal_type TEXT NOT NULL,
+        grounding_kind TEXT NOT NULL DEFAULT '',
+        specialist TEXT NOT NULL DEFAULT '',
+        outcome TEXT NOT NULL,
+        at TEXT NOT NULL
+      )`,
+
+      // ── staff onboarding ───────────────────────────────────────────────
+      // from: staff_onboarding/store.py
+      `CREATE TABLE IF NOT EXISTS onboarding_templates (
+        name TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        department TEXT NOT NULL DEFAULT '',
+        ramp_days INTEGER NOT NULL DEFAULT 0,
+        checkin_cadence TEXT NOT NULL DEFAULT '',
+        task_specs_json TEXT NOT NULL DEFAULT '[]',
+        brief_sections_json TEXT NOT NULL DEFAULT '[]',
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_onboarding_templates_active ON onboarding_templates(is_active)`,
+      `CREATE TABLE IF NOT EXISTS onboarding_plans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        full_name TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT '',
+        start_date TEXT NOT NULL,
+        person_id INTEGER,
+        manager_person_id INTEGER,
+        buddy_person_id INTEGER,
+        template_name TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'draft',
+        current_phase TEXT NOT NULL DEFAULT 'pre_start',
+        brief_artifact TEXT NOT NULL DEFAULT '',
+        reading_list_json TEXT NOT NULL DEFAULT '[]',
+        ramp_segments_json TEXT NOT NULL DEFAULT '[]',
+        ramp_next_index INTEGER NOT NULL DEFAULT 0,
+        engagement_id INTEGER,
+        candidate_id INTEGER,
+        archived INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_onboarding_plans_status ON onboarding_plans(status)`,
+      `CREATE INDEX IF NOT EXISTS idx_onboarding_plans_person ON onboarding_plans(person_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_onboarding_plans_archived ON onboarding_plans(archived)`,
+      `CREATE TABLE IF NOT EXISTS onboarding_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_id INTEGER NOT NULL,
+        phase TEXT NOT NULL DEFAULT 'week_1',
+        title TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'general',
+        owner_person_id INTEGER,
+        due_date TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        completed_at TEXT,
+        completed_by_person_id INTEGER,
+        notes TEXT NOT NULL DEFAULT '',
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (plan_id) REFERENCES onboarding_plans(id) ON DELETE CASCADE
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_onboarding_tasks_plan ON onboarding_tasks(plan_id)`,
+
+      // ── agents ─────────────────────────────────────────────────────────
+      // from: agents/overrides.py
+      `CREATE TABLE IF NOT EXISTS agent_overrides (
+        agent_id TEXT PRIMARY KEY,
+        prompt TEXT,
+        model TEXT,
+        use_deep_reasoning INTEGER,
+        role TEXT,
+        voice_persona_slug TEXT,
+        research_focus TEXT,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS agent_override_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        prompt TEXT,
+        model TEXT,
+        use_deep_reasoning INTEGER,
+        role TEXT,
+        voice_persona_slug TEXT,
+        research_focus TEXT,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_override_history_agent ON agent_override_history(agent_id, id DESC)`,
+
+      // ── personas ───────────────────────────────────────────────────────
+      // from: personas/loader.py
+      `CREATE TABLE IF NOT EXISTS voice_personas (
+        slug TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        body TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+
+      // ── evals ──────────────────────────────────────────────────────────
+      // from: evals/persistence.py
+      `CREATE TABLE IF NOT EXISTS eval_runs (
+        run_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        scenario_ids TEXT NOT NULL,
+        status TEXT NOT NULL,
+        results TEXT,
+        passed INTEGER,
+        total INTEGER,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS eval_runs_kind_idx ON eval_runs (kind, updated_at DESC)`,
+      `CREATE TABLE IF NOT EXISTS eval_scenarios (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        yaml TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+
+      // ── fixtures ───────────────────────────────────────────────────────
+      // from: fixtures/store.py
+      `CREATE TABLE IF NOT EXISTS generated_fixtures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        scenario_description TEXT NOT NULL DEFAULT '',
+        profile_yaml TEXT NOT NULL DEFAULT '',
+        people_yaml TEXT NOT NULL DEFAULT '',
+        departments_yaml TEXT NOT NULL DEFAULT '',
+        memory_json TEXT NOT NULL DEFAULT '{}',
+        docs_json TEXT NOT NULL DEFAULT '{}',
+        dept_summary_json TEXT NOT NULL DEFAULT '[]',
+        people_summary_json TEXT NOT NULL DEFAULT '[]',
+        industry TEXT NOT NULL DEFAULT '',
+        stage TEXT NOT NULL DEFAULT '',
+        arr REAL,
+        headcount INTEGER,
+        founding_year INTEGER,
+        mission TEXT NOT NULL DEFAULT '',
+        doc_count INTEGER NOT NULL DEFAULT 0,
+        scenario_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_generated_fixtures_archived ON generated_fixtures(archived)`,
+
+      // ── clients ────────────────────────────────────────────────────────
+      // from: clients/slots.py (filesystem in Python, SQLite in Durbar)
+      `CREATE TABLE IF NOT EXISTS clients (
+        slug TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        role TEXT NOT NULL DEFAULT '',
+        engagement_start TEXT,
+        renewal_date TEXT,
+        retainer TEXT,
+        hours_per_week REAL,
+        primary_contact TEXT,
+        notes TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+
+      // ── onboarding sessions ────────────────────────────────────────────
+      // from: onboarding/interview.py (in-memory in Python, SQLite in Durbar for persistence)
+      `CREATE TABLE IF NOT EXISTS onboarding_sessions (
+        id TEXT PRIMARY KEY,
+        transcript_json TEXT NOT NULL DEFAULT '[]',
+        questions_asked INTEGER NOT NULL DEFAULT 0,
+        draft_json TEXT,
+        saved INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+    ],
+  },
 ];
