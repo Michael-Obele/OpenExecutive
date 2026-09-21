@@ -61,8 +61,7 @@ export function searchSkills(_db: Db, query: string, n = 5): Array<{ name: strin
     .filter((s) => s.score < 1)
     .sort((a, b) => a.score - b.score)
     .slice(0, n);
-  // If no substring match, return top n by name
-  if (scored.length === 0) return skills.slice(0, n).map((s) => ({ name: s.name, category: s.category, description: s.description, score: 1 }));
+  // No hits → return empty (caller renders "no results" rather than unrelated skills)
   return scored;
 }
 

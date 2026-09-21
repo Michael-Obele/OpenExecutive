@@ -279,7 +279,6 @@ import {
 } from "./features/skills/skills.ts";
 import {
   cancelEvalRun,
-  completeEvalRun,
   createEvalRun,
   createUserScenario,
   deleteEvalRun,
@@ -2262,6 +2261,15 @@ export function createApp(
         return json({ indexed: 0 }, 200, cors);
       }
       // Candidates — literal paths before param paths
+      // Spec alias: GET /candidates/similar?candidate_id=123 (query-style)
+      if (url.pathname === "/candidates/similar" && request.method === "GET") {
+        const candidateIdRaw = url.searchParams.get("candidate_id");
+        if (!candidateIdRaw) return json({ error: "candidate_id query param is required" }, 400, cors);
+        const id = Number(candidateIdRaw);
+        if (!Number.isInteger(id)) return json({ error: "candidate_id must be an integer" }, 400, cors);
+        if (!getCandidate(db, id)) return json({ error: "Candidate not found" }, 404, cors);
+        return json([], 200, cors);
+      }
       if (url.pathname === "/candidates" && request.method === "GET") {
         const engagementId = url.searchParams.get("engagement_id") ? Number(url.searchParams.get("engagement_id")) : undefined;
         const stage = url.searchParams.get("stage") as typeof CANDIDATE_STAGES[number] | null;
@@ -3108,8 +3116,8 @@ export function createApp(
         const runId = crypto.randomUUID().replace(/-/g, "");
         const scenarioIds: string[] = typeof b["scenario_id"] === "string" ? [b["scenario_id"] as string] : [];
         createEvalRun(db, runId, kind, scenarioIds);
-        // Stub: immediately complete
-        completeEvalRun(db, runId);
+        // Leave as running — caller can cancel or poll. No immediate complete
+        // (otherwise POST /evals/runs/{id}/cancel is dead code).
         const run = getEvalRun(db, runId);
         return json(run, 201, cors);
       }
@@ -3119,7 +3127,7 @@ export function createApp(
           const runId = decodeURIComponent(evalCancelMatch[1]!);
           const run = getEvalRun(db, runId);
           if (!run) return json({ error: `Eval run ${runId} not found` }, 404, cors);
-          if (run.status !== "running") return json({ error: `No active eval run with id ${runId}` }, 404, cors);
+          if (run.status !== "running") return json({ error: `Eval run ${runId} is ${run.status} and cannot be canceled` }, 409, cors);
           cancelEvalRun(db, runId);
           return json({ status: "canceling", run_id: runId }, 200, cors);
         }
@@ -3216,6 +3224,15 @@ export function createApp(
       }
       if (url.pathname === "/fixtures/unload" && request.method === "POST") {
         return json(unloadFixture(db), 200, cors);
+      }
+      {
+        const fixtureUnloadMatch = url.pathname.match(/^\/fixtures\/([^/]+)\/unload$/);
+        if (fixtureUnloadMatch && request.method === "POST") {
+          const name = decodeURIComponent(fixtureUnloadMatch[1]!);
+          if (!/^[a-z0-9_-]+$/.test(name)) return json({ error: "Invalid fixture name" }, 400, cors);
+          if (!fixtureExists(db, name)) return json({ error: `Fixture ${name} not found` }, 404, cors);
+          return json(unloadFixture(db), 200, cors);
+        }
       }
       if (url.pathname === "/fixtures/generate" && request.method === "POST") {
         const body: unknown = await request.json().catch(() => null);

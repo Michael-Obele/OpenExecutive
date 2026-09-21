@@ -124,7 +124,9 @@ export function commitSession(db: Db, id: string, profilePatch?: Record<string, 
   } else {
     patchCompanyProfile(db, mergedPatch as Parameters<typeof patchCompanyProfile>[1]);
   }
-  // Also seed people/departments if present
+  // Also seed people/departments if present. Enforce single principal:
+  // if a principal already exists, new people are inserted as non-principal.
+  let hasPrincipal = !!db.query<Record<string, unknown>, []>("SELECT id FROM people WHERE is_principal = 1 AND archived = 0 LIMIT 1").get();
   const people = (draft["people"] as Array<Record<string, unknown>>) ?? [];
   for (const p of people) {
     const name = typeof p["full_name"] === "string" ? p["full_name"] : "";
@@ -132,7 +134,10 @@ export function commitSession(db: Db, id: string, profilePatch?: Record<string, 
     const existingPerson = db.query<Record<string, unknown>, [string]>("SELECT id FROM people WHERE full_name = ?").get(name);
     if (!existingPerson) {
       const now = nowIso();
-      db.run("INSERT INTO people (full_name, role, is_principal, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", [name, (p["role"] as string) ?? "", p["is_principal"] ? 1 : 0, now, now]);
+      const wantsPrincipal = Boolean(p["is_principal"]);
+      const isPrincipal = wantsPrincipal && !hasPrincipal ? 1 : 0;
+      db.run("INSERT INTO people (full_name, role, is_principal, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", [name, (p["role"] as string) ?? "", isPrincipal, now, now]);
+      if (isPrincipal) hasPrincipal = true;
     }
   }
   const departments = (draft["departments"] as Array<Record<string, unknown>>) ?? [];

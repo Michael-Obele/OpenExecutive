@@ -5,6 +5,9 @@
  * Mirrors architecture: pre-authored JSON under `guide/prebuilt/*.json`.
  */
 
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
 export interface GuideSectionSpec {
   id: string;
   title: string;
@@ -48,8 +51,6 @@ export function listGuidePrebuilt(): Map<string, Record<string, unknown>> {
   ];
   for (const dir of candidates) {
     try {
-      const { readdirSync, readFileSync } = require("node:fs") as typeof import("node:fs");
-      const { join } = require("node:path") as typeof import("node:path");
       for (const entry of readdirSync(dir)) {
         if (!entry.endsWith(".json")) continue;
         const id = entry.replace(/\.json$/, "");

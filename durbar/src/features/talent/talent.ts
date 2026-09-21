@@ -165,18 +165,17 @@ export function getEngagement(db: Db, id: number): Engagement | null {
 
 export function createEngagement(db: Db, data: Omit<Engagement, "id" | "archived" | "created_at" | "updated_at">): Engagement {
   const now = nowIso();
-  const result = db.query<Record<string, unknown>, Array<string | number>>(
+  // Use db.run + last_insert_rowid() consistently — RETURNING is not reliably
+  // available across all bun:sqlite versions. Matches upsertEngagement pattern.
+  db.run(
     `INSERT INTO engagements (role_title, department, status, location, comp_band, must_haves, description, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
-  ).get(data.role_title, data.department, data.status, data.location, data.comp_band, data.must_haves, data.description, now, now);
-  // Fallback for bun:sqlite without RETURNING support via run
-  if (!result) {
-    const id = Number(db.query<{ id: number }, []>("SELECT last_insert_rowid() as id").get()!.id);
-    const row = getEngagement(db, id);
-    if (!row) throw new Error("Engagement vanished after insert");
-    return row;
-  }
-  return rowToEngagement(result);
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [data.role_title, data.department, data.status, data.location, data.comp_band, data.must_haves, data.description, now, now],
+  );
+  const id = Number(db.query<{ id: number }, []>("SELECT last_insert_rowid() as id").get()!.id);
+  const row = getEngagement(db, id);
+  if (!row) throw new Error("Engagement vanished after insert");
+  return row;
 }
 
 export function upsertEngagement(db: Db, id: number | null, data: Partial<Omit<Engagement, "id" | "archived" | "created_at" | "updated_at">> & { role_title: string }): Engagement {

@@ -156,8 +156,9 @@ export function upsertTemplate(db: Db, data: OnboardingTemplate): OnboardingTemp
   const existing = getTemplate(db, data.name);
   const createdAt = existing ? existing.created_at : now;
   db.run(
-    `INSERT OR REPLACE INTO onboarding_templates (name, title, description, department, ramp_days, checkin_cadence, task_specs_json, brief_sections_json, is_active, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO onboarding_templates (name, title, description, department, ramp_days, checkin_cadence, task_specs_json, brief_sections_json, is_active, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(name) DO UPDATE SET title=excluded.title, description=excluded.description, department=excluded.department, ramp_days=excluded.ramp_days, checkin_cadence=excluded.checkin_cadence, task_specs_json=excluded.task_specs_json, brief_sections_json=excluded.brief_sections_json, is_active=excluded.is_active, updated_at=excluded.updated_at`,
     [data.name, data.title, data.description, data.department, data.ramp_days, data.checkin_cadence, JSON.stringify(data.task_specs), JSON.stringify(data.brief_sections), data.is_active ? 1 : 0, createdAt, now],
   );
   const saved = getTemplate(db, data.name);

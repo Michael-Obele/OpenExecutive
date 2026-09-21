@@ -126,10 +126,10 @@ export function deleteUserScenario(db: Db, id: string): boolean {
 }
 
 export function validateScenarioYaml(yaml: string): { id: string; kind: string } {
-  // Minimal validation: must contain id and kind
-  const idMatch = yaml.match(/^\s*id:\s*(\S+)/m);
+  // Require `id:` at the start of a line (not inside comments or nested values)
+  const idMatch = yaml.match(/^id:\s*(\S+)/m);
   if (!idMatch) throw new Error("Scenario YAML must contain an `id` field");
-  const kindMatch = yaml.match(/^\s*kind:\s*(\S+)/m);
+  const kindMatch = yaml.match(/^kind:\s*(\S+)/m);
   const kind = kindMatch ? kindMatch[1]!.trim() : "chat";
   if (!EVAL_KINDS.includes(kind as EvalKind)) throw new Error(`Invalid kind: ${kind}`);
   return { id: idMatch[1]!.trim(), kind };

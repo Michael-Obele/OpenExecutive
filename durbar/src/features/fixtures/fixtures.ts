@@ -8,6 +8,8 @@
  * (filesystem copy deferred). Generate is stubbed with validation.
  */
 
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import type { Db } from "../../db.ts";
 
 export interface FixtureSummary {
@@ -30,8 +32,6 @@ function curatedFixtures(): FixtureSummary[] {
   ];
   for (const dir of candidates) {
     try {
-      const { readdirSync, readFileSync, statSync } = require("node:fs") as typeof import("node:fs");
-      const { join } = require("node:path") as typeof import("node:path");
       for (const entry of readdirSync(dir)) {
         const full = join(dir, entry);
         try {
