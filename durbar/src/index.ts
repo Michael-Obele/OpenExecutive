@@ -103,6 +103,14 @@ import {
   buildToday,
   resolveCallerPersonId,
 } from "./features/briefing/briefing.ts";
+import {
+  buildUserContent,
+  evaluateAndDispatch,
+  TRIAGE_PROMPT,
+  TRIAGE_TOOL,
+  triageEvent,
+  validateTriageEvent,
+} from "./features/triage/triage.ts";
 import { buildSuggestedPrompts, runChatTurn } from "./features/chat/chat.ts";
 import {
   deleteDocument,
@@ -425,6 +433,73 @@ export function createApp(
         if (!latest)
           return json({ error: "no brief has been run yet" }, 404, cors);
         return json(latest, 200, cors);
+      }
+
+      // ── triage ──────────────────────────────────────────────────────────
+      // The Chief of Staff. Not a council specialist — it classifies inbound
+      // events for significance and decides alerting. Exposed for manual
+      // testing and for the alert-creation path to call into.
+      if (url.pathname === "/features/triage/prompt" && request.method === "GET") {
+        return json({ prompt: TRIAGE_PROMPT, tool: TRIAGE_TOOL }, 200, cors);
+      }
+
+      if (url.pathname === "/features/triage/classify" && request.method === "POST") {
+        const body: unknown = await request.json().catch(() => null);
+        const validated = validateTriageEvent(body);
+        if (!validated.ok) return json({ error: validated.error }, 422, cors);
+        const decision = await triageEvent(validated.event, { db, provider });
+        return json(decision, 200, cors);
+      }
+
+      if (url.pathname === "/features/triage/evaluate" && request.method === "POST") {
+        const body: unknown = await request.json().catch(() => null);
+        const validated = validateTriageEvent(body);
+        if (!validated.ok) return json({ error: validated.error }, 422, cors);
+        const result = await evaluateAndDispatch(validated.event, { db, provider });
+        return json(result, 200, cors);
+      }
+
+      // Back-compat aliases without the /features prefix.
+      if (url.pathname === "/triage/classify" && request.method === "POST") {
+        const body: unknown = await request.json().catch(() => null);
+        const validated = validateTriageEvent(body);
+        if (!validated.ok) return json({ error: validated.error }, 422, cors);
+        const decision = await triageEvent(validated.event, { db, provider });
+        return json(decision, 200, cors);
+      }
+
+      if (url.pathname === "/triage/evaluate" && request.method === "POST") {
+        const body: unknown = await request.json().catch(() => null);
+        const validated = validateTriageEvent(body);
+        if (!validated.ok) return json({ error: validated.error }, 422, cors);
+        const result = await evaluateAndDispatch(validated.event, { db, provider });
+        return json(result, 200, cors);
+      }
+
+      if (url.pathname === "/triage/debug" && request.method === "POST") {
+        const body: unknown = await request.json().catch(() => ({}));
+        const record = (body ?? {}) as Record<string, unknown>;
+        const eventRaw = record["event"];
+        if (!eventRaw || typeof eventRaw !== "object") {
+          return json({ error: "event is required" }, 422, cors);
+        }
+        const validated = validateTriageEvent(eventRaw);
+        if (!validated.ok) return json({ error: validated.error }, 422, cors);
+        // Expose the prompt context that would be sent to the model — useful
+        // for debugging why triage classified something a given way, without
+        // spending a model call.
+        const mutes = (await import("./features/alerts/alerts.ts")).listMutes(db).map((m) => m.pattern);
+        const recent = (await import("./features/alerts/alerts.ts")).listAlerts(db, { limit: 20 }).map((alert) => ({
+          headline: alert.headline,
+          severity: alert.severity,
+          dedup_key: alert.dedup_key,
+          topic_tags: alert.topic_tags,
+        }));
+        const initiatives = (await import("./features/memories/memories.ts")).listInitiatives(db)
+          .filter((item) => item.status !== "completed" && item.status !== "done")
+          .map((item) => ({ title: item.title, status: item.status, summary: item.summary }));
+        const userContent = buildUserContent(validated.event, recent, mutes, initiatives);
+        return json({ system: TRIAGE_PROMPT, user: userContent, tool: TRIAGE_TOOL }, 200, cors);
       }
 
       const councilPath = "/features/council/consult";
