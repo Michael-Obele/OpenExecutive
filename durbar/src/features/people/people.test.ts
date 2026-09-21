@@ -723,3 +723,135 @@ describe("GET /people/by-scope/{token}", () => {
     expect((body as { error: string }).error).toMatch(/Valid tokens/);
   });
 });
+
+// ── findings fixes: principal demotion, archive idempotency, null handling, FK ──
+
+describe("PATCH principal protection via is_principal", () => {
+  test("demoting last principal → 409", async () => {
+    const db = openDb();
+    const app = appWith(db);
+    const { body: created } = await req(app, "/people", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ full_name: "Solo Principal", is_principal: true }),
+    });
+    const pid = (created as { id: number }).id;
+    const { res, body } = await req(app, `/people/${pid}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ is_principal: false }),
+    });
+    expect(res.status).toBe(409);
+    expect((body as { error: string }).error).toMatch(/Cannot demote the last principal/);
+    const { body: fetched } = await req(app, `/people/${pid}`);
+    expect((fetched as { is_principal: boolean }).is_principal).toBe(true);
+  });
+
+  test("demoting when replacement exists → 200", async () => {
+    const db = openDb();
+    const app = appWith(db);
+    await req(app, "/people", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ full_name: "Principal A", is_principal: true }),
+    });
+    const { body: p2 } = await req(app, "/people", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ full_name: "Principal B", is_principal: true }),
+    });
+    const pid2 = (p2 as { id: number }).id;
+    const { res, body } = await req(app, `/people/${pid2}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ is_principal: false }),
+    });
+    expect(res.status).toBe(200);
+    expect((body as { is_principal: boolean }).is_principal).toBe(false);
+  });
+});
+
+describe("POST /people/{id}/archive idempotency", () => {
+  test("archiving already archived → 204 (not 404)", async () => {
+    const db = openDb();
+    const app = appWith(db);
+    const { body: created } = await req(app, "/people", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ full_name: "ToArchive" }),
+    });
+    const pid = (created as { id: number }).id;
+    const first = await req(app, `/people/${pid}/archive`, { method: "POST" });
+    expect(first.res.status).toBe(204);
+    const second = await req(app, `/people/${pid}/archive`, { method: "POST" });
+    expect(second.res.status).toBe(204);
+  });
+});
+
+describe("PATCH null handling for department_slugs", () => {
+  test("department_slugs:null clears to []", async () => {
+    const db = openDb();
+    const app = appWith(db);
+    const { body: created } = await req(app, "/people", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ full_name: "Dept Person", department_slugs: ["finance"] }),
+    });
+    const pid = (created as { id: number }).id;
+    const { res, body } = await req(app, `/people/${pid}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ department_slugs: null }),
+    });
+    expect(res.status).toBe(200);
+    expect((body as { department_slugs: string[] }).department_slugs).toEqual([]);
+  });
+});
+
+describe("reports_to_person_id FK validation", () => {
+  test("POST with non-existent reports_to_person_id → 422", async () => {
+    const db = openDb();
+    const app = appWith(db);
+    const { res } = await req(app, "/people", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ full_name: "Orphan", reports_to_person_id: 9999 }),
+    });
+    expect(res.status).toBe(422);
+  });
+
+  test("PATCH with non-existent reports_to_person_id → 422", async () => {
+    const db = openDb();
+    const app = appWith(db);
+    const { body: created } = await req(app, "/people", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ full_name: "Alice" }),
+    });
+    const pid = (created as { id: number }).id;
+    const { res } = await req(app, `/people/${pid}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reports_to_person_id: 9999 }),
+    });
+    expect(res.status).toBe(422);
+  });
+
+  test("reports_to archived person → 422", async () => {
+    const db = openDb();
+    const app = appWith(db);
+    const { body: target } = await req(app, "/people", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ full_name: "Target" }),
+    });
+    const targetId = (target as { id: number }).id;
+    await req(app, `/people/${targetId}/archive`, { method: "POST" });
+    const { res } = await req(app, "/people", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ full_name: "Reporter", reports_to_person_id: targetId }),
+    });
+    expect(res.status).toBe(422);
+  });
+});

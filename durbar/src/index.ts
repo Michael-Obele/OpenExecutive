@@ -49,6 +49,7 @@ import {
   findApprovers,
   getPerson,
   listPeople,
+  PrincipalProtectionError,
   updatePerson,
   validatePersonCreate,
   validatePersonPatch,
@@ -398,26 +399,36 @@ export function createApp(
         const body: unknown = await request.json().catch(() => null);
         const validated = validatePersonCreate(body);
         if (!validated.ok) return json({ error: validated.error }, 422, cors);
+        if (
+          validated.data.reports_to_person_id !== undefined &&
+          validated.data.reports_to_person_id !== null
+        ) {
+          const target = getPerson(db, validated.data.reports_to_person_id);
+          if (!target || target.archived) {
+            return json({ error: "reports_to_person_id must reference an existing, non-archived person" }, 422, cors);
+          }
+        }
         const created = createPerson(db, validated.data);
         return json(created, 201, cors);
       }
 
       // POST /people/{id}/archive — must be before generic /people/{id} PATCH/GET.
+      // Idempotent: archiving an already-archived person returns 204 (same as
+      // upstream `archive_person` + route, which is 204 regardless).
       {
         const archiveMatch = url.pathname.match(/^\/people\/(\d+)\/archive$/);
         if (archiveMatch && request.method === "POST") {
           const id = Number(archiveMatch[1]);
           const existing = getPerson(db, id);
           if (!existing) return json({ error: "Person not found" }, 404, cors);
+          if (existing.archived) return new Response(null, { status: 204, headers: cors });
           try {
-            const ok = archivePerson(db, id);
-            if (!ok) return json({ error: "Person not found or already archived" }, 404, cors);
+            archivePerson(db, id);
           } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            // Principal protection is a 409 (conflict), not a 422.
-            if (message.includes("Cannot archive the last principal")) {
-              return json({ error: message }, 409, cors);
+            if (error instanceof PrincipalProtectionError) {
+              return json({ error: error.message }, 409, cors);
             }
+            const message = error instanceof Error ? error.message : String(error);
             return json({ error: message }, 422, cors);
           }
           return new Response(null, { status: 204, headers: cors });
@@ -439,12 +450,29 @@ export function createApp(
             const raw: unknown = await request.json().catch(() => null);
             const validated = validatePersonPatch(raw);
             if (!validated.ok) return json({ error: validated.error }, 422, cors);
+            // FK validation for reports_to_person_id: target must exist and not be archived.
+            if (
+              validated.data.reports_to_person_id !== undefined &&
+              validated.data.reports_to_person_id !== null
+            ) {
+              const target = getPerson(db, validated.data.reports_to_person_id);
+              if (!target || target.archived) {
+                return json({ error: "reports_to_person_id must reference an existing, non-archived person" }, 422, cors);
+              }
+            }
             if (Object.keys(validated.data).length === 0) {
               return json(existing, 200, cors);
             }
-            const updated = updatePerson(db, id, validated.data);
-            if (!updated) return json({ error: "Person vanished" }, 500, cors);
-            return json(updated, 200, cors);
+            try {
+              const updated = updatePerson(db, id, validated.data);
+              if (!updated) return json({ error: "Person vanished" }, 500, cors);
+              return json(updated, 200, cors);
+            } catch (error) {
+              if (error instanceof PrincipalProtectionError) {
+                return json({ error: error.message }, 409, cors);
+              }
+              throw error;
+            }
           }
         }
       }

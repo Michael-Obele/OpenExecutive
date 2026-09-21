@@ -17,6 +17,16 @@
 
 import type { Db } from "../../db.ts";
 
+export class PrincipalProtectionError extends Error {
+  constructor(message?: string) {
+    super(
+      message ??
+        "Cannot archive the last principal — assign a replacement principal first",
+    );
+    this.name = "PrincipalProtectionError";
+  }
+}
+
 // ── types ──────────────────────────────────────────────────────────────────
 
 export type AuthorityScope =
@@ -257,6 +267,95 @@ function rowToPerson(db: Db, row: PersonRow): Person {
   };
 }
 
+function rowToPersonWithBatch(
+  row: PersonRow,
+  scopes: AuthorityScope[],
+  availability: AvailabilityWindow[],
+): Person {
+  let deptSlugs: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(row.department_slugs_json);
+    deptSlugs = Array.isArray(parsed) ? (parsed as string[]) : [];
+  } catch {
+    deptSlugs = [];
+  }
+  const preferred: PreferredChannel = (
+    PREFERRED_CHANNELS as readonly string[]
+  ).includes(row.preferred_channel)
+    ? (row.preferred_channel as PreferredChannel)
+    : "any";
+  return {
+    id: row.id,
+    full_name: row.full_name,
+    role: row.role,
+    is_principal: Boolean(row.is_principal),
+    department_slugs: deptSlugs,
+    email: row.email,
+    slack_user_id: row.slack_user_id,
+    telegram_chat_id: row.telegram_chat_id,
+    discord_user_id: row.discord_user_id,
+    preferred_channel: preferred,
+    response_sla_hours: row.response_sla_hours,
+    on_leave_until: row.on_leave_until,
+    reports_to_person_id: row.reports_to_person_id,
+    archived: Boolean(row.archived),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    authority_scope: scopes,
+    availability,
+  };
+}
+
+function loadScopesBatch(db: Db, personIds: number[]): Map<number, AuthorityScope[]> {
+  const map = new Map<number, AuthorityScope[]>();
+  for (const id of personIds) map.set(id, []);
+  if (personIds.length === 0) return map;
+  const placeholders = personIds.map(() => "?").join(",");
+  const rows = db
+    .query<{ person_id: number; scope_token: string }, number[]>(
+      `SELECT person_id, scope_token FROM person_authority_scope WHERE person_id IN (${placeholders})`,
+    )
+    .all(...(personIds as number[]));
+  for (const row of rows) {
+    if ((AUTHORITY_SCOPES as readonly string[]).includes(row.scope_token)) {
+      map.get(row.person_id)?.push(row.scope_token as AuthorityScope);
+    }
+  }
+  return map;
+}
+
+function loadAvailabilityBatch(
+  db: Db,
+  personIds: number[],
+): Map<number, AvailabilityWindow[]> {
+  const map = new Map<number, AvailabilityWindow[]>();
+  for (const id of personIds) map.set(id, []);
+  if (personIds.length === 0) return map;
+  const placeholders = personIds.map(() => "?").join(",");
+  const rows = db
+    .query<
+      { person_id: number; weekdays_json: string; start_local: string; end_local: string; timezone: string },
+      number[]
+    >(
+      `SELECT person_id, weekdays_json, start_local, end_local, timezone FROM person_availability WHERE person_id IN (${placeholders}) ORDER BY id`,
+    )
+    .all(...(personIds as number[]));
+  for (const row of rows) {
+    try {
+      const weekdays: unknown = JSON.parse(row.weekdays_json);
+      map.get(row.person_id)?.push({
+        weekdays: Array.isArray(weekdays) ? (weekdays as number[]) : [],
+        start_local: row.start_local,
+        end_local: row.end_local,
+        timezone: row.timezone,
+      });
+    } catch {
+      // skip malformed
+    }
+  }
+  return map;
+}
+
 // ── store ──────────────────────────────────────────────────────────────────
 
 export function listPeople(db: Db, includeArchived = false): Person[] {
@@ -265,7 +364,13 @@ export function listPeople(db: Db, includeArchived = false): Person[] {
     : db
         .query<PersonRow, []>("SELECT * FROM people WHERE archived = 0 ORDER BY is_principal DESC, id ASC")
         .all();
-  return rows.map((row) => rowToPerson(db, row));
+  if (rows.length === 0) return [];
+  const ids = rows.map((r) => r.id);
+  const scopesMap = loadScopesBatch(db, ids);
+  const availMap = loadAvailabilityBatch(db, ids);
+  return rows.map((row) =>
+    rowToPersonWithBatch(row, scopesMap.get(row.id) ?? [], availMap.get(row.id) ?? []),
+  );
 }
 
 export function getPerson(db: Db, id: number): Person | null {
@@ -289,7 +394,13 @@ export function findApprovers(db: Db, scope: AuthorityScope): Person[] {
        ORDER BY p.is_principal ASC, p.response_sla_hours ASC, p.id ASC`,
     )
     .all(scope, "wildcard");
-  return rows.map((row) => rowToPerson(db, row));
+  if (rows.length === 0) return [];
+  const ids = rows.map((r) => r.id);
+  const scopesMap = loadScopesBatch(db, ids);
+  const availMap = loadAvailabilityBatch(db, ids);
+  return rows.map((row) =>
+    rowToPersonWithBatch(row, scopesMap.get(row.id) ?? [], availMap.get(row.id) ?? []),
+  );
 }
 
 function setAuthorityScope(db: Db, personId: number, scopes: AuthorityScope[]): void {
@@ -330,36 +441,40 @@ export interface PersonCreate {
 }
 
 export function createPerson(db: Db, input: PersonCreate): Person {
-  const now = new Date().toISOString();
-  const result = db.run(
-    `INSERT INTO people
+  let id = 0;
+  const tx = db.transaction(() => {
+    const now = new Date().toISOString();
+    const result = db.run(
+      `INSERT INTO people
        (full_name, role, is_principal, department_slugs_json, email, slack_user_id, telegram_chat_id, discord_user_id,
         preferred_channel, response_sla_hours, on_leave_until, reports_to_person_id, archived, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-    [
-      input.full_name,
-      input.role ?? "",
-      input.is_principal ? 1 : 0,
-      JSON.stringify(input.department_slugs ?? []),
-      input.email ?? null,
-      input.slack_user_id ?? null,
-      input.telegram_chat_id ?? null,
-      input.discord_user_id ?? null,
-      input.preferred_channel ?? "any",
-      input.response_sla_hours ?? 24,
-      input.on_leave_until ?? null,
-      input.reports_to_person_id ?? null,
-      now,
-      now,
-    ],
-  );
-  const id = Number(result.lastInsertRowid);
-  if (input.authority_scope && input.authority_scope.length > 0) {
-    setAuthorityScope(db, id, input.authority_scope);
-  }
-  if (input.availability && input.availability.length > 0) {
-    setAvailability(db, id, input.availability);
-  }
+      [
+        input.full_name,
+        input.role ?? "",
+        input.is_principal ? 1 : 0,
+        JSON.stringify(input.department_slugs ?? []),
+        input.email ?? null,
+        input.slack_user_id ?? null,
+        input.telegram_chat_id ?? null,
+        input.discord_user_id ?? null,
+        input.preferred_channel ?? "any",
+        input.response_sla_hours ?? 24,
+        input.on_leave_until ?? null,
+        input.reports_to_person_id ?? null,
+        now,
+        now,
+      ],
+    );
+    id = Number(result.lastInsertRowid);
+    if (input.authority_scope !== undefined) {
+      setAuthorityScope(db, id, input.authority_scope);
+    }
+    if (input.availability !== undefined) {
+      setAvailability(db, id, input.availability);
+    }
+  });
+  tx();
   const created = getPerson(db, id);
   if (!created) throw new Error("Person vanished after insert");
   return created;
@@ -387,39 +502,56 @@ export function updatePerson(db: Db, id: number, patch: PersonPatch): Person | n
   const existing = getPerson(db, id);
   if (!existing) return null;
 
-  const fields: Array<[string, unknown]> = [];
-  if (patch.full_name !== undefined) fields.push(["full_name", patch.full_name]);
-  if (patch.role !== undefined) fields.push(["role", patch.role]);
-  if (patch.is_principal !== undefined) fields.push(["is_principal", patch.is_principal ? 1 : 0]);
-  if (patch.department_slugs !== undefined)
-    fields.push(["department_slugs_json", JSON.stringify(patch.department_slugs)]);
-  if (patch.email !== undefined) fields.push(["email", patch.email]);
-  if (patch.slack_user_id !== undefined) fields.push(["slack_user_id", patch.slack_user_id]);
-  if (patch.telegram_chat_id !== undefined) fields.push(["telegram_chat_id", patch.telegram_chat_id]);
-  if (patch.discord_user_id !== undefined) fields.push(["discord_user_id", patch.discord_user_id]);
-  if (patch.preferred_channel !== undefined) fields.push(["preferred_channel", patch.preferred_channel]);
-  if (patch.response_sla_hours !== undefined) fields.push(["response_sla_hours", patch.response_sla_hours]);
-  if (patch.clear_on_leave) {
-    fields.push(["on_leave_until", null]);
-  } else if (patch.on_leave_until !== undefined) {
-    fields.push(["on_leave_until", patch.on_leave_until]);
-  }
-  if (patch.reports_to_person_id !== undefined)
-    fields.push(["reports_to_person_id", patch.reports_to_person_id]);
-
-  if (fields.length > 0) {
-    fields.push(["updated_at", new Date().toISOString()]);
-    const setClause = fields.map(([name]) => `${name} = ?`).join(", ");
-    const values = [...fields.map(([, v]) => v), id];
-    db.run(`UPDATE people SET ${setClause} WHERE id = ?`, values as never[]);
+  // Principal protection on demotion: same guard as archivePerson.
+  if (patch.is_principal === false && existing.is_principal) {
+    const otherPrincipals = db
+      .query<{ n: number }, [number]>(
+        "SELECT COUNT(*) AS n FROM people WHERE is_principal = 1 AND archived = 0 AND id != ?",
+      )
+      .get(id);
+    if ((otherPrincipals?.n ?? 0) === 0) {
+      throw new PrincipalProtectionError(
+        "Cannot demote the last principal — assign a replacement principal first",
+      );
+    }
   }
 
-  if (patch.authority_scope !== undefined) {
-    setAuthorityScope(db, id, patch.authority_scope);
-  }
-  if (patch.availability !== undefined) {
-    setAvailability(db, id, patch.availability);
-  }
+  const tx = db.transaction(() => {
+    const fields: Array<[string, unknown]> = [];
+    if (patch.full_name !== undefined) fields.push(["full_name", patch.full_name]);
+    if (patch.role !== undefined) fields.push(["role", patch.role]);
+    if (patch.is_principal !== undefined) fields.push(["is_principal", patch.is_principal ? 1 : 0]);
+    if (patch.department_slugs !== undefined)
+      fields.push(["department_slugs_json", JSON.stringify(patch.department_slugs)]);
+    if (patch.email !== undefined) fields.push(["email", patch.email]);
+    if (patch.slack_user_id !== undefined) fields.push(["slack_user_id", patch.slack_user_id]);
+    if (patch.telegram_chat_id !== undefined) fields.push(["telegram_chat_id", patch.telegram_chat_id]);
+    if (patch.discord_user_id !== undefined) fields.push(["discord_user_id", patch.discord_user_id]);
+    if (patch.preferred_channel !== undefined) fields.push(["preferred_channel", patch.preferred_channel]);
+    if (patch.response_sla_hours !== undefined) fields.push(["response_sla_hours", patch.response_sla_hours]);
+    if (patch.clear_on_leave) {
+      fields.push(["on_leave_until", null]);
+    } else if (patch.on_leave_until !== undefined) {
+      fields.push(["on_leave_until", patch.on_leave_until]);
+    }
+    if (patch.reports_to_person_id !== undefined)
+      fields.push(["reports_to_person_id", patch.reports_to_person_id]);
+
+    if (fields.length > 0) {
+      fields.push(["updated_at", new Date().toISOString()]);
+      const setClause = fields.map(([name]) => `${name} = ?`).join(", ");
+      const values = [...fields.map(([, v]) => v), id];
+      db.run(`UPDATE people SET ${setClause} WHERE id = ?`, values as never[]);
+    }
+
+    if (patch.authority_scope !== undefined) {
+      setAuthorityScope(db, id, patch.authority_scope);
+    }
+    if (patch.availability !== undefined) {
+      setAvailability(db, id, patch.availability);
+    }
+  });
+  tx();
 
   return getPerson(db, id);
 }
@@ -427,7 +559,7 @@ export function updatePerson(db: Db, id: number, patch: PersonPatch): Person | n
 export function archivePerson(db: Db, id: number): boolean {
   const person = getPerson(db, id);
   if (!person) return false;
-  if (person.archived) return false;
+  if (person.archived) return true;
 
   // Principal protection: refuse to archive the last non-archived principal.
   if (person.is_principal) {
@@ -437,7 +569,7 @@ export function archivePerson(db: Db, id: number): boolean {
       )
       .get(id);
     if ((otherPrincipals?.n ?? 0) === 0) {
-      throw new Error("Cannot archive the last principal — assign a replacement principal first");
+      throw new PrincipalProtectionError();
     }
   }
 
@@ -585,11 +717,15 @@ export function validatePersonPatch(
   if ("is_principal" in body && body["is_principal"] !== undefined && typeof body["is_principal"] !== "boolean")
     return { ok: false, error: "is_principal must be a boolean" };
 
-  if ("department_slugs" in body && body["department_slugs"] !== undefined && body["department_slugs"] !== null) {
-    if (!Array.isArray(body["department_slugs"]))
+  if ("department_slugs" in body && body["department_slugs"] !== undefined) {
+    if (body["department_slugs"] === null) {
+      // null → clear to [] (consistent with authority_scope / availability)
+    } else if (!Array.isArray(body["department_slugs"])) {
       return { ok: false, error: "department_slugs must be an array" };
-    for (const s of body["department_slugs"] as unknown[]) {
-      if (typeof s !== "string") return { ok: false, error: "department_slugs must be strings" };
+    } else {
+      for (const s of body["department_slugs"] as unknown[]) {
+        if (typeof s !== "string") return { ok: false, error: "department_slugs must be strings" };
+      }
     }
   }
 
@@ -647,8 +783,8 @@ export function validatePersonPatch(
   if ("role" in body && body["role"] !== undefined) data.role = body["role"] as string;
   if ("is_principal" in body && body["is_principal"] !== undefined)
     data.is_principal = body["is_principal"] as boolean;
-  if ("department_slugs" in body && body["department_slugs"] !== undefined && body["department_slugs"] !== null)
-    data.department_slugs = body["department_slugs"] as string[];
+  if ("department_slugs" in body && body["department_slugs"] !== undefined)
+    data.department_slugs = (body["department_slugs"] as string[] | null) ?? [];
   if ("email" in body) data.email = body["email"] as string | null;
   if ("slack_user_id" in body) data.slack_user_id = body["slack_user_id"] as string | null;
   if ("telegram_chat_id" in body) data.telegram_chat_id = body["telegram_chat_id"] as string | null;
