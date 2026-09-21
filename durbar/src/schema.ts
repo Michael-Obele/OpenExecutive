@@ -29,7 +29,7 @@ export interface Migration {
 export const MIGRATIONS: readonly Migration[] = [
   {
     id: 1,
-    name: 'core',
+    name: "core",
     statements: [
       // ── departments ────────────────────────────────────────────────────
       // from: departments/store.py
@@ -46,6 +46,10 @@ export const MIGRATIONS: readonly Migration[] = [
         cadences_json TEXT NOT NULL DEFAULT '{}',
         headcount INTEGER,
         budget_usd REAL,
+        slack_channel_id TEXT,
+        discord_channel_id TEXT,
+        telegram_chat_id TEXT,
+        watched_entities_json TEXT NOT NULL DEFAULT '[]',
         updated_at TEXT NOT NULL
       )`,
 
@@ -210,7 +214,7 @@ export const MIGRATIONS: readonly Migration[] = [
 
   {
     id: 2,
-    name: 'knowledge',
+    name: "knowledge",
     statements: [
       // Full-text index over the curated knowledge corpus, replacing the
       // reference implementation's ChromaDB + local ONNX embedding stack.
@@ -241,7 +245,7 @@ export const MIGRATIONS: readonly Migration[] = [
 
   {
     id: 3,
-    name: 'scheduler',
+    name: "scheduler",
     statements: [
       // The proactive half: rows that come due on their own.
       //
@@ -281,6 +285,22 @@ export const MIGRATIONS: readonly Migration[] = [
       `CREATE INDEX IF NOT EXISTS idx_scheduled_scope_key
         ON scheduled_actions(scope_key, created_at DESC)
         WHERE scope_key IS NOT NULL`,
+    ],
+  },
+
+  {
+    id: 4,
+    name: "company_profile",
+    statements: [
+      // from: memory/company_profile.py + api/routes/company_profile.py
+      // Upstream is a YAML file; Durbar keeps it in SQLite so the whole state
+      // is one file to back up. One row (id=1) — absence means onboarding has
+      // not been completed, surfaced as 404.
+      `CREATE TABLE IF NOT EXISTS company_profile (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        data TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
     ],
   },
 ];
