@@ -1883,7 +1883,6 @@ export function createApp(
           const inputs = payload as Record<string, unknown>;
           const runId = crypto.randomUUID();
           const title = deriveTitle(name, inputs);
-          createRun(db, runId, name, title, inputs);
 
           // Real execution for the three scheduled workflows — thin prompt + context + artifact.
           // All other workflows remain stubbed until Task 9.
@@ -1906,15 +1905,9 @@ export function createApp(
                     ...(typeof inputs["forceFull"] === "boolean" ? { forceFull: inputs["forceFull"] as boolean } : {}),
                     ...(typeof inputs["force_full"] === "boolean" ? { forceFull: inputs["force_full"] as boolean } : {}),
                   },
-                  { db, provider },
+                  { db, provider, runId },
                 );
                 artifact = result.narrative;
-                // Overwrite the stub run with the real artifact (same run_id).
-                db.run(`UPDATE workflow_runs SET artifact = ?, status = 'succeeded', updated_at = ? WHERE run_id = ?`, [
-                  artifact,
-                  new Date().toISOString(),
-                  runId,
-                ]);
               } else if (name === "executive_reflection") {
                 const { runExecutiveReflection } = await import("./features/workflows/executive-reflection.ts");
                 const result = await runExecutiveReflection(
@@ -1922,28 +1915,18 @@ export function createApp(
                     ...(typeof inputs["periodLabel"] === "string" ? { periodLabel: inputs["periodLabel"] as string } : {}),
                     ...(typeof inputs["period_label"] === "string" ? { periodLabel: inputs["period_label"] as string } : {}),
                   },
-                  { db, provider },
+                  { db, provider, runId },
                 );
                 artifact = result.narrative;
-                db.run(`UPDATE workflow_runs SET artifact = ?, status = 'succeeded', updated_at = ? WHERE run_id = ?`, [
-                  artifact,
-                  new Date().toISOString(),
-                  runId,
-                ]);
               } else if (name === "executive_research") {
                 const { runExecutiveResearch } = await import("./features/workflows/executive-research.ts");
                 const result = await runExecutiveResearch(
                   {
                     ...(typeof inputs["note"] === "string" ? { note: inputs["note"] as string } : {}),
                   },
-                  { db, provider },
+                  { db, provider, runId },
                 );
                 artifact = result.narrative;
-                db.run(`UPDATE workflow_runs SET artifact = ?, status = 'succeeded', updated_at = ? WHERE run_id = ?`, [
-                  artifact,
-                  new Date().toISOString(),
-                  runId,
-                ]);
               } else if (name === "morning_brief") {
                 const { runMorningBrief } = await import("./features/briefings/morning-brief.ts");
                 const result = await runMorningBrief(
@@ -1953,22 +1936,27 @@ export function createApp(
                     ...(typeof inputs["forceFull"] === "boolean" ? { forceFull: inputs["forceFull"] as boolean } : {}),
                     ...(typeof inputs["force_full"] === "boolean" ? { forceFull: inputs["force_full"] as boolean } : {}),
                   },
-                  { db, provider },
+                  { db, provider, runId },
                 );
                 artifact = result.narrative;
-                db.run(`UPDATE workflow_runs SET artifact = ?, status = 'succeeded', updated_at = ? WHERE run_id = ?`, [
-                  artifact,
-                  new Date().toISOString(),
-                  runId,
-                ]);
               } else {
+                createRun(db, runId, name, title, inputs);
                 artifact = `# ${title}\n\n_Unexpected scheduled workflow name._`;
                 completeRun(db, runId, artifact);
               }
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
-              const { failRun } = await import("./features/workflows/workflows.ts");
-              failRun(db, runId, message);
+              // Workflow impls now own persistence via runId passthrough; if they
+              // threw before inserting, create a failed run so the outer id is not orphaned.
+              const existing = getRun(db, runId);
+              if (!existing) {
+                createRun(db, runId, name, title, inputs);
+                const { failRun } = await import("./features/workflows/workflows.ts");
+                failRun(db, runId, message);
+              } else {
+                const { failRun } = await import("./features/workflows/workflows.ts");
+                failRun(db, runId, message);
+              }
               const sseHeaders: Record<string, string> = {
                 "content-type": "text/event-stream",
                 "cache-control": "no-cache",
@@ -1983,6 +1971,7 @@ export function createApp(
               return new Response(sseBody, { status: 200, headers: sseHeaders });
             }
           } else {
+            createRun(db, runId, name, title, inputs);
             artifact = `# ${title}\n\n_This run was stubbed — full workflow execution is not yet wired in Durbar._\n\nInputs:\n\`\`\`json\n${JSON.stringify(inputs, null, 2)}\n\`\`\``;
             completeRun(db, runId, artifact);
           }
@@ -3507,13 +3496,16 @@ if (import.meta.main) {
   const { seedDefaultDepartments: seedDepts } =
     await import("./features/departments/departments.ts");
   seedDepts(db);
-  const briefTime = settings.morningBriefTime || DEFAULT_MORNING_TIME;
-  const eodTime = settings.eodDigestTime || "18:00";
-  const reflectionTime = settings.reflectionTime || "07:30";
+  const briefTime = settings.morningBriefTime;
+  const eodTime = settings.eodDigestTime;
+  const reflectionTime = settings.reflectionTime;
   seedDaily(db, PRINCIPAL_BRIEF_MORNING, briefTime);
   seedDaily(db, "principal_brief_eod", eodTime);
   seedDaily(db, "executive_reflection", reflectionTime);
-  seedDaily(db, "watchlist_research_scan", briefTime);
+  // watchlist_research_scan is daily at 08:00 (DEFAULT_MORNING_TIME) — same
+  // constant used in scheduler chaining. Not tied to briefTime so an env
+  // override of PRINCIPAL_BRIEF_MORNING_TIME does not shift research.
+  seedDaily(db, "watchlist_research_scan", DEFAULT_MORNING_TIME);
   const scheduler = startScheduler({
     db,
     provider,

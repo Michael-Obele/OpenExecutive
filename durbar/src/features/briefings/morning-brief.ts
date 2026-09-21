@@ -42,6 +42,7 @@ export interface MorningBriefDeps {
   readonly provider: Provider;
   /** Injectable clock — the watermark logic is untestable against Date.now(). */
   readonly now?: () => Date;
+  readonly runId?: string;
 }
 
 export interface AtRiskGoal {
@@ -224,7 +225,7 @@ export async function runMorningBrief(
         { role: 'user', content: renderContext(context, period) },
       ]);
 
-  const runId = randomUUID();
+  const runId = deps.runId ?? randomUUID();
   const timestamp = now.toISOString();
 
   const persist = db.transaction(() => {

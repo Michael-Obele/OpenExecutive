@@ -21,7 +21,7 @@
  * the morning brief, different quiet line.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Db } from "../../db.ts";
 import type { Provider } from "../../providers.ts";
 
@@ -39,6 +39,7 @@ export interface EndOfDayDigestDeps {
   readonly db: Db;
   readonly provider: Provider;
   readonly now?: () => Date;
+  readonly runId?: string;
 }
 
 export interface AtRiskGoal {
@@ -88,7 +89,7 @@ export function sinceForEod(
 ): string {
   const row = db
     .query<{ generated_at: string }, [string]>(
-      "SELECT generated_at FROM briefing_narrative WHERE scope = ?",
+      "SELECT generated_at FROM briefing_narrative WHERE scope = ? ORDER BY generated_at DESC LIMIT 1",
     )
     .get(kind);
 
@@ -97,6 +98,15 @@ export function sinceForEod(
   return new Date(
     now.getTime() - COLD_START_WINDOW_HOURS * 60 * 60 * 1000,
   ).toISOString();
+}
+
+function eodInputHash(context: EodContext): string {
+  const payload = JSON.stringify({
+    atRiskGoals: context.atRiskGoals.map((g) => `${g.department}:${g.keyResult}:${g.status}`),
+    proposals: context.proposals.map((p) => `${p.headline}:${p.severity}`),
+    activity: context.activity.map((a) => `${a.summary}:${a.eventType}`),
+  });
+  return createHash("sha256").update(payload).digest("hex").slice(0, 16);
 }
 
 function isActionable(source: string): boolean {
@@ -211,7 +221,7 @@ export async function runEndOfDayDigest(
         { role: "user", content: renderEodContext(context, period) },
       ]);
 
-  const runId = randomUUID();
+  const runId = deps.runId ?? randomUUID();
   const timestamp = now.toISOString();
 
   const persist = db.transaction(() => {
@@ -236,7 +246,7 @@ export async function runEndOfDayDigest(
          input_hash = excluded.input_hash,
          narrative_text = excluded.narrative_text,
          generated_at = excluded.generated_at`,
-      [EOD_BRIEF_KIND, String(context.activity.length), narrative, timestamp],
+      [EOD_BRIEF_KIND, eodInputHash(context), narrative, timestamp],
     );
   });
   persist();

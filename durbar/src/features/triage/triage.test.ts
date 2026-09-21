@@ -654,7 +654,7 @@ describe("triage HTTP routes", () => {
     const { createApp } = await import("../../index.ts");
     const db = open();
     const provider = fakeProvider("{}");
-    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
+    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", eodDigestTime: "18:00", reflectionTime: "07:30", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
     const res = await app(new Request("http://localhost/features/triage/prompt"));
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
@@ -669,7 +669,7 @@ describe("triage HTTP routes", () => {
     resetRateLimiter();
     const db = open();
     const provider = fakeProvider(jsonDecision({ headline: "Classified headline" }));
-    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
+    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", eodDigestTime: "18:00", reflectionTime: "07:30", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
     const res = await app(
       new Request("http://localhost/features/triage/classify", {
         method: "POST",
@@ -687,7 +687,7 @@ describe("triage HTTP routes", () => {
     const { createApp } = await import("../../index.ts");
     const db = open();
     const provider = fakeProvider("{}");
-    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
+    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", eodDigestTime: "18:00", reflectionTime: "07:30", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
     const res = await app(
       new Request("http://localhost/features/triage/classify", {
         method: "POST",
@@ -704,7 +704,7 @@ describe("triage HTTP routes", () => {
     resetRateLimiter();
     const db = open();
     const provider = fakeProvider(jsonDecision({ headline: "Evaluated headline" }));
-    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
+    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", eodDigestTime: "18:00", reflectionTime: "07:30", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
     const res = await app(
       new Request("http://localhost/features/triage/evaluate", {
         method: "POST",
@@ -725,7 +725,7 @@ describe("triage HTTP routes", () => {
     resetRateLimiter();
     const db = open();
     const provider = fakeProvider(jsonDecision({ headline: "Alias headline" }));
-    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
+    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", eodDigestTime: "18:00", reflectionTime: "07:30", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
     const res = await app(
       new Request("http://localhost/triage/evaluate", {
         method: "POST",
@@ -743,7 +743,7 @@ describe("triage HTTP routes", () => {
     const { createApp } = await import("../../index.ts");
     const db = open();
     const provider = throwingProvider();
-    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
+    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", eodDigestTime: "18:00", reflectionTime: "07:30", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
     const res = await app(
       new Request("http://localhost/triage/debug", {
         method: "POST",

@@ -12,6 +12,7 @@ import type { ChatMessage, ChatOptions, Provider } from "../../providers.ts";
 import {
   chainDaily,
   EXECUTIVE_REFLECTION,
+  HANDLERS,
   pendingActions,
   PRINCIPAL_BRIEF_EOD,
   PRINCIPAL_BRIEF_MORNING,
@@ -133,8 +134,7 @@ describe("scheduler chaining for scheduled workflows", () => {
     expect(pendingActions(db)[0]?.run_at).toBe("2026-09-21T18:00:00.000Z");
   });
 
-  test("all four kinds are registered in HANDLERS", async () => {
-    const { HANDLERS } = await import("./scheduler.ts");
+  test("all four kinds are registered in HANDLERS", () => {
     expect(Object.keys(HANDLERS)).toContain(PRINCIPAL_BRIEF_MORNING);
     expect(Object.keys(HANDLERS)).toContain(PRINCIPAL_BRIEF_EOD);
     expect(Object.keys(HANDLERS)).toContain(EXECUTIVE_REFLECTION);

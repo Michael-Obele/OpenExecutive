@@ -20,9 +20,6 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "../../db.ts";
 import type { Provider } from "../../providers.ts";
 import { convene } from "../council/council.ts";
-import { getCompanyProfile } from "../company/company.ts";
-import { listInitiatives } from "../memories/memories.ts";
-import { listWatchlist } from "../watchlist/watchlist.ts";
 
 export const RESEARCH_KIND = "executive_research";
 
@@ -34,6 +31,7 @@ export interface ExecutiveResearchDeps {
   readonly db: Db;
   readonly provider: Provider;
   readonly now?: () => Date;
+  readonly runId?: string;
 }
 
 export interface ResearchFinding {
@@ -53,39 +51,74 @@ export interface ExecutiveResearchResult {
 export function renderResearchContext(
   db: Db,
   note?: string,
+  now: Date = new Date(),
 ): string {
   const parts: string[] = [];
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = now.toISOString().slice(0, 10);
   parts.push(`TODAY'S DATE: ${today} (UTC). Scanning for recent developments.\n`);
 
   if (note) parts.push(`USER NOTE: ${note}\n`);
 
-  const profile = getCompanyProfile(db);
-  if (profile && profile.name) {
-    parts.push(`COMPANY: ${profile.name} — ${profile.industry} (${profile.stage})`);
-    if (profile.mission) parts.push(`Mission: ${profile.mission}`);
-    if (profile.competitive_landscape.primary_competitors.length > 0) {
-      parts.push(`Competitors: ${profile.competitive_landscape.primary_competitors.join(", ")}`);
+  // Company profile — read directly via db to avoid cross-feature imports
+  // (AGENTS.md: features talk to DB via db.ts). Minimal inline parsing.
+  let profileName = "";
+  let profileIndustry = "";
+  let profileStage = "";
+  let profileMission = "";
+  let profileCompetitors: string[] = [];
+  try {
+    const row = db.query<{ data: string }, []>("SELECT data FROM company_profile WHERE id = 1").get();
+    if (row?.data) {
+      const parsed = JSON.parse(row.data) as Record<string, unknown>;
+      profileName = typeof parsed["name"] === "string" ? parsed["name"] : "";
+      profileIndustry = typeof parsed["industry"] === "string" ? parsed["industry"] : "";
+      profileStage = typeof parsed["stage"] === "string" ? parsed["stage"] : "";
+      profileMission = typeof parsed["mission"] === "string" ? parsed["mission"] : "";
+      const cl = parsed["competitive_landscape"] as Record<string, unknown> | undefined;
+      if (cl && Array.isArray(cl["primary_competitors"])) {
+        profileCompetitors = (cl["primary_competitors"] as unknown[]).filter((x): x is string => typeof x === "string");
+      }
+    }
+  } catch {
+    // ignore parse errors — profile is optional
+  }
+  if (profileName) {
+    parts.push(`COMPANY: ${profileName} — ${profileIndustry} (${profileStage})`);
+    if (profileMission) parts.push(`Mission: ${profileMission}`);
+    if (profileCompetitors.length > 0) {
+      parts.push(`Competitors: ${profileCompetitors.join(", ")}`);
     }
     parts.push("");
   }
 
-  const initiatives = listInitiatives(db).filter(
-    (item) => item.status !== "completed" && item.status !== "done",
-  );
-  if (initiatives.length > 0) {
+  // Initiatives — direct db query to avoid cross-feature import
+  let activeInitiatives: Array<{ title: string; status: string; summary: string }> = [];
+  try {
+    const rows = db.query<{ title: string; status: string; summary: string }, []>("SELECT title, status, summary FROM initiatives ORDER BY updated_at DESC").all();
+    activeInitiatives = rows.filter((r) => r.status !== "completed" && r.status !== "done");
+  } catch {
+    // ignore — initiatives table may not exist on old DBs
+  }
+  if (activeInitiatives.length > 0) {
     parts.push("ACTIVE INITIATIVES:");
-    for (const item of initiatives.slice(0, 10)) {
+    for (const item of activeInitiatives.slice(0, 10)) {
       parts.push(`- ${item.title} (${item.status})${item.summary ? `: ${item.summary.slice(0, 120)}` : ""}`);
     }
     parts.push("");
   }
 
-  const watchlist = listWatchlist(db, { enabledOnly: true });
-  if (watchlist.length > 0) {
+  // Watchlist — direct db query to avoid cross-feature import
+  let watchlistItems: Array<{ slug: string; signal_type: string; target: string }> = [];
+  try {
+    const rows = db.query<{ slug: string; signal_type: string; target: string }, []>("SELECT slug, signal_type, target FROM watchlist WHERE enabled = 1 ORDER BY id").all();
+    watchlistItems = rows;
+  } catch {
+    // ignore — watchlist table may not exist on old DBs
+  }
+  if (watchlistItems.length > 0) {
     parts.push("ALREADY ON THE WATCHLIST:");
-    for (const item of watchlist.slice(0, 20)) {
+    for (const item of watchlistItems.slice(0, 20)) {
       parts.push(`- ${item.slug} [${item.signal_type}] target=${item.target}`);
     }
     parts.push("");
@@ -115,8 +148,11 @@ export function renderResearchContext(
       parts.push(...interestLines);
       parts.push("");
     }
-  } catch {
-    // departments table may not have watched_entities_json on old DBs
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("no such column") && !message.includes("no such table")) {
+      throw error;
+    }
   }
 
   parts.push(
@@ -173,7 +209,7 @@ export async function runExecutiveResearch(
   const period = now.toISOString().slice(0, 10);
 
   // Step 1: gather_context
-  const researchContext = renderResearchContext(db, input.note);
+  const researchContext = renderResearchContext(db, input.note, now);
 
   // Step 2: research_specialists — fan out via the council.
   // The research question is the context itself: each specialist reads the
@@ -251,7 +287,7 @@ export async function runExecutiveResearch(
 
   const narrative = lines.join("\n");
 
-  const runId = randomUUID();
+  const runId = deps.runId ?? randomUUID();
   const timestamp = now.toISOString();
 
   db.run(

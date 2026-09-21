@@ -380,7 +380,7 @@ export const HANDLERS: Readonly<Record<string, ActionHandler>> = {
       deps.db,
       action.kind,
       deps.now?.() ?? new Date(),
-      DEFAULT_REFLECTION_TIME,
+      deps.reflectionTime ?? DEFAULT_REFLECTION_TIME,
     );
 
     // Reflection always produces an artifact — never suppressed.
@@ -397,7 +397,9 @@ export const HANDLERS: Readonly<Record<string, ActionHandler>> = {
     // Research is periodic, not daily — chain at the same interval.
     // For Durbar, treat it as daily chaining (the interval is not yet
     // configurable; the scheduler's daily chain is the simplest correct
-    // recurrence for now).
+    // recurrence for now). Uses DEFAULT_MORNING_TIME (08:00) consistently
+    // with seeding; if a researchTime config is added, thread it through
+    // SchedulerDeps and replace this default.
     chainDaily(
       deps.db,
       action.kind,

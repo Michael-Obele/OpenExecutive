@@ -23,6 +23,8 @@ function fakeSettings(): Settings {
     publicServerUrl: "",
     allowedOrigins: [],
     morningBriefTime: "08:00",
+    eodDigestTime: "18:00",
+    reflectionTime: "07:30",
     scheduledAdminToken: "",
     provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} },
   };

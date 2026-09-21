@@ -8,7 +8,7 @@ function fakeProvider(): Provider {
   return { name: "fake", defaultModel: "fake-model", async chat() { return "ok"; } };
 }
 function fakeSettings(): Settings {
-  return { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } };
+  return { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", eodDigestTime: "18:00", reflectionTime: "07:30", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } };
 }
 function appWith(db: ReturnType<typeof openDb>) {
   return createApp({ settings: fakeSettings(), db, provider: fakeProvider() });

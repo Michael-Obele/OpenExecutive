@@ -32,6 +32,7 @@ export interface ExecutiveReflectionDeps {
   readonly db: Db;
   readonly provider: Provider;
   readonly now?: () => Date;
+  readonly runId?: string;
 }
 
 export interface AtRiskGoal {
@@ -130,9 +131,13 @@ export function gatherReflectionContext(db: Db): ReflectionContext {
       role: r.role,
       awaitingCount: r.cnt,
     }));
-  } catch {
-    // scheduled_actions may not have assigned_to_person_id on old DBs — ignore.
-    awaitingPeople = [];
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("no such column") || message.includes("no such table")) {
+      awaitingPeople = [];
+    } else {
+      throw error;
+    }
   }
 
   const activity = db
@@ -255,7 +260,7 @@ export async function runExecutiveReflection(
     { role: "user", content: userContent },
   ]);
 
-  const runId = randomUUID();
+  const runId = deps.runId ?? randomUUID();
   const timestamp = now.toISOString();
 
   db.run(
