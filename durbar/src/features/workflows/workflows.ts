@@ -207,8 +207,19 @@ const BUILTINS: readonly WorkflowMeta[] = [
     description: "End-of-day summary for the principal.",
     section: "Operating Cadence",
     estimated_minutes: 2,
-    input_schema: { type: "object", properties: {} },
-    steps: [{ id: "digest", title: "Digest", description: "" }],
+    input_schema: {
+      type: "object",
+      properties: {
+        periodLabel: { type: "string" },
+        period_label: { type: "string" },
+        forceFull: { type: "boolean" },
+        force_full: { type: "boolean" },
+      },
+    },
+    steps: [
+      { id: "load_context", title: "Gather today's actions and pending state", description: "Pull today's activity, pending proposals, and at-risk goals." },
+      { id: "synthesize", title: "Synthesize the digest", description: "Render a ≤200-word EoD digest in the Executive's voice." },
+    ],
     is_custom: false,
   },
   {
@@ -237,8 +248,18 @@ const BUILTINS: readonly WorkflowMeta[] = [
     description: "Self-reflection on org coordination.",
     section: "Operating Cadence",
     estimated_minutes: 3,
-    input_schema: { type: "object", properties: {} },
-    steps: [{ id: "reflect", title: "Reflect", description: "" }],
+    input_schema: {
+      type: "object",
+      properties: {
+        periodLabel: { type: "string" },
+        period_label: { type: "string" },
+      },
+    },
+    steps: [
+      { id: "gather_signals", title: "Gather org signals", description: "Pull today's state, activity, and open alerts." },
+      { id: "decide", title: "Decide per signal", description: "Walk the signals and pick: act now, notify, raise in brief, or ignore." },
+      { id: "emit_artifact", title: "Emit summary", description: "Render a short Markdown summary for the audit trail." },
+    ],
     is_custom: false,
   },
   {
@@ -247,8 +268,19 @@ const BUILTINS: readonly WorkflowMeta[] = [
     description: "Research synthesis across specialists.",
     section: "Operating Cadence",
     estimated_minutes: 6,
-    input_schema: { type: "object", properties: {} },
-    steps: [{ id: "research", title: "Research", description: "" }],
+    input_schema: {
+      type: "object",
+      properties: {
+        note: { type: "string" },
+      },
+    },
+    steps: [
+      { id: "gather_context", title: "Gather company context", description: "Load company profile, initiatives, and watchlist." },
+      { id: "research_specialists", title: "Fan out to specialists", description: "Each specialist researches their domain in parallel." },
+      { id: "dedup", title: "Dedup findings", description: "Collapse near-identical findings across specialists." },
+      { id: "executive_synthesis", title: "Executive routes findings", description: "Executive reviews findings and fires the right tool per finding." },
+      { id: "emit_artifact", title: "Emit summary", description: "Short Markdown — what was researched, what was routed, what was ignored." },
+    ],
     is_custom: false,
   },
   {

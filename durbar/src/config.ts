@@ -42,6 +42,8 @@ export interface Settings {
    * PRINCIPAL_BRIEF_MORNING_TIME and defaults to 08:00.
    */
   readonly morningBriefTime: string;
+  readonly eodDigestTime?: string;
+  readonly reflectionTime?: string;
   readonly provider: ProviderConfig;
   /**
    * Token required to cancel scheduled actions from non-loopback hosts.
@@ -130,6 +132,8 @@ export function loadSettings(): Settings {
       .map((origin) => origin.trim())
       .filter((origin) => origin !== ''),
     morningBriefTime: optional('PRINCIPAL_BRIEF_MORNING_TIME', '08:00'),
+    eodDigestTime: optional('PRINCIPAL_BRIEF_EOD_TIME', '18:00'),
+    reflectionTime: optional('PRINCIPAL_REFLECTION_TIME', '07:30'),
     provider: providerFrom(raw),
     scheduledAdminToken: optional('SCHEDULED_ADMIN_TOKEN', ''),
   };

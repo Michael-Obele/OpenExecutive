@@ -30,6 +30,9 @@
 import type { Db } from '../../db.ts';
 import type { Provider } from '../../providers.ts';
 import { runMorningBrief } from '../briefings/morning-brief.ts';
+import { runEndOfDayDigest } from '../briefings/end-of-day-digest.ts';
+import { runExecutiveReflection } from '../workflows/executive-reflection.ts';
+import { runExecutiveResearch } from '../workflows/executive-research.ts';
 
 export interface ScheduledAction {
   readonly id: number;
@@ -284,13 +287,20 @@ export interface SchedulerDeps {
   readonly provider: Provider;
   readonly morningTime?: string;
   readonly eodTime?: string;
+  readonly reflectionTime?: string;
   readonly maxAttempts?: number;
   readonly batchSize?: number;
   readonly now?: () => Date;
 }
 
 export const PRINCIPAL_BRIEF_MORNING = 'principal_brief_morning';
+export const PRINCIPAL_BRIEF_EOD = 'principal_brief_eod';
+export const EXECUTIVE_REFLECTION = 'executive_reflection';
+export const WATCHLIST_RESEARCH = 'watchlist_research_scan';
+
 export const DEFAULT_MORNING_TIME = '08:00';
+export const DEFAULT_EOD_TIME = '18:00';
+export const DEFAULT_REFLECTION_TIME = '07:30';
 
 export type ActionHandler = (
   action: ScheduledAction,
@@ -310,7 +320,7 @@ function hasPrincipal(db: Db): boolean {
 /**
  * Handlers, keyed by `kind`.
  *
- * The brief handler defers rather than failing when there is no principal: a
+ * The brief handlers defer rather than failing when there is no principal: a
  * fresh install has no roster yet, and that is a "not yet", not an error. The
  * deferral is an hour rather than a day so the first brief after onboarding
  * arrives promptly instead of waiting for tomorrow.
@@ -337,6 +347,66 @@ export const HANDLERS: Readonly<Record<string, ActionHandler>> = {
     );
 
     return { status: result.suppressed ? 'suppressed' : 'sent' };
+  },
+
+  [PRINCIPAL_BRIEF_EOD]: async (action, deps) => {
+    if (!hasPrincipal(deps.db)) {
+      reschedule(deps.db, action.id, new Date(Date.now() + 60 * 60 * 1000));
+      return { status: 'deferred' };
+    }
+
+    const result = await runEndOfDayDigest(
+      {},
+      { db: deps.db, provider: deps.provider, now: deps.now ?? (() => new Date()) },
+    );
+
+    chainDaily(
+      deps.db,
+      action.kind,
+      deps.now?.() ?? new Date(),
+      deps.eodTime ?? DEFAULT_EOD_TIME,
+    );
+
+    return { status: result.suppressed ? 'suppressed' : 'sent' };
+  },
+
+  [EXECUTIVE_REFLECTION]: async (action, deps) => {
+    const result = await runExecutiveReflection(
+      {},
+      { db: deps.db, provider: deps.provider, now: deps.now ?? (() => new Date()) },
+    );
+
+    chainDaily(
+      deps.db,
+      action.kind,
+      deps.now?.() ?? new Date(),
+      DEFAULT_REFLECTION_TIME,
+    );
+
+    // Reflection always produces an artifact — never suppressed.
+    void result;
+    return { status: 'sent' };
+  },
+
+  [WATCHLIST_RESEARCH]: async (action, deps) => {
+    const result = await runExecutiveResearch(
+      {},
+      { db: deps.db, provider: deps.provider, now: deps.now ?? (() => new Date()) },
+    );
+
+    // Research is periodic, not daily — chain at the same interval.
+    // For Durbar, treat it as daily chaining (the interval is not yet
+    // configurable; the scheduler's daily chain is the simplest correct
+    // recurrence for now).
+    chainDaily(
+      deps.db,
+      action.kind,
+      deps.now?.() ?? new Date(),
+      DEFAULT_MORNING_TIME,
+    );
+
+    void result;
+    return { status: 'sent' };
   },
 };
 
