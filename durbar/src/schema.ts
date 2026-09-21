@@ -393,4 +393,21 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE workflow_runs ADD COLUMN archived_at TEXT`,
     ],
   },
+
+  {
+    id: 7,
+    name: "documents",
+    statements: [
+      // from: api/routes/documents.py + knowledge/loader.py
+      // Upstream stores files on disk under company/docs/ and indexes into
+      // ChromaDB. Durbar stores them in SQLite so the whole state is one file.
+      `CREATE TABLE IF NOT EXISTS company_documents (
+        filename TEXT PRIMARY KEY,
+        domain TEXT NOT NULL,
+        content TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+    ],
+  },
 ];

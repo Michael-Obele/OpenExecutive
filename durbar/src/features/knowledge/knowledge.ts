@@ -41,6 +41,36 @@ export interface SearchOptions {
   readonly limit?: number;
 }
 
+export const UPLOAD_DOMAINS = new Set([
+  "strategy",
+  "finance",
+  "hr",
+  "legal",
+  "operations",
+  "marketing",
+  "board",
+  "product",
+  "general",
+]);
+
+export const DOMAIN_ALIASES: Record<string, readonly string[]> = {
+  cso: ["strategy"],
+  cfo: ["finance"],
+  chro: ["hr"],
+  gc: ["legal"],
+  coo: ["operations"],
+  cmo: ["marketing"],
+  cpo: ["product", "strategy"],
+  board_comms: ["board", "finance"],
+  talent: ["hr", "strategy"],
+};
+
+export function withGeneral(domains: readonly string[] | null | undefined): readonly string[] | null | undefined {
+  if (!domains || domains.length === 0) return domains;
+  if (domains.includes("general")) return domains;
+  return [...domains, "general"];
+}
+
 const DEFAULT_LIMIT = 4;
 const MAX_TERMS = 24;
 

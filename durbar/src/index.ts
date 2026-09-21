@@ -97,6 +97,27 @@ import {
   seedDaily,
   startScheduler,
 } from "./features/scheduler/scheduler.ts";
+import {
+  buildActivity,
+  buildDailyActivity,
+  buildToday,
+  resolveCallerPersonId,
+} from "./features/briefing/briefing.ts";
+import { buildSuggestedPrompts, runChatTurn } from "./features/chat/chat.ts";
+import {
+  deleteDocument,
+  getDocument,
+  listDocuments,
+  upsertDocument,
+  validateDomain,
+  validateFilename,
+} from "./features/documents/documents.ts";
+import {
+  DOMAIN_ALIASES,
+  searchKnowledge,
+  UPLOAD_DOMAINS,
+  withGeneral,
+} from "./features/knowledge/knowledge.ts";
 
 export interface AppContext {
   readonly settings: Settings;
@@ -792,6 +813,417 @@ export function createApp(
           morningTime: settings.morningBriefTime,
         });
         return json({ ran }, 200, cors);
+      }
+
+      // ── briefing — today ────────────────────────────────────────────
+      if (url.pathname === "/today" && request.method === "GET") {
+        const callerEmail = request.headers.get("x-caller-email") ?? null;
+        const callerId = resolveCallerPersonId(db, callerEmail);
+        const today = buildToday(db, callerId);
+        return json(today, 200, cors);
+      }
+
+      if (url.pathname === "/today/activity" && request.method === "GET") {
+        const raw = url.searchParams.get("limit");
+        const limit = raw ? Number(raw) : 20;
+        if (!Number.isFinite(limit) || limit < 1 || limit > 100) {
+          return json({ error: "limit must be in [1, 100]" }, 400, cors);
+        }
+        return json(buildActivity(db, limit), 200, cors);
+      }
+
+      if (url.pathname === "/today/activity/daily" && request.method === "GET") {
+        const raw = url.searchParams.get("days");
+        const days = raw ? Number(raw) : 90;
+        if (!Number.isFinite(days) || days < 1 || days > 365) {
+          return json({ error: "days must be in [1, 365]" }, 400, cors);
+        }
+        return json(buildDailyActivity(db, days), 200, cors);
+      }
+
+      if (url.pathname === "/morning-brief" && request.method === "GET") {
+        const callerEmail = request.headers.get("x-caller-email") ?? null;
+        const callerId = resolveCallerPersonId(db, callerEmail);
+        const today = buildToday(db, callerId);
+        return json(today, 200, {
+          ...cors,
+          deprecation: "true",
+          sunset: "Sat, 22 Aug 2026 00:00:00 GMT",
+          link: '</today>; rel="successor-version"',
+        });
+      }
+
+      // ── chat ────────────────────────────────────────────────────────
+      if (url.pathname === "/chat" && request.method === "POST") {
+        const body: unknown = await request.json().catch(() => null);
+        const msg = (body as Record<string, unknown> | null)?.["message"];
+        if (typeof msg !== "string" || msg.trim() === "") {
+          return json({ error: "message is required" }, 400, cors);
+        }
+        const sessionId = (body as Record<string, unknown>)?.["session_id"];
+        const sid = typeof sessionId === "string" ? sessionId : null;
+        const { sessionId: resolvedId, stream } = await runChatTurn(
+          { message: msg, sessionId: sid },
+          { db, provider },
+        );
+        // Stream SSE without buffering.
+        const headers: Record<string, string> = {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          "x-accel-buffering": "no",
+          ...cors,
+        };
+        // Expose session id via header for clients that need it before stream ends.
+        headers["x-session-id"] = resolvedId;
+        const sseStream = stream.pipeThrough(
+          new TextEncoderStream() as unknown as TransformStream<string, Uint8Array>,
+        );
+        return new Response(sseStream as unknown as ReadableStream, { status: 200, headers });
+      }
+
+      if (url.pathname === "/chat/upload" && request.method === "POST") {
+        const formData = await request.formData().catch(() => null);
+        if (!formData) return json({ error: "Invalid multipart body" }, 400, cors);
+        const message = formData.get("message");
+        if (typeof message !== "string" || message.trim() === "") {
+          return json({ error: "message is required" }, 400, cors);
+        }
+        const sessionIdRaw = formData.get("session_id");
+        const sid = typeof sessionIdRaw === "string" ? sessionIdRaw : null;
+        const files = formData.getAll("files") as unknown as File[];
+        // Also accept single "file" field.
+        const singleFile = formData.get("file") as unknown as File | null;
+        const allFiles: File[] = [];
+        for (const f of files) if (f instanceof File) allFiles.push(f);
+        if (singleFile instanceof File) allFiles.push(singleFile);
+        // If no files field but formData has file entries via File objects, collect all File values.
+        if (allFiles.length === 0) {
+          for (const [, value] of formData.entries()) {
+            if (value instanceof File) allFiles.push(value);
+          }
+        }
+        if (allFiles.length === 0) return json({ error: "No files uploaded" }, 400, cors);
+        if (allFiles.length > 5) return json({ error: "Too many files: limit 5 per turn" }, 400, cors);
+        for (const f of allFiles) {
+          if (f.size > 20 * 1024 * 1024) {
+            return json({ error: `${f.name}: file too large — ${Math.floor(f.size / (1024 * 1024))} MB (limit 20 MB)` }, 413, cors);
+          }
+        }
+        // Extract text from text-like files and inline.
+        const textParts: string[] = [];
+        for (const f of allFiles) {
+          const ext = f.name.slice(f.name.lastIndexOf(".")).toLowerCase();
+          if ([".md", ".txt", ".csv"].includes(ext)) {
+            const text = await f.text().catch(() => "");
+            if (text) textParts.push(`File: ${f.name}\n${text.slice(0, 8000)}`);
+          } else {
+            textParts.push(`File: ${f.name} (${f.size} bytes, type ${f.type || "unknown"})`);
+          }
+        }
+        const attachmentText = textParts.length > 0 ? textParts.join("\n\n") : null;
+        const { sessionId: resolvedId, stream } = await runChatTurn(
+          { message, sessionId: sid, ...(attachmentText ? { attachmentText } : {}) },
+          { db, provider },
+        );
+        const headers: Record<string, string> = {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          "x-accel-buffering": "no",
+          ...cors,
+        };
+        headers["x-session-id"] = resolvedId;
+        const sseStream = stream.pipeThrough(
+          new TextEncoderStream() as unknown as TransformStream<string, Uint8Array>,
+        );
+        return new Response(sseStream as unknown as ReadableStream, { status: 200, headers });
+      }
+
+      if (url.pathname === "/chat/suggested-prompts" && request.method === "GET") {
+        const result = buildSuggestedPrompts(db, provider);
+        return json(result, 200, cors);
+      }
+
+      // ── knowledge ───────────────────────────────────────────────────
+      if (url.pathname === "/knowledge/builtin" && request.method === "GET") {
+        // List builtin files from the corpus on disk.
+        const { readdirSync, statSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        const root = join(import.meta.dir, "..", "knowledge", "builtin");
+        const files: Array<{ domain: string; filename: string; size_bytes: number }> = [];
+        const walk = (dir: string, domain: string): void => {
+          try {
+            for (const entry of readdirSync(dir)) {
+              const full = join(dir, entry);
+              const st = statSync(full);
+              if (st.isDirectory()) {
+                // Top-level dirs are domains; nested failures/skills handled via domain param.
+                walk(full, entry);
+              } else if (entry.endsWith(".md")) {
+                files.push({ domain, filename: entry, size_bytes: st.size });
+              }
+            }
+          } catch {
+            // ignore missing dir
+          }
+        };
+        // Only top-level domain dirs.
+        try {
+          for (const entry of readdirSync(root)) {
+            const full = join(root, entry);
+            try {
+              if (statSync(full).isDirectory() && !entry.startsWith(".")) {
+                walk(full, entry);
+              }
+            } catch {
+              // ignore
+            }
+          }
+        } catch {
+          // no corpus
+        }
+        return json({ files }, 200, cors);
+      }
+
+      if (url.pathname === "/knowledge/search" && request.method === "POST") {
+        const body: unknown = await request.json().catch(() => null);
+        const b = (body ?? {}) as Record<string, unknown>;
+        const query = b["query"];
+        if (typeof query !== "string" || query.trim() === "") {
+          return json({ error: "query must be non-empty" }, 400, cors);
+        }
+        const domainFilter = b["domain_filter"] as string[] | undefined;
+        const specialist = b["specialist"] as string | undefined;
+        const include = b["include"] as string[] | undefined;
+        const nBuiltin = typeof b["n_builtin"] === "number" ? b["n_builtin"] : 5;
+        const nCompany = typeof b["n_company"] === "number" ? b["n_company"] : 3;
+        const nFailures = typeof b["n_failures"] === "number" ? b["n_failures"] : 3;
+        void (typeof b["n_external"] === "number" ? b["n_external"] : 5);
+
+        const validSources = new Set(["builtin", "company", "failures", "external"]);
+        if (include) {
+          for (const inc of include) {
+            if (!validSources.has(inc)) {
+              return json({ error: `Invalid include values: ${inc}` }, 400, cors);
+            }
+          }
+        }
+        if (domainFilter) {
+          for (const d of domainFilter) {
+            if (!UPLOAD_DOMAINS.has(d)) {
+              return json({ error: `Unknown domain: ${d}` }, 400, cors);
+            }
+          }
+        }
+        if (specialist && !(specialist in DOMAIN_ALIASES)) {
+          return json({ error: `Unknown specialist: ${specialist}` }, 400, cors);
+        }
+
+        let effectiveDomains: readonly string[] | null | undefined = domainFilter ?? null;
+        if (!effectiveDomains && specialist) {
+          effectiveDomains = DOMAIN_ALIASES[specialist] ?? null;
+        }
+
+        const specialistsSeeing = effectiveDomains
+          ? Object.entries(DOMAIN_ALIASES)
+              .filter(([, doms]) => doms.some((d) => (effectiveDomains as readonly string[]).includes(d)))
+              .map(([name]) => name)
+              .sort()
+          : Object.keys(DOMAIN_ALIASES).sort();
+
+        const wantBuiltin = !include || include.includes("builtin");
+        const wantCompany = !include || include.includes("company");
+        const wantFailures = !include || include.includes("failures");
+        const wantExternal = !include || include.includes("external");
+
+        const toHit = (hits: ReturnType<typeof searchKnowledge>): Array<Record<string, unknown>> =>
+          hits.map((h) => ({
+            filename: h.path.split("/").pop() ?? h.path,
+            domain: h.domain,
+            source: h.path,
+            chunk_index: 0,
+            distance: h.score,
+            text: h.body.slice(0, 800),
+          }));
+
+        let builtin: ReturnType<typeof toHit> = [];
+        let company: ReturnType<typeof toHit> = [];
+        let failures: ReturnType<typeof toHit> = [];
+        let external: ReturnType<typeof toHit> = [];
+
+        if (wantBuiltin) {
+          const hits = searchKnowledge(db, query as string, {
+            ...(effectiveDomains ? { domain: effectiveDomains[0] } : {}),
+            limit: Math.max(1, Math.min(nBuiltin, 25)),
+          });
+          builtin = toHit(hits);
+        }
+        if (wantCompany) {
+          const companyDomains = withGeneral(effectiveDomains as string[] | null) as string[] | null;
+          const hits = searchKnowledge(db, query as string, {
+            ...(companyDomains ? { domain: companyDomains[0] } : {}),
+            limit: Math.max(1, Math.min(nCompany, 25)),
+          });
+          company = toHit(hits);
+        }
+        if (wantFailures) {
+          const hits = searchKnowledge(db, query as string, {
+            kind: "failure",
+            limit: Math.max(1, Math.min(nFailures, 25)),
+          });
+          failures = toHit(hits);
+        }
+        if (wantExternal) {
+          // External sources not yet indexed in Durbar — return empty.
+          external = [];
+          // If external was requested but builtin wasn't, still need to handle partitioning.
+          // For now external is always empty.
+          if (!wantBuiltin && wantExternal) {
+            // No-op: external stays empty.
+          }
+        }
+
+        return json(
+          {
+            query,
+            effective_domains: effectiveDomains,
+            specialists_that_would_see_this: specialistsSeeing,
+            builtin,
+            company,
+            failures,
+            external,
+          },
+          200,
+          cors,
+        );
+      }
+
+      if (url.pathname === "/knowledge/failures" && request.method === "GET") {
+        const { readdirSync, statSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        const root = join(import.meta.dir, "..", "knowledge", "builtin", "failures");
+        const files: Array<{ domain: string; filename: string; size_bytes: number }> = [];
+        try {
+          for (const entry of readdirSync(root)) {
+            const full = join(root, entry);
+            try {
+              if (statSync(full).isDirectory()) {
+                for (const f of readdirSync(full)) {
+                  if (f.endsWith(".md")) {
+                    const fp = join(full, f);
+                    files.push({ domain: entry, filename: f, size_bytes: statSync(fp).size });
+                  }
+                }
+              }
+            } catch {
+              // ignore
+            }
+          }
+        } catch {
+          // no failures dir
+        }
+        return json({ files }, 200, cors);
+      }
+
+      // GET /knowledge/failures/{domain}/{filename}
+      {
+        const failMatch = url.pathname.match(/^\/knowledge\/failures\/([^/]+)\/([^/]+)$/);
+        if (failMatch && request.method === "GET") {
+          const domain = decodeURIComponent(failMatch[1]!);
+          const filename = decodeURIComponent(failMatch[2]!);
+          if (!UPLOAD_DOMAINS.has(domain) && domain !== "general") {
+            return json({ error: `Unknown domain: ${domain}` }, 400, cors);
+          }
+          if (!filename.endsWith(".md") || filename.includes("..") || filename.includes("/")) {
+            return json({ error: "Invalid filename" }, 400, cors);
+          }
+          const { readFileSync } = await import("node:fs");
+          const { join } = await import("node:path");
+          const filePath = join(import.meta.dir, "..", "knowledge", "builtin", "failures", domain, filename);
+          try {
+            const content = readFileSync(filePath, "utf8");
+            return json({ domain, filename, content }, 200, cors);
+          } catch {
+            return json({ error: "File not found" }, 404, cors);
+          }
+        }
+      }
+
+      if (url.pathname === "/knowledge/external" && request.method === "GET") {
+        return json({ sources: [], total_chunks: 0 }, 200, cors);
+      }
+
+      // ── documents ───────────────────────────────────────────────────
+      if (url.pathname === "/documents" && request.method === "GET") {
+        return json({ documents: listDocuments(db) }, 200, cors);
+      }
+
+      if (url.pathname === "/documents" && request.method === "POST") {
+        const contentType = request.headers.get("content-type") ?? "";
+        let filename = "";
+        let domain = "general";
+        let content = "";
+
+        if (contentType.includes("multipart/form-data")) {
+          const formData = await request.formData().catch(() => null);
+          if (!formData) return json({ error: "Invalid multipart body" }, 400, cors);
+          const file = formData.get("file") as unknown as File | null;
+          const domainRaw = formData.get("domain");
+          if (typeof domainRaw === "string") domain = domainRaw;
+          if (!file || !(file instanceof File)) {
+            return json({ error: "No file provided" }, 400, cors);
+          }
+          filename = file.name;
+          // Validate before reading.
+          const fnErr = validateFilename(filename);
+          if (fnErr) return json({ error: fnErr }, 400, cors);
+          const dErr = validateDomain(domain);
+          if (dErr) return json({ error: dErr }, 400, cors);
+          const buf = await file.arrayBuffer().catch(() => null);
+          if (!buf) return json({ error: "Failed to read file" }, 400, cors);
+          if (buf.byteLength > 50 * 1024 * 1024) {
+            return json({ error: "File too large (max 50MB)" }, 413, cors);
+          }
+          content = new TextDecoder().decode(buf);
+        } else {
+          const body: unknown = await request.json().catch(() => null);
+          const b = (body ?? {}) as Record<string, unknown>;
+          filename = typeof b["filename"] === "string" ? b["filename"] : "";
+          domain = typeof b["domain"] === "string" ? b["domain"] : "general";
+          content = typeof b["content"] === "string" ? b["content"] : "";
+          if (!filename) return json({ error: "filename is required" }, 400, cors);
+          const fnErr = validateFilename(filename);
+          if (fnErr) return json({ error: fnErr }, 400, cors);
+          const dErr = validateDomain(domain);
+          if (dErr) return json({ error: dErr }, 400, cors);
+        }
+
+        const doc = upsertDocument(db, filename, domain, content);
+        return json({ filename: doc.filename, chunks_indexed: 1, domain: doc.domain, status: "indexed" }, 200, cors);
+      }
+
+      {
+        const docMatch = url.pathname.match(/^\/documents\/([^/]+)$/);
+        if (docMatch) {
+          const filename = decodeURIComponent(docMatch[1]!);
+          if (request.method === "GET") {
+            // For GET, allow any filename that is a bare name — but reject dotfiles/paths.
+            if (filename.startsWith(".") || filename.includes("/") || filename.includes("\\")) {
+              return json({ error: "Invalid filename" }, 400, cors);
+            }
+            const doc = getDocument(db, filename);
+            if (!doc) return json({ error: "Document not found" }, 404, cors);
+            const text = doc.content.trim() ? doc.content : "_No extractable text in this document._";
+            return json({ filename: doc.filename, content: text }, 200, cors);
+          }
+          if (request.method === "DELETE") {
+            if (filename.startsWith(".") || filename.includes("/") || filename.includes("\\") || filename !== docMatch[1]) {
+              return json({ error: "Invalid filename" }, 400, cors);
+            }
+            const ok = deleteDocument(db, filename);
+            if (!ok) return json({ error: "Document not found" }, 404, cors);
+            return json({ deleted: filename }, 200, cors);
+          }
+        }
       }
 
       return json({ error: "not found", path: url.pathname }, 404, cors);
