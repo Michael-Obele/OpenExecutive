@@ -410,4 +410,89 @@ export const MIGRATIONS: readonly Migration[] = [
       )`,
     ],
   },
+
+  {
+    id: 8,
+    name: "state_api_review_decisions_workflows_audit",
+    statements: [
+      // ── review queue ─────────────────────────────────────────────────
+      // from: knowledge/review_store.py
+      `CREATE TABLE IF NOT EXISTS review_items (
+        item_id TEXT PRIMARY KEY,
+        content_type TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        priority TEXT NOT NULL DEFAULT 'normal',
+        reviewer_notes TEXT DEFAULT '',
+        reviewed_at TEXT,
+        registered_at TEXT NOT NULL,
+        last_modified_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_review_status ON review_items(status)`,
+      `CREATE INDEX IF NOT EXISTS idx_review_domain ON review_items(domain, status)`,
+      `CREATE TABLE IF NOT EXISTS review_annotations (
+        annotation_id TEXT PRIMARY KEY,
+        item_id TEXT NOT NULL REFERENCES review_items(item_id) ON DELETE CASCADE,
+        domain TEXT NOT NULL,
+        correction TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_annot_domain ON review_annotations(domain, is_active)`,
+
+      // ── decision ledger ──────────────────────────────────────────────
+      // from: memory/decision_ledger.py + memory/episodic.py (decision DDL)
+      `CREATE TABLE IF NOT EXISTS decision_instances (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        decision_class TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        department TEXT NOT NULL DEFAULT '',
+        originating_session_id TEXT,
+        proposed_payload_json TEXT NOT NULL,
+        idempotency_key TEXT,
+        gate_mode TEXT NOT NULL DEFAULT 'propose',
+        approver_person_id INTEGER,
+        confidence REAL,
+        status TEXT NOT NULL DEFAULT 'proposed',
+        resolved_at TEXT,
+        resolver_person_id INTEGER,
+        final_payload_json TEXT,
+        external_event_id TEXT,
+        reversal_reason TEXT,
+        severity TEXT NOT NULL DEFAULT ''
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_di_class_created ON decision_instances(decision_class, created_at DESC)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_di_idem ON decision_instances(idempotency_key) WHERE idempotency_key IS NOT NULL`,
+      `CREATE TABLE IF NOT EXISTS decision_class_state (
+        decision_class TEXT PRIMARY KEY,
+        mode TEXT NOT NULL DEFAULT 'propose',
+        updated_at TEXT NOT NULL,
+        last_eval_json TEXT,
+        breaker_tripped_at TEXT
+      )`,
+
+      // ── dynamic workflows ────────────────────────────────────────────
+      // from: workflows/dynamic_store.py
+      `CREATE TABLE IF NOT EXISTS dynamic_workflows (
+        name TEXT PRIMARY KEY,
+        definition TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+
+      // ── workflow_runs additive columns ────────────────────────────────
+      // from: workflows/persistence.py (Phase 6)
+      `ALTER TABLE workflow_runs ADD COLUMN state_json TEXT`,
+      `ALTER TABLE workflow_runs ADD COLUMN awaiting_person_id INTEGER`,
+      `ALTER TABLE workflow_runs ADD COLUMN awaiting_until TEXT`,
+      `ALTER TABLE workflow_runs ADD COLUMN resolution_json TEXT`,
+
+      // ── audit additive columns ───────────────────────────────────────
+      // from: audit/logger.py
+      `ALTER TABLE audit_log ADD COLUMN full_json TEXT`,
+      `ALTER TABLE audit_log ADD COLUMN department TEXT`,
+    ],
+  },
 ];

@@ -29,6 +29,7 @@ function fakeSettings(): Settings {
     publicServerUrl: "",
     allowedOrigins: [],
     morningBriefTime: "08:00",
+    scheduledAdminToken: "",
     provider: {
       name: "deepseek",
       baseUrl: "https://api.deepseek.com",

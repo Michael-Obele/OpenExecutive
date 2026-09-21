@@ -118,6 +118,64 @@ import {
   UPLOAD_DOMAINS,
   withGeneral,
 } from "./features/knowledge/knowledge.ts";
+import {
+  completeRun,
+  createRun,
+  deleteDynamicDef,
+  deleteRun,
+  deriveTitle,
+  getDynamicDef,
+  getRun,
+  getWorkflow,
+  listDynamicDefs,
+  listRuns,
+  listWorkflows,
+  setDynamicActive,
+  upsertDynamicDef,
+  validateDynamicDef,
+} from "./features/workflows/workflows.ts";
+import {
+  cancelScheduledAction,
+  getScheduledAction,
+  listScheduledActions,
+  timingSafeEqual,
+  VALID_STATUSES,
+} from "./features/scheduled/scheduled.ts";
+import {
+  addAnnotation,
+  bulkApprove,
+  CONTENT_TYPES,
+  countByStatus,
+  deleteAnnotation,
+  getReviewItem,
+  listAnnotations,
+  listReviewItems,
+  PRIORITIES,
+  REVIEW_STATUSES,
+  setReviewPriority,
+  setReviewStatus,
+  toggleAnnotation,
+  updateAnnotation,
+  updateReviewNotes,
+} from "./features/review/review.ts";
+import {
+  aggregateReliability,
+  approveDecision,
+  getDecisionInstance,
+  listInstances,
+  rejectDecision,
+} from "./features/decisions/decisions.ts";
+import {
+  buildSessionGraph,
+  computeCostSummary,
+  computeDegradations,
+  countAudit,
+  EVENT_TYPES,
+  getAuditEvent,
+  isValidSessionId,
+  queryAudit,
+  usageSummary,
+} from "./features/audit/audit.ts";
 
 export interface AppContext {
   readonly settings: Settings;
@@ -1473,6 +1531,499 @@ export function createApp(
             return json({ deleted: filename }, 200, cors);
           }
         }
+      }
+
+      // ── workflows ───────────────────────────────────────────────────
+      // Dynamic routes declared before /workflows/{name} so "custom" is not
+      // captured as a workflow name.
+
+      if (url.pathname === "/workflows" && request.method === "GET") {
+        return json({ workflows: listWorkflows(db) }, 200, cors);
+      }
+
+      if (url.pathname === "/workflows/runs" && request.method === "GET") {
+        const workflow = url.searchParams.get("workflow");
+        const limitRaw = url.searchParams.get("limit");
+        const limit = limitRaw ? Number(limitRaw) : 100;
+        return json({ runs: listRuns(db, workflow, limit) }, 200, cors);
+      }
+
+      {
+        const runMatch = url.pathname.match(/^\/workflows\/runs\/([^/]+)$/);
+        if (runMatch) {
+          const runId = runMatch[1] as string;
+          if (request.method === "GET") {
+            const run = getRun(db, runId);
+            if (!run) return json({ error: `Run ${runId} not found` }, 404, cors);
+            return json(run, 200, cors);
+          }
+          if (request.method === "DELETE") {
+            if (!deleteRun(db, runId)) return json({ error: `Run ${runId} not found` }, 404, cors);
+            return json({ status: "deleted", run_id: runId }, 200, cors);
+          }
+        }
+      }
+
+      if (url.pathname === "/workflows/custom" && request.method === "GET") {
+        return json({ definitions: listDynamicDefs(db, false) }, 200, cors);
+      }
+
+      if (url.pathname === "/workflows/custom" && request.method === "POST") {
+        const body: unknown = await request.json().catch(() => null);
+        if (!body || typeof body !== "object") return json({ error: "Invalid JSON" }, 400, cors);
+        const defn = body as Record<string, unknown> & { name: string };
+        if (!defn.name) return json({ error: "name is required" }, 400, cors);
+        if (getDynamicDef(db, defn.name)) {
+          return json({ error: `A custom workflow named ${JSON.stringify(defn.name)} already exists` }, 409, cors);
+        }
+        const errors = validateDynamicDef(defn as unknown as Parameters<typeof validateDynamicDef>[0]);
+        if (errors.length > 0) return json({ error: errors.join("; "), detail: errors }, 422, cors);
+        const stored = upsertDynamicDef(db, defn as unknown as Parameters<typeof upsertDynamicDef>[1]);
+        return json(stored, 201, cors);
+      }
+
+      {
+        const customMatch = url.pathname.match(/^\/workflows\/custom\/([^/]+)(\/activate)?$/);
+        if (customMatch) {
+          const name = decodeURIComponent(customMatch[1] as string);
+          const isActivate = customMatch[2] === "/activate";
+          if (isActivate && request.method === "POST") {
+            const body: unknown = await request.json().catch(() => ({}));
+            const b = (body ?? {}) as Record<string, unknown>;
+            const isActive = b["is_active"] !== undefined ? Boolean(b["is_active"]) : true;
+            if (!setDynamicActive(db, name, isActive)) {
+              return json({ error: `Custom workflow ${JSON.stringify(name)} not found` }, 404, cors);
+            }
+            const defn = getDynamicDef(db, name);
+            return json(defn, 200, cors);
+          }
+          if (!isActivate && request.method === "GET") {
+            const defn = getDynamicDef(db, name);
+            if (!defn) return json({ error: `Custom workflow ${JSON.stringify(name)} not found` }, 404, cors);
+            return json(defn, 200, cors);
+          }
+          if (!isActivate && request.method === "PUT") {
+            if (!getDynamicDef(db, name)) {
+              return json({ error: `Custom workflow ${JSON.stringify(name)} not found` }, 404, cors);
+            }
+            const body: unknown = await request.json().catch(() => null);
+            if (!body || typeof body !== "object") return json({ error: "Invalid JSON" }, 400, cors);
+            const defn = body as Record<string, unknown> & { name: string };
+            if (defn.name !== name) {
+              return json({ error: "definition name does not match the path name" }, 422, cors);
+            }
+            const errors = validateDynamicDef(defn as unknown as Parameters<typeof validateDynamicDef>[0]);
+            if (errors.length > 0) return json({ error: errors.join("; "), detail: errors }, 422, cors);
+            const stored = upsertDynamicDef(db, defn as unknown as Parameters<typeof upsertDynamicDef>[1]);
+            return json(stored, 200, cors);
+          }
+          if (!isActivate && request.method === "DELETE") {
+            if (!deleteDynamicDef(db, name)) {
+              return json({ error: `Custom workflow ${JSON.stringify(name)} not found` }, 404, cors);
+            }
+            return json({ status: "deleted", name }, 200, cors);
+          }
+        }
+      }
+
+      {
+        const sampleMatch = url.pathname.match(/^\/workflows\/([^/]+)\/sample$/);
+        if (sampleMatch && request.method === "GET") {
+          const name = decodeURIComponent(sampleMatch[1] as string);
+          const wf = getWorkflow(db, name);
+          if (!wf) return json({ error: `Unknown workflow: ${name}` }, 404, cors);
+          // Sample inputs are not yet materialized — return 404 per the Python contract
+          // when no sample is defined (all builtins currently have none in Durbar).
+          return json({ error: `Workflow ${JSON.stringify(name)} does not expose a sample` }, 404, cors);
+        }
+      }
+
+      {
+        const wfMatch = url.pathname.match(/^\/workflows\/([^/]+)$/);
+        if (wfMatch && request.method === "GET") {
+          const name = decodeURIComponent(wfMatch[1] as string);
+          // Avoid capturing "custom" and "runs" which are handled above.
+          if (name === "custom" || name === "runs") {
+            // fall through to 404
+          } else {
+            const wf = getWorkflow(db, name);
+            if (!wf) return json({ error: `Unknown workflow: ${name}` }, 404, cors);
+            return json(wf, 200, cors);
+          }
+        }
+      }
+
+      {
+        const runPostMatch = url.pathname.match(/^\/workflows\/([^/]+)\/runs$/);
+        if (runPostMatch && request.method === "POST") {
+          const name = decodeURIComponent(runPostMatch[1] as string);
+          const wf = getWorkflow(db, name);
+          if (!wf) return json({ error: `Unknown workflow: ${name}` }, 404, cors);
+          const payload: unknown = await request.json().catch(() => null);
+          if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+            return json({ error: "Invalid JSON" }, 400, cors);
+          }
+          const inputs = payload as Record<string, unknown>;
+          const runId = Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+          const title = deriveTitle(name, inputs);
+          createRun(db, runId, name, title, inputs);
+          // Stub execution: immediately complete with a placeholder artifact so the
+          // run is queryable. Full LLM execution is deferred.
+          const artifact = `# ${title}\n\n_This run was stubbed — full workflow execution is not yet wired in Durbar._\n\nInputs:\n\`\`\`json\n${JSON.stringify(inputs, null, 2)}\n\`\`\``;
+          completeRun(db, runId, artifact);
+
+          const sseHeaders: Record<string, string> = {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            "x-accel-buffering": "no",
+            ...cors,
+          };
+          const sseBody = [
+            `data: ${JSON.stringify({ type: "run_created", run_id: runId, title, workflow: name, steps: wf.steps })}\n\n`,
+            `data: ${JSON.stringify({ type: "artifact", content: artifact })}\n\n`,
+            `data: ${JSON.stringify({ type: "done", run_id: runId })}\n\n`,
+          ].join("");
+          return new Response(sseBody, { status: 200, headers: sseHeaders });
+        }
+      }
+
+      // ── scheduled ───────────────────────────────────────────────────
+      if (url.pathname === "/scheduled" && request.method === "GET") {
+        const status = url.searchParams.get("status") ?? "pending";
+        const limitRaw = url.searchParams.get("limit");
+        const order = url.searchParams.get("order") ?? "asc";
+        if (status !== "all" && !VALID_STATUSES.has(status)) {
+          return json({ error: `status must be 'all' or one of ${[...VALID_STATUSES].sort().join(", ")}` }, 400, cors);
+        }
+        const limit = limitRaw ? Number(limitRaw) : 100;
+        if (!Number.isFinite(limit) || limit < 1 || limit > 1000) {
+          return json({ error: "limit must be between 1 and 1000" }, 400, cors);
+        }
+        if (order !== "asc" && order !== "desc") {
+          return json({ error: "order must be 'asc' or 'desc'" }, 400, cors);
+        }
+        const rows = listScheduledActions(db, status === "all" ? null : status, limit, order);
+        return json(rows, 200, cors);
+      }
+
+      {
+        const schedMatch = url.pathname.match(/^\/scheduled\/(\d+)$/);
+        if (schedMatch) {
+          const id = Number(schedMatch[1]);
+          if (request.method === "GET") {
+            const row = getScheduledAction(db, id);
+            if (!row) return json({ error: "scheduled action not found" }, 404, cors);
+            return json(row, 200, cors);
+          }
+          if (request.method === "DELETE") {
+            // Admin gate: mirrors Python require_admin_token.
+            const expected = settings.scheduledAdminToken;
+            const headerToken = request.headers.get("x-admin-token");
+            // Determine loopback: Bun's request does not expose remote addr directly;
+            // use X-Forwarded-For / absence as heuristic. In tests there is no
+            // forwarding header, so treat as loopback when no X-Forwarded-For.
+            const forwarded = request.headers.get("x-forwarded-for");
+            const isLoopback = !forwarded || forwarded === "127.0.0.1" || forwarded === "::1" || forwarded === "localhost";
+            if (expected) {
+              if (!headerToken || !timingSafeEqual(headerToken, expected)) {
+                return json({ error: "Invalid or missing X-Admin-Token" }, 401, cors);
+              }
+            } else if (!isLoopback) {
+              return json(
+                {
+                  error:
+                    "Scheduled-action admin endpoints are disabled. Set SCHEDULED_ADMIN_TOKEN to enable them for non-loopback access.",
+                },
+                503,
+                cors,
+              );
+            }
+            const result = cancelScheduledAction(db, id);
+            if (result === "not_found") return json({ error: "scheduled action not found" }, 404, cors);
+            if (result === "not_cancellable") {
+              return json({ error: "action is already running, done, failed, or cancelled — cannot cancel" }, 409, cors);
+            }
+            const row = getScheduledAction(db, id);
+            return json(row, 200, cors);
+          }
+        }
+      }
+
+      // ── review ──────────────────────────────────────────────────────
+      if (url.pathname === "/review/items" && request.method === "GET") {
+        const status = url.searchParams.get("status") as string | null;
+        const domain = url.searchParams.get("domain");
+        const contentType = url.searchParams.get("content_type") as string | null;
+        const limitRaw = url.searchParams.get("limit");
+        const offsetRaw = url.searchParams.get("offset");
+        if (status && !REVIEW_STATUSES.includes(status as (typeof REVIEW_STATUSES)[number])) {
+          return json({ error: `Invalid status: ${status}` }, 400, cors);
+        }
+        if (contentType && !CONTENT_TYPES.includes(contentType as (typeof CONTENT_TYPES)[number])) {
+          return json({ error: `Invalid content_type: ${contentType}` }, 400, cors);
+        }
+        const limit = limitRaw ? Number(limitRaw) : 100;
+        const offset = offsetRaw ? Number(offsetRaw) : 0;
+        const items = listReviewItems(db, {
+          ...(status ? { status: status as (typeof REVIEW_STATUSES)[number] } : {}),
+          ...(domain ? { domain } : {}),
+          ...(contentType ? { contentType: contentType as (typeof CONTENT_TYPES)[number] } : {}),
+          limit,
+          offset,
+        });
+        return json(items, 200, cors);
+      }
+
+      if (url.pathname === "/review/stats" && request.method === "GET") {
+        return json(countByStatus(db), 200, cors);
+      }
+
+      if (url.pathname === "/review/bulk-approve" && request.method === "POST") {
+        const body: unknown = await request.json().catch(() => ({}));
+        const b = (body ?? {}) as Record<string, unknown>;
+        const domain = typeof b["domain"] === "string" ? b["domain"] : null;
+        const count = bulkApprove(db, domain);
+        return json({ approved_count: count }, 200, cors);
+      }
+
+      if (url.pathname === "/review/annotations" && request.method === "GET") {
+        const activeOnlyRaw = url.searchParams.get("active_only");
+        const activeOnly = activeOnlyRaw === null ? true : activeOnlyRaw !== "false";
+        return json(listAnnotations(db, { activeOnly }), 200, cors);
+      }
+
+      {
+        const reviewItemMatch = url.pathname.match(/^\/review\/items\/([^/]+)$/);
+        if (reviewItemMatch) {
+          const itemId = decodeURIComponent(reviewItemMatch[1] as string);
+          if (request.method === "GET") {
+            const item = getReviewItem(db, itemId);
+            if (!item) return json({ error: "Review item not found" }, 404, cors);
+            const annotations = listAnnotations(db, { itemId, activeOnly: false });
+            return json({ item, annotations }, 200, cors);
+          }
+          if (request.method === "PATCH") {
+            const body: unknown = await request.json().catch(() => null);
+            const b = (body ?? {}) as Record<string, unknown>;
+            const status = b["status"] as string | undefined;
+            const priority = b["priority"] as string | undefined;
+            const reviewerNotes = b["reviewer_notes"] as string | undefined;
+            if (status && !REVIEW_STATUSES.includes(status as (typeof REVIEW_STATUSES)[number])) {
+              return json({ error: `Invalid status: ${status}` }, 400, cors);
+            }
+            if (priority && !PRIORITIES.includes(priority as (typeof PRIORITIES)[number])) {
+              return json({ error: `Invalid priority: ${priority}` }, 400, cors);
+            }
+            let item = getReviewItem(db, itemId);
+            if (!item) return json({ error: "Review item not found" }, 404, cors);
+            if (status) {
+              const notes = reviewerNotes !== undefined ? reviewerNotes : item.reviewer_notes;
+              item = setReviewStatus(db, itemId, status as (typeof REVIEW_STATUSES)[number], notes) as typeof item;
+            } else if (reviewerNotes !== undefined) {
+              item = updateReviewNotes(db, itemId, reviewerNotes) as typeof item;
+            }
+            if (priority) {
+              item = setReviewPriority(db, itemId, priority as (typeof PRIORITIES)[number]) as typeof item;
+            }
+            return json(item, 200, cors);
+          }
+        }
+      }
+
+      {
+        const itemAnnotListMatch = url.pathname.match(/^\/review\/items\/([^/]+)\/annotations$/);
+        if (itemAnnotListMatch) {
+          const itemId = decodeURIComponent(itemAnnotListMatch[1] as string);
+          if (request.method === "GET") {
+            if (!getReviewItem(db, itemId)) return json({ error: "Review item not found" }, 404, cors);
+            return json(listAnnotations(db, { itemId, activeOnly: false }), 200, cors);
+          }
+          if (request.method === "POST") {
+            const item = getReviewItem(db, itemId);
+            if (!item) return json({ error: "Review item not found" }, 404, cors);
+            const body: unknown = await request.json().catch(() => null);
+            const b = (body ?? {}) as Record<string, unknown>;
+            const correction = b["correction"];
+            if (typeof correction !== "string" || !correction.trim()) {
+              return json({ error: "correction is required" }, 400, cors);
+            }
+            const annot = addAnnotation(db, itemId, item.domain, correction);
+            return json(annot, 200, cors);
+          }
+        }
+      }
+
+      {
+        const annotMatch = url.pathname.match(/^\/review\/annotations\/([^/]+)$/);
+        if (annotMatch) {
+          const annotId = decodeURIComponent(annotMatch[1] as string);
+          if (request.method === "PATCH") {
+            const body: unknown = await request.json().catch(() => null);
+            const b = (body ?? {}) as Record<string, unknown>;
+            if (typeof b["correction"] === "string") updateAnnotation(db, annotId, b["correction"] as string);
+            if (typeof b["is_active"] === "boolean") toggleAnnotation(db, annotId, b["is_active"] as boolean);
+            return json({ updated: annotId }, 200, cors);
+          }
+          if (request.method === "DELETE") {
+            deleteAnnotation(db, annotId);
+            return json({ deleted: annotId }, 200, cors);
+          }
+        }
+      }
+
+      // ── decisions ───────────────────────────────────────────────────
+      if (url.pathname === "/decisions" && request.method === "GET") {
+        const decisionClass = url.searchParams.get("decision_class") ?? "meeting_scheduling";
+        const status = url.searchParams.get("status");
+        const limitRaw = url.searchParams.get("limit");
+        const limit = limitRaw ? Number(limitRaw) : 50;
+        if (!Number.isFinite(limit) || limit < 1 || limit > 500) {
+          return json({ error: "limit must be 1–500" }, 400, cors);
+        }
+        return json(listInstances(db, decisionClass, { ...(status ? { status } : {}), limit }), 200, cors);
+      }
+
+      {
+        const decMatch = url.pathname.match(/^\/decisions\/(\d+)$/);
+        if (decMatch && request.method === "GET") {
+          const id = Number(decMatch[1]);
+          const inst = getDecisionInstance(db, id);
+          if (!inst) return json({ error: "Decision instance not found" }, 404, cors);
+          return json(inst, 200, cors);
+        }
+      }
+
+      {
+        const approveMatch = url.pathname.match(/^\/decisions\/(\d+)\/approve$/);
+        if (approveMatch && request.method === "POST") {
+          const id = Number(approveMatch[1]);
+          const body: unknown = await request.json().catch(() => ({}));
+          const b = (body ?? {}) as Record<string, unknown>;
+          const edits = (b["edits"] as Record<string, unknown> | null) ?? null;
+          const result = approveDecision(db, id, edits);
+          if (result.error) return json({ error: result.error }, result.statusCode ?? 400, cors);
+          return json(result.instance, 200, cors);
+        }
+      }
+
+      {
+        const rejectMatch = url.pathname.match(/^\/decisions\/(\d+)\/reject$/);
+        if (rejectMatch && request.method === "POST") {
+          const id = Number(rejectMatch[1]);
+          const result = rejectDecision(db, id);
+          if (result.error) return json({ error: result.error }, result.statusCode ?? 400, cors);
+          return json(result.instance, 200, cors);
+        }
+      }
+
+      if (url.pathname === "/audit/reliability" && request.method === "GET") {
+        const decisionClass = url.searchParams.get("decision_class") ?? "meeting_scheduling";
+        const daysRaw = url.searchParams.get("days");
+        const days = daysRaw ? Number(daysRaw) : 30;
+        if (!Number.isFinite(days) || days < 1 || days > 365) {
+          return json({ error: "days must be 1–365" }, 400, cors);
+        }
+        return json(aggregateReliability(db, decisionClass, days), 200, cors);
+      }
+
+      // ── audit ───────────────────────────────────────────────────────
+      if (url.pathname === "/audit/logs" && request.method === "GET") {
+        const eventType = url.searchParams.get("event_type");
+        const sessionId = url.searchParams.get("session_id");
+        const actor = url.searchParams.get("actor");
+        const q = url.searchParams.get("q");
+        const since = url.searchParams.get("since");
+        const until = url.searchParams.get("until");
+        const limitRaw = url.searchParams.get("limit");
+        const offsetRaw = url.searchParams.get("offset");
+        const limit = limitRaw ? Number(limitRaw) : 100;
+        const offset = offsetRaw ? Number(offsetRaw) : 0;
+        if (eventType && !EVENT_TYPES.includes(eventType as (typeof EVENT_TYPES)[number])) {
+          return json({ error: `Unknown event_type: ${JSON.stringify(eventType)}` }, 422, cors);
+        }
+        const items = queryAudit(db, {
+          ...(eventType ? { eventType } : {}),
+          ...(sessionId ? { sessionId } : {}),
+          ...(actor ? { actor } : {}),
+          ...(q ? { q } : {}),
+          ...(since ? { since } : {}),
+          ...(until ? { until } : {}),
+          limit,
+          offset,
+        });
+        const total = countAudit(db, {
+          ...(eventType ? { eventType } : {}),
+          ...(sessionId ? { sessionId } : {}),
+          ...(actor ? { actor } : {}),
+          ...(q ? { q } : {}),
+          ...(since ? { since } : {}),
+          ...(until ? { until } : {}),
+        });
+        return json({ items, total, limit, offset, event_types: [...EVENT_TYPES] }, 200, cors);
+      }
+
+      {
+        const auditLogMatch = url.pathname.match(/^\/audit\/logs\/(\d+)$/);
+        if (auditLogMatch && request.method === "GET") {
+          const id = Number(auditLogMatch[1]);
+          const event = getAuditEvent(db, id);
+          if (!event) return json({ error: "audit event not found" }, 404, cors);
+          return json(event, 200, cors);
+        }
+      }
+
+      {
+        const auditSessMatch = url.pathname.match(/^\/audit\/sessions\/([^/]+)$/);
+        if (auditSessMatch && request.method === "GET") {
+          const sessionId = decodeURIComponent(auditSessMatch[1] as string);
+          if (!isValidSessionId(sessionId)) {
+            return json({ error: "invalid session_id format" }, 400, cors);
+          }
+          const events = queryAudit(db, { sessionId, limit: 1000 });
+          if (events.length === 0) return json({ error: "no events for session_id" }, 404, cors);
+          const { graph, channel } = buildSessionGraph(events);
+          const costSummary = computeCostSummary(events);
+          const degradations = computeDegradations(events);
+          return json(
+            {
+              session_id: sessionId,
+              events: events.map((e) => ({
+                id: e.id,
+                ts: e.ts,
+                event_type: e.event_type,
+                session_id: e.session_id,
+                turn_id: e.turn_id,
+                actor: e.actor,
+                summary: e.summary,
+                details: e.details,
+              })),
+              graph,
+              channel,
+              cost_summary: costSummary,
+              degradations,
+            },
+            200,
+            cors,
+          );
+        }
+      }
+
+      if (url.pathname === "/audit/usage" && request.method === "GET") {
+        const since = url.searchParams.get("since");
+        const until = url.searchParams.get("until");
+        const data = usageSummary(db, since, until);
+        return json(
+          {
+            since: since ?? null,
+            until: until ?? null,
+            totals: data.totals,
+            by_day: data.by_day,
+            by_model: data.by_model,
+            by_source: data.by_source,
+          },
+          200,
+          cors,
+        );
       }
 
       return json({ error: "not found", path: url.pathname }, 404, cors);

@@ -43,6 +43,13 @@ export interface Settings {
    */
   readonly morningBriefTime: string;
   readonly provider: ProviderConfig;
+  /**
+   * Token required to cancel scheduled actions from non-loopback hosts.
+   * When set, DELETE /scheduled/{id} requires X-Admin-Token. When unset,
+   * loopback is allowed and remote is 503 — mirrors the Python
+   * `require_admin_token` dependency in `api/routes/scheduled.py`.
+   */
+  readonly scheduledAdminToken: string;
 }
 
 function required(name: string): string {
@@ -124,5 +131,6 @@ export function loadSettings(): Settings {
       .filter((origin) => origin !== ''),
     morningBriefTime: optional('PRINCIPAL_BRIEF_MORNING_TIME', '08:00'),
     provider: providerFrom(raw),
+    scheduledAdminToken: optional('SCHEDULED_ADMIN_TOKEN', ''),
   };
 }
