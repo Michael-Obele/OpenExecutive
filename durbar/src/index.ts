@@ -43,6 +43,17 @@ import {
   validateGoalPatch,
 } from "./features/departments/departments.ts";
 import {
+  AUTHORITY_SCOPES,
+  archivePerson,
+  createPerson,
+  findApprovers,
+  getPerson,
+  listPeople,
+  updatePerson,
+  validatePersonCreate,
+  validatePersonPatch,
+} from "./features/people/people.ts";
+import {
   DEFAULT_MORNING_TIME,
   pendingActions,
   PRINCIPAL_BRIEF_MORNING,
@@ -357,6 +368,83 @@ export function createApp(
               Object.assign(headers, okrsDeprecationHeaders(slug, goalId));
             }
             return new Response(null, { status: 204, headers });
+          }
+        }
+      }
+
+      // ── people ────────────────────────────────────────────────────────
+      // by-scope must be matched before the generic /people/{id} block.
+      if (url.pathname.startsWith("/people/by-scope/") && request.method === "GET") {
+        const token = decodeURIComponent(url.pathname.slice("/people/by-scope/".length));
+        if (!(AUTHORITY_SCOPES as readonly string[]).includes(token)) {
+          return json(
+            {
+              error: `Unknown scope token: ${JSON.stringify(token)}. Valid tokens: ${AUTHORITY_SCOPES.join(", ")}`,
+            },
+            400,
+            cors,
+          );
+        }
+        const approvers = findApprovers(db, token as (typeof AUTHORITY_SCOPES)[number]);
+        return json(approvers, 200, cors);
+      }
+
+      if (url.pathname === "/people" && request.method === "GET") {
+        const includeArchived = url.searchParams.get("include_archived") === "true";
+        return json(listPeople(db, includeArchived), 200, cors);
+      }
+
+      if (url.pathname === "/people" && request.method === "POST") {
+        const body: unknown = await request.json().catch(() => null);
+        const validated = validatePersonCreate(body);
+        if (!validated.ok) return json({ error: validated.error }, 422, cors);
+        const created = createPerson(db, validated.data);
+        return json(created, 201, cors);
+      }
+
+      // POST /people/{id}/archive — must be before generic /people/{id} PATCH/GET.
+      {
+        const archiveMatch = url.pathname.match(/^\/people\/(\d+)\/archive$/);
+        if (archiveMatch && request.method === "POST") {
+          const id = Number(archiveMatch[1]);
+          const existing = getPerson(db, id);
+          if (!existing) return json({ error: "Person not found" }, 404, cors);
+          try {
+            const ok = archivePerson(db, id);
+            if (!ok) return json({ error: "Person not found or already archived" }, 404, cors);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            // Principal protection is a 409 (conflict), not a 422.
+            if (message.includes("Cannot archive the last principal")) {
+              return json({ error: message }, 409, cors);
+            }
+            return json({ error: message }, 422, cors);
+          }
+          return new Response(null, { status: 204, headers: cors });
+        }
+      }
+
+      {
+        const personMatch = url.pathname.match(/^\/people\/(\d+)$/);
+        if (personMatch) {
+          const id = Number(personMatch[1]);
+          if (request.method === "GET") {
+            const person = getPerson(db, id);
+            if (!person) return json({ error: "Person not found" }, 404, cors);
+            return json(person, 200, cors);
+          }
+          if (request.method === "PATCH") {
+            const existing = getPerson(db, id);
+            if (!existing) return json({ error: "Person not found" }, 404, cors);
+            const raw: unknown = await request.json().catch(() => null);
+            const validated = validatePersonPatch(raw);
+            if (!validated.ok) return json({ error: validated.error }, 422, cors);
+            if (Object.keys(validated.data).length === 0) {
+              return json(existing, 200, cors);
+            }
+            const updated = updatePerson(db, id, validated.data);
+            if (!updated) return json({ error: "Person vanished" }, 500, cors);
+            return json(updated, 200, cors);
           }
         }
       }
