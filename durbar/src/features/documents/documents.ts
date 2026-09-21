@@ -15,7 +15,13 @@ import type { Db } from "../../db.ts";
 
 // ── constants ────────────────────────────────────────────────────────────
 
-export const ALLOWED_EXTENSIONS = new Set([".pdf", ".docx", ".doc", ".md", ".txt"]);
+export const ALLOWED_EXTENSIONS = new Set([
+  ".pdf",
+  ".docx",
+  ".doc",
+  ".md",
+  ".txt",
+]);
 export const UPLOAD_DOMAINS = new Set([
   "strategy",
   "finance",
@@ -45,12 +51,14 @@ export interface DocumentContent {
 // ── validation ───────────────────────────────────────────────────────────
 
 export function validateFilename(filename: string): string | null {
-  if (!filename || filename.startsWith(".") || filename.includes("/") || filename.includes("\\")) {
+  if (
+    !filename ||
+    filename.startsWith(".") ||
+    filename.includes("/") ||
+    filename.includes("\\")
+  ) {
     return "Invalid filename";
   }
-  // Must be a bare filename, not a path.
-  const base = filename.split("/").pop() ?? "";
-  if (base !== filename) return "Invalid filename";
   const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
   if (!ALLOWED_EXTENSIONS.has(ext)) {
     return `Unsupported file type: ${ext}. Allowed: ${[...ALLOWED_EXTENSIONS].join(", ")}`;
@@ -70,9 +78,10 @@ export function validateDomain(domain: string): string | null {
 export function listDocuments(db: Db): DocumentMeta[] {
   try {
     return db
-      .query<DocumentMeta, []>(
-        "SELECT filename, domain, size_bytes, created_at FROM company_documents ORDER BY created_at DESC",
-      )
+      .query<
+        DocumentMeta,
+        []
+      >("SELECT filename, domain, size_bytes, created_at FROM company_documents ORDER BY created_at DESC")
       .all();
   } catch {
     return [];
@@ -82,9 +91,10 @@ export function listDocuments(db: Db): DocumentMeta[] {
 export function getDocument(db: Db, filename: string): DocumentContent | null {
   try {
     const row = db
-      .query<{ filename: string; content: string }, [string]>(
-        "SELECT filename, content FROM company_documents WHERE filename = ?",
-      )
+      .query<
+        { filename: string; content: string },
+        [string]
+      >("SELECT filename, content FROM company_documents WHERE filename = ?")
       .get(filename);
     if (!row) return null;
     return { filename: row.filename, content: row.content };
@@ -99,7 +109,7 @@ export function upsertDocument(
   domain: string,
   content: string,
 ): DocumentMeta {
-  const sizeBytes = Buffer.byteLength(content, "utf8");
+  const sizeBytes = new TextEncoder().encode(content).byteLength;
   const now = new Date().toISOString();
   db.run(
     `INSERT INTO company_documents (filename, domain, content, size_bytes, created_at)
@@ -112,7 +122,9 @@ export function upsertDocument(
 
 export function deleteDocument(db: Db, filename: string): boolean {
   try {
-    const result = db.run("DELETE FROM company_documents WHERE filename = ?", [filename]);
+    const result = db.run("DELETE FROM company_documents WHERE filename = ?", [
+      filename,
+    ]);
     return result.changes > 0;
   } catch {
     return false;

@@ -431,8 +431,13 @@ export function createApp(
 
       // ── people ────────────────────────────────────────────────────────
       // by-scope must be matched before the generic /people/{id} block.
-      if (url.pathname.startsWith("/people/by-scope/") && request.method === "GET") {
-        const token = decodeURIComponent(url.pathname.slice("/people/by-scope/".length));
+      if (
+        url.pathname.startsWith("/people/by-scope/") &&
+        request.method === "GET"
+      ) {
+        const token = decodeURIComponent(
+          url.pathname.slice("/people/by-scope/".length),
+        );
         if (!(AUTHORITY_SCOPES as readonly string[]).includes(token)) {
           return json(
             {
@@ -442,12 +447,16 @@ export function createApp(
             cors,
           );
         }
-        const approvers = findApprovers(db, token as (typeof AUTHORITY_SCOPES)[number]);
+        const approvers = findApprovers(
+          db,
+          token as (typeof AUTHORITY_SCOPES)[number],
+        );
         return json(approvers, 200, cors);
       }
 
       if (url.pathname === "/people" && request.method === "GET") {
-        const includeArchived = url.searchParams.get("include_archived") === "true";
+        const includeArchived =
+          url.searchParams.get("include_archived") === "true";
         return json(listPeople(db, includeArchived), 200, cors);
       }
 
@@ -461,7 +470,14 @@ export function createApp(
         ) {
           const target = getPerson(db, validated.data.reports_to_person_id);
           if (!target || target.archived) {
-            return json({ error: "reports_to_person_id must reference an existing, non-archived person" }, 422, cors);
+            return json(
+              {
+                error:
+                  "reports_to_person_id must reference an existing, non-archived person",
+              },
+              422,
+              cors,
+            );
           }
         }
         const created = createPerson(db, validated.data);
@@ -477,14 +493,16 @@ export function createApp(
           const id = Number(archiveMatch[1]);
           const existing = getPerson(db, id);
           if (!existing) return json({ error: "Person not found" }, 404, cors);
-          if (existing.archived) return new Response(null, { status: 204, headers: cors });
+          if (existing.archived)
+            return new Response(null, { status: 204, headers: cors });
           try {
             archivePerson(db, id);
           } catch (error) {
             if (error instanceof PrincipalProtectionError) {
               return json({ error: error.message }, 409, cors);
             }
-            const message = error instanceof Error ? error.message : String(error);
+            const message =
+              error instanceof Error ? error.message : String(error);
             return json({ error: message }, 422, cors);
           }
           return new Response(null, { status: 204, headers: cors });
@@ -502,10 +520,12 @@ export function createApp(
           }
           if (request.method === "PATCH") {
             const existing = getPerson(db, id);
-            if (!existing) return json({ error: "Person not found" }, 404, cors);
+            if (!existing)
+              return json({ error: "Person not found" }, 404, cors);
             const raw: unknown = await request.json().catch(() => null);
             const validated = validatePersonPatch(raw);
-            if (!validated.ok) return json({ error: validated.error }, 422, cors);
+            if (!validated.ok)
+              return json({ error: validated.error }, 422, cors);
             // FK validation for reports_to_person_id: target must exist and not be archived.
             if (
               validated.data.reports_to_person_id !== undefined &&
@@ -513,7 +533,14 @@ export function createApp(
             ) {
               const target = getPerson(db, validated.data.reports_to_person_id);
               if (!target || target.archived) {
-                return json({ error: "reports_to_person_id must reference an existing, non-archived person" }, 422, cors);
+                return json(
+                  {
+                    error:
+                      "reports_to_person_id must reference an existing, non-archived person",
+                  },
+                  422,
+                  cors,
+                );
               }
             }
             if (Object.keys(validated.data).length === 0) {
@@ -521,7 +548,8 @@ export function createApp(
             }
             try {
               const updated = updatePerson(db, id, validated.data);
-              if (!updated) return json({ error: "Person vanished" }, 500, cors);
+              if (!updated)
+                return json({ error: "Person vanished" }, 500, cors);
               return json(updated, 200, cors);
             } catch (error) {
               if (error instanceof PrincipalProtectionError) {
@@ -574,7 +602,9 @@ export function createApp(
         const { status, alert_ids, older_than_days, category } = validated.data;
         let before: string | null = null;
         if (older_than_days !== undefined) {
-          before = new Date(Date.now() - older_than_days * 24 * 60 * 60 * 1000).toISOString();
+          before = new Date(
+            Date.now() - older_than_days * 24 * 60 * 60 * 1000,
+          ).toISOString();
         }
         const updated = bulkSetStatus(db, status, {
           ...(alert_ids !== undefined ? { alert_ids } : {}),
@@ -610,7 +640,14 @@ export function createApp(
           if (!existing) return json({ error: "Alert not found" }, 404, cors);
           const ok = reopenAlert(db, id, ["artifact", "decision_scheduling"]);
           if (!ok) {
-            return json({ error: "Only resolved, expired or dismissed alerts can be reopened" }, 409, cors);
+            return json(
+              {
+                error:
+                  "Only resolved, expired or dismissed alerts can be reopened",
+              },
+              409,
+              cors,
+            );
           }
           const updated = getAlert(db, id);
           if (!updated) return json({ error: "Alert not found" }, 404, cors);
@@ -622,7 +659,10 @@ export function createApp(
       if (url.pathname === "/memories/decisions" && request.method === "GET") {
         return json(listDecisions(db), 200, cors);
       }
-      if (url.pathname === "/memories/initiatives" && request.method === "GET") {
+      if (
+        url.pathname === "/memories/initiatives" &&
+        request.method === "GET"
+      ) {
         return json(listInitiatives(db), 200, cors);
       }
       if (url.pathname === "/memories/advice" && request.method === "GET") {
@@ -637,26 +677,38 @@ export function createApp(
             const body: unknown = await request.json().catch(() => null);
             const patch = (body ?? {}) as Record<string, unknown>;
             const allowed: Record<string, string> = {};
-            for (const key of ["domain", "summary", "rationale", "outcome", "tags"]) {
+            for (const key of [
+              "domain",
+              "summary",
+              "rationale",
+              "outcome",
+              "tags",
+            ]) {
               if (key in patch && patch[key] !== undefined) {
-                if (typeof patch[key] !== "string") return json({ error: `${key} must be a string` }, 422, cors);
+                if (typeof patch[key] !== "string")
+                  return json({ error: `${key} must be a string` }, 422, cors);
                 allowed[key] = patch[key] as string;
               }
             }
-            if (!updateDecision(db, id, allowed)) return json({ error: "Decision not found" }, 404, cors);
+            if (!updateDecision(db, id, allowed))
+              return json({ error: "Decision not found" }, 404, cors);
             const updated = getDecision(db, id);
-            if (!updated) return json({ error: "Decision not found" }, 404, cors);
+            if (!updated)
+              return json({ error: "Decision not found" }, 404, cors);
             return json(updated, 200, cors);
           }
           if (request.method === "DELETE") {
-            if (!deleteDecision(db, id)) return json({ error: "Decision not found" }, 404, cors);
+            if (!deleteDecision(db, id))
+              return json({ error: "Decision not found" }, 404, cors);
             return new Response(null, { status: 204, headers: cors });
           }
         }
       }
 
       {
-        const initMatch = url.pathname.match(/^\/memories\/initiatives\/(\d+)$/);
+        const initMatch = url.pathname.match(
+          /^\/memories\/initiatives\/(\d+)$/,
+        );
         if (initMatch) {
           const id = Number(initMatch[1]);
           if (request.method === "PATCH") {
@@ -665,17 +717,21 @@ export function createApp(
             const allowed: Record<string, string> = {};
             for (const key of ["title", "status", "summary"]) {
               if (key in patch && patch[key] !== undefined) {
-                if (typeof patch[key] !== "string") return json({ error: `${key} must be a string` }, 422, cors);
+                if (typeof patch[key] !== "string")
+                  return json({ error: `${key} must be a string` }, 422, cors);
                 allowed[key] = patch[key] as string;
               }
             }
-            if (!updateInitiative(db, id, allowed)) return json({ error: "Initiative not found" }, 404, cors);
+            if (!updateInitiative(db, id, allowed))
+              return json({ error: "Initiative not found" }, 404, cors);
             const updated = getInitiative(db, id);
-            if (!updated) return json({ error: "Initiative not found" }, 404, cors);
+            if (!updated)
+              return json({ error: "Initiative not found" }, 404, cors);
             return json(updated, 200, cors);
           }
           if (request.method === "DELETE") {
-            if (!deleteInitiative(db, id)) return json({ error: "Initiative not found" }, 404, cors);
+            if (!deleteInitiative(db, id))
+              return json({ error: "Initiative not found" }, 404, cors);
             return new Response(null, { status: 204, headers: cors });
           }
         }
@@ -691,17 +747,20 @@ export function createApp(
             const allowed: Record<string, string> = {};
             for (const key of ["domain", "query_summary", "advice_summary"]) {
               if (key in patch && patch[key] !== undefined) {
-                if (typeof patch[key] !== "string") return json({ error: `${key} must be a string` }, 422, cors);
+                if (typeof patch[key] !== "string")
+                  return json({ error: `${key} must be a string` }, 422, cors);
                 allowed[key] = patch[key] as string;
               }
             }
-            if (!updateAdvice(db, id, allowed)) return json({ error: "Advice not found" }, 404, cors);
+            if (!updateAdvice(db, id, allowed))
+              return json({ error: "Advice not found" }, 404, cors);
             const updated = getAdvice(db, id);
             if (!updated) return json({ error: "Advice not found" }, 404, cors);
             return json(updated, 200, cors);
           }
           if (request.method === "DELETE") {
-            if (!deleteAdvice(db, id)) return json({ error: "Advice not found" }, 404, cors);
+            if (!deleteAdvice(db, id))
+              return json({ error: "Advice not found" }, 404, cors);
             return new Response(null, { status: 204, headers: cors });
           }
         }
@@ -713,7 +772,11 @@ export function createApp(
         const archived = url.searchParams.get("archived") === "true";
         const limitRaw = url.searchParams.get("limit");
         const limit = limitRaw ? Number(limitRaw) : 200;
-        const artifacts = listArtifacts(db, Number.isFinite(limit) ? limit : 200, archived);
+        const artifacts = listArtifacts(
+          db,
+          Number.isFinite(limit) ? limit : 200,
+          archived,
+        );
         return json({ artifacts }, 200, cors);
       }
 
@@ -722,10 +785,25 @@ export function createApp(
         if (archiveMatch && request.method === "POST") {
           const compositeId = decodeURIComponent(archiveMatch[1]!);
           // Validate shape first: malformed id is 400, not 404.
-          const parsed = compositeId.includes(":") && (compositeId.startsWith("alert:") || compositeId.startsWith("run:"));
-          if (!parsed) return json({ error: `Malformed artifact id: ${JSON.stringify(compositeId)}` }, 400, cors);
+          const parsed =
+            compositeId.includes(":") &&
+            (compositeId.startsWith("alert:") ||
+              compositeId.startsWith("run:"));
+          if (!parsed)
+            return json(
+              {
+                error: `Malformed artifact id: ${JSON.stringify(compositeId)}`,
+              },
+              400,
+              cors,
+            );
           const ok = setArtifactArchived(db, compositeId, true);
-          if (!ok) return json({ error: `Artifact ${JSON.stringify(compositeId)} not found` }, 404, cors);
+          if (!ok)
+            return json(
+              { error: `Artifact ${JSON.stringify(compositeId)} not found` },
+              404,
+              cors,
+            );
           return json({ status: "archived", id: compositeId }, 200, cors);
         }
       }
@@ -734,10 +812,25 @@ export function createApp(
         const restoreMatch = url.pathname.match(/^\/artifacts\/(.+)\/restore$/);
         if (restoreMatch && request.method === "POST") {
           const compositeId = decodeURIComponent(restoreMatch[1]!);
-          const parsed = compositeId.includes(":") && (compositeId.startsWith("alert:") || compositeId.startsWith("run:"));
-          if (!parsed) return json({ error: `Malformed artifact id: ${JSON.stringify(compositeId)}` }, 400, cors);
+          const parsed =
+            compositeId.includes(":") &&
+            (compositeId.startsWith("alert:") ||
+              compositeId.startsWith("run:"));
+          if (!parsed)
+            return json(
+              {
+                error: `Malformed artifact id: ${JSON.stringify(compositeId)}`,
+              },
+              400,
+              cors,
+            );
           const ok = setArtifactArchived(db, compositeId, false);
-          if (!ok) return json({ error: `Artifact ${JSON.stringify(compositeId)} not found` }, 404, cors);
+          if (!ok)
+            return json(
+              { error: `Artifact ${JSON.stringify(compositeId)} not found` },
+              404,
+              cors,
+            );
           return json({ status: "restored", id: compositeId }, 200, cors);
         }
       }
@@ -747,17 +840,47 @@ export function createApp(
         if (artifactMatch) {
           const compositeId = decodeURIComponent(artifactMatch[1]!);
           if (request.method === "GET") {
-            const parsed = compositeId.includes(":") && (compositeId.startsWith("alert:") || compositeId.startsWith("run:"));
-            if (!parsed) return json({ error: `Malformed artifact id: ${JSON.stringify(compositeId)}` }, 400, cors);
+            const parsed =
+              compositeId.includes(":") &&
+              (compositeId.startsWith("alert:") ||
+                compositeId.startsWith("run:"));
+            if (!parsed)
+              return json(
+                {
+                  error: `Malformed artifact id: ${JSON.stringify(compositeId)}`,
+                },
+                400,
+                cors,
+              );
             const artifact = getArtifact(db, compositeId);
-            if (!artifact) return json({ error: `Artifact ${JSON.stringify(compositeId)} not found` }, 404, cors);
+            if (!artifact)
+              return json(
+                { error: `Artifact ${JSON.stringify(compositeId)} not found` },
+                404,
+                cors,
+              );
             return json(artifact, 200, cors);
           }
           if (request.method === "DELETE") {
-            const parsed = compositeId.includes(":") && (compositeId.startsWith("alert:") || compositeId.startsWith("run:"));
-            if (!parsed) return json({ error: `Malformed artifact id: ${JSON.stringify(compositeId)}` }, 400, cors);
+            const parsed =
+              compositeId.includes(":") &&
+              (compositeId.startsWith("alert:") ||
+                compositeId.startsWith("run:"));
+            if (!parsed)
+              return json(
+                {
+                  error: `Malformed artifact id: ${JSON.stringify(compositeId)}`,
+                },
+                400,
+                cors,
+              );
             const ok = deleteArtifact(db, compositeId);
-            if (!ok) return json({ error: `Artifact ${JSON.stringify(compositeId)} not found` }, 404, cors);
+            if (!ok)
+              return json(
+                { error: `Artifact ${JSON.stringify(compositeId)} not found` },
+                404,
+                cors,
+              );
             return json({ status: "deleted", id: compositeId }, 200, cors);
           }
         }
@@ -791,7 +914,8 @@ export function createApp(
             return json(meta, 200, cors);
           }
           if (request.method === "DELETE") {
-            if (!deleteSession(db, sessionId)) return json({ error: "Session not found" }, 404, cors);
+            if (!deleteSession(db, sessionId))
+              return json({ error: "Session not found" }, 404, cors);
             return new Response(null, { status: 204, headers: cors });
           }
         }
@@ -832,7 +956,10 @@ export function createApp(
         return json(buildActivity(db, limit), 200, cors);
       }
 
-      if (url.pathname === "/today/activity/daily" && request.method === "GET") {
+      if (
+        url.pathname === "/today/activity/daily" &&
+        request.method === "GET"
+      ) {
         const raw = url.searchParams.get("days");
         const days = raw ? Number(raw) : 90;
         if (!Number.isFinite(days) || days < 1 || days > 365) {
@@ -876,14 +1003,21 @@ export function createApp(
         // Expose session id via header for clients that need it before stream ends.
         headers["x-session-id"] = resolvedId;
         const sseStream = stream.pipeThrough(
-          new TextEncoderStream() as unknown as TransformStream<string, Uint8Array>,
+          new TextEncoderStream() as unknown as TransformStream<
+            string,
+            Uint8Array
+          >,
         );
-        return new Response(sseStream as unknown as ReadableStream, { status: 200, headers });
+        return new Response(sseStream as unknown as ReadableStream, {
+          status: 200,
+          headers,
+        });
       }
 
       if (url.pathname === "/chat/upload" && request.method === "POST") {
         const formData = await request.formData().catch(() => null);
-        if (!formData) return json({ error: "Invalid multipart body" }, 400, cors);
+        if (!formData)
+          return json({ error: "Invalid multipart body" }, 400, cors);
         const message = formData.get("message");
         if (typeof message !== "string" || message.trim() === "") {
           return json({ error: "message is required" }, 400, cors);
@@ -902,11 +1036,19 @@ export function createApp(
             if (value instanceof File) allFiles.push(value);
           }
         }
-        if (allFiles.length === 0) return json({ error: "No files uploaded" }, 400, cors);
-        if (allFiles.length > 5) return json({ error: "Too many files: limit 5 per turn" }, 400, cors);
+        if (allFiles.length === 0)
+          return json({ error: "No files uploaded" }, 400, cors);
+        if (allFiles.length > 5)
+          return json({ error: "Too many files: limit 5 per turn" }, 400, cors);
         for (const f of allFiles) {
           if (f.size > 20 * 1024 * 1024) {
-            return json({ error: `${f.name}: file too large — ${Math.floor(f.size / (1024 * 1024))} MB (limit 20 MB)` }, 413, cors);
+            return json(
+              {
+                error: `${f.name}: file too large — ${Math.floor(f.size / (1024 * 1024))} MB (limit 20 MB)`,
+              },
+              413,
+              cors,
+            );
           }
         }
         // Extract text from text-like files and inline.
@@ -917,12 +1059,19 @@ export function createApp(
             const text = await f.text().catch(() => "");
             if (text) textParts.push(`File: ${f.name}\n${text.slice(0, 8000)}`);
           } else {
-            textParts.push(`File: ${f.name} (${f.size} bytes, type ${f.type || "unknown"})`);
+            textParts.push(
+              `File: ${f.name} (${f.size} bytes, type ${f.type || "unknown"})`,
+            );
           }
         }
-        const attachmentText = textParts.length > 0 ? textParts.join("\n\n") : null;
+        const attachmentText =
+          textParts.length > 0 ? textParts.join("\n\n") : null;
         const { sessionId: resolvedId, stream } = await runChatTurn(
-          { message, sessionId: sid, ...(attachmentText ? { attachmentText } : {}) },
+          {
+            message,
+            sessionId: sid,
+            ...(attachmentText ? { attachmentText } : {}),
+          },
           { db, provider },
         );
         const headers: Record<string, string> = {
@@ -933,12 +1082,21 @@ export function createApp(
         };
         headers["x-session-id"] = resolvedId;
         const sseStream = stream.pipeThrough(
-          new TextEncoderStream() as unknown as TransformStream<string, Uint8Array>,
+          new TextEncoderStream() as unknown as TransformStream<
+            string,
+            Uint8Array
+          >,
         );
-        return new Response(sseStream as unknown as ReadableStream, { status: 200, headers });
+        return new Response(sseStream as unknown as ReadableStream, {
+          status: 200,
+          headers,
+        });
       }
 
-      if (url.pathname === "/chat/suggested-prompts" && request.method === "GET") {
+      if (
+        url.pathname === "/chat/suggested-prompts" &&
+        request.method === "GET"
+      ) {
         const result = buildSuggestedPrompts(db, provider);
         return json(result, 200, cors);
       }
@@ -949,14 +1107,19 @@ export function createApp(
         const { readdirSync, statSync } = await import("node:fs");
         const { join } = await import("node:path");
         const root = join(import.meta.dir, "..", "knowledge", "builtin");
-        const files: Array<{ domain: string; filename: string; size_bytes: number }> = [];
+        const files: Array<{
+          domain: string;
+          filename: string;
+          size_bytes: number;
+        }> = [];
+        const BUILTIN_EXCLUDE = new Set(["failures", "skills"]);
         const walk = (dir: string, domain: string): void => {
           try {
             for (const entry of readdirSync(dir)) {
               const full = join(dir, entry);
               const st = statSync(full);
               if (st.isDirectory()) {
-                // Top-level dirs are domains; nested failures/skills handled via domain param.
+                if (BUILTIN_EXCLUDE.has(entry)) continue;
                 walk(full, entry);
               } else if (entry.endsWith(".md")) {
                 files.push({ domain, filename: entry, size_bytes: st.size });
@@ -966,12 +1129,16 @@ export function createApp(
             // ignore missing dir
           }
         };
-        // Only top-level domain dirs.
+        // Only top-level domain dirs, excluding failures/skills (separate endpoints).
         try {
           for (const entry of readdirSync(root)) {
             const full = join(root, entry);
             try {
-              if (statSync(full).isDirectory() && !entry.startsWith(".")) {
+              if (
+                statSync(full).isDirectory() &&
+                !entry.startsWith(".") &&
+                !BUILTIN_EXCLUDE.has(entry)
+              ) {
                 walk(full, entry);
               }
             } catch {
@@ -994,16 +1161,31 @@ export function createApp(
         const domainFilter = b["domain_filter"] as string[] | undefined;
         const specialist = b["specialist"] as string | undefined;
         const include = b["include"] as string[] | undefined;
-        const nBuiltin = typeof b["n_builtin"] === "number" ? b["n_builtin"] : 5;
-        const nCompany = typeof b["n_company"] === "number" ? b["n_company"] : 3;
-        const nFailures = typeof b["n_failures"] === "number" ? b["n_failures"] : 3;
-        void (typeof b["n_external"] === "number" ? b["n_external"] : 5);
+        const nBuiltin =
+          typeof b["n_builtin"] === "number" ? b["n_builtin"] : 5;
+        const nCompany =
+          typeof b["n_company"] === "number" ? b["n_company"] : 3;
+        const nFailures =
+          typeof b["n_failures"] === "number" ? b["n_failures"] : 3;
+        // n_external reserved for OER partitioning when external sources are indexed; validated but not yet partitioned (external stays empty).
+        const _nExternal =
+          typeof b["n_external"] === "number" ? b["n_external"] : 5;
+        void _nExternal;
 
-        const validSources = new Set(["builtin", "company", "failures", "external"]);
+        const validSources = new Set([
+          "builtin",
+          "company",
+          "failures",
+          "external",
+        ]);
         if (include) {
           for (const inc of include) {
             if (!validSources.has(inc)) {
-              return json({ error: `Invalid include values: ${inc}` }, 400, cors);
+              return json(
+                { error: `Invalid include values: ${inc}` },
+                400,
+                cors,
+              );
             }
           }
         }
@@ -1015,17 +1197,26 @@ export function createApp(
           }
         }
         if (specialist && !(specialist in DOMAIN_ALIASES)) {
-          return json({ error: `Unknown specialist: ${specialist}` }, 400, cors);
+          return json(
+            { error: `Unknown specialist: ${specialist}` },
+            400,
+            cors,
+          );
         }
 
-        let effectiveDomains: readonly string[] | null | undefined = domainFilter ?? null;
+        let effectiveDomains: readonly string[] | null | undefined =
+          domainFilter ?? null;
         if (!effectiveDomains && specialist) {
           effectiveDomains = DOMAIN_ALIASES[specialist] ?? null;
         }
 
         const specialistsSeeing = effectiveDomains
           ? Object.entries(DOMAIN_ALIASES)
-              .filter(([, doms]) => doms.some((d) => (effectiveDomains as readonly string[]).includes(d)))
+              .filter(([, doms]) =>
+                doms.some((d) =>
+                  (effectiveDomains as readonly string[]).includes(d),
+                ),
+              )
               .map(([name]) => name)
               .sort()
           : Object.keys(DOMAIN_ALIASES).sort();
@@ -1035,7 +1226,9 @@ export function createApp(
         const wantFailures = !include || include.includes("failures");
         const wantExternal = !include || include.includes("external");
 
-        const toHit = (hits: ReturnType<typeof searchKnowledge>): Array<Record<string, unknown>> =>
+        const toHit = (
+          hits: ReturnType<typeof searchKnowledge>,
+        ): Array<Record<string, unknown>> =>
           hits.map((h) => ({
             filename: h.path.split("/").pop() ?? h.path,
             domain: h.domain,
@@ -1052,15 +1245,21 @@ export function createApp(
 
         if (wantBuiltin) {
           const hits = searchKnowledge(db, query as string, {
-            ...(effectiveDomains ? { domain: effectiveDomains[0] } : {}),
+            ...(effectiveDomains
+              ? { domain: [...effectiveDomains] as string[] }
+              : {}),
             limit: Math.max(1, Math.min(nBuiltin, 25)),
           });
           builtin = toHit(hits);
         }
         if (wantCompany) {
-          const companyDomains = withGeneral(effectiveDomains as string[] | null) as string[] | null;
+          const companyDomains = withGeneral(
+            effectiveDomains as string[] | null,
+          ) as string[] | null;
           const hits = searchKnowledge(db, query as string, {
-            ...(companyDomains ? { domain: companyDomains[0] } : {}),
+            ...(companyDomains
+              ? { domain: [...companyDomains] as string[] }
+              : {}),
             limit: Math.max(1, Math.min(nCompany, 25)),
           });
           company = toHit(hits);
@@ -1100,8 +1299,18 @@ export function createApp(
       if (url.pathname === "/knowledge/failures" && request.method === "GET") {
         const { readdirSync, statSync } = await import("node:fs");
         const { join } = await import("node:path");
-        const root = join(import.meta.dir, "..", "knowledge", "builtin", "failures");
-        const files: Array<{ domain: string; filename: string; size_bytes: number }> = [];
+        const root = join(
+          import.meta.dir,
+          "..",
+          "knowledge",
+          "builtin",
+          "failures",
+        );
+        const files: Array<{
+          domain: string;
+          filename: string;
+          size_bytes: number;
+        }> = [];
         try {
           for (const entry of readdirSync(root)) {
             const full = join(root, entry);
@@ -1110,7 +1319,11 @@ export function createApp(
                 for (const f of readdirSync(full)) {
                   if (f.endsWith(".md")) {
                     const fp = join(full, f);
-                    files.push({ domain: entry, filename: f, size_bytes: statSync(fp).size });
+                    files.push({
+                      domain: entry,
+                      filename: f,
+                      size_bytes: statSync(fp).size,
+                    });
                   }
                 }
               }
@@ -1126,19 +1339,33 @@ export function createApp(
 
       // GET /knowledge/failures/{domain}/{filename}
       {
-        const failMatch = url.pathname.match(/^\/knowledge\/failures\/([^/]+)\/([^/]+)$/);
+        const failMatch = url.pathname.match(
+          /^\/knowledge\/failures\/([^/]+)\/([^/]+)$/,
+        );
         if (failMatch && request.method === "GET") {
           const domain = decodeURIComponent(failMatch[1]!);
           const filename = decodeURIComponent(failMatch[2]!);
           if (!UPLOAD_DOMAINS.has(domain) && domain !== "general") {
             return json({ error: `Unknown domain: ${domain}` }, 400, cors);
           }
-          if (!filename.endsWith(".md") || filename.includes("..") || filename.includes("/")) {
+          if (
+            !filename.endsWith(".md") ||
+            filename.includes("..") ||
+            filename.includes("/")
+          ) {
             return json({ error: "Invalid filename" }, 400, cors);
           }
           const { readFileSync } = await import("node:fs");
           const { join } = await import("node:path");
-          const filePath = join(import.meta.dir, "..", "knowledge", "builtin", "failures", domain, filename);
+          const filePath = join(
+            import.meta.dir,
+            "..",
+            "knowledge",
+            "builtin",
+            "failures",
+            domain,
+            filename,
+          );
           try {
             const content = readFileSync(filePath, "utf8");
             return json({ domain, filename, content }, 200, cors);
@@ -1165,7 +1392,8 @@ export function createApp(
 
         if (contentType.includes("multipart/form-data")) {
           const formData = await request.formData().catch(() => null);
-          if (!formData) return json({ error: "Invalid multipart body" }, 400, cors);
+          if (!formData)
+            return json({ error: "Invalid multipart body" }, 400, cors);
           const file = formData.get("file") as unknown as File | null;
           const domainRaw = formData.get("domain");
           if (typeof domainRaw === "string") domain = domainRaw;
@@ -1190,7 +1418,8 @@ export function createApp(
           filename = typeof b["filename"] === "string" ? b["filename"] : "";
           domain = typeof b["domain"] === "string" ? b["domain"] : "general";
           content = typeof b["content"] === "string" ? b["content"] : "";
-          if (!filename) return json({ error: "filename is required" }, 400, cors);
+          if (!filename)
+            return json({ error: "filename is required" }, 400, cors);
           const fnErr = validateFilename(filename);
           if (fnErr) return json({ error: fnErr }, 400, cors);
           const dErr = validateDomain(domain);
@@ -1198,7 +1427,16 @@ export function createApp(
         }
 
         const doc = upsertDocument(db, filename, domain, content);
-        return json({ filename: doc.filename, chunks_indexed: 1, domain: doc.domain, status: "indexed" }, 200, cors);
+        return json(
+          {
+            filename: doc.filename,
+            chunks_indexed: 1,
+            domain: doc.domain,
+            status: "indexed",
+          },
+          200,
+          cors,
+        );
       }
 
       {
@@ -1207,16 +1445,27 @@ export function createApp(
           const filename = decodeURIComponent(docMatch[1]!);
           if (request.method === "GET") {
             // For GET, allow any filename that is a bare name — but reject dotfiles/paths.
-            if (filename.startsWith(".") || filename.includes("/") || filename.includes("\\")) {
+            if (
+              filename.startsWith(".") ||
+              filename.includes("/") ||
+              filename.includes("\\")
+            ) {
               return json({ error: "Invalid filename" }, 400, cors);
             }
             const doc = getDocument(db, filename);
             if (!doc) return json({ error: "Document not found" }, 404, cors);
-            const text = doc.content.trim() ? doc.content : "_No extractable text in this document._";
+            const text = doc.content.trim()
+              ? doc.content
+              : "_No extractable text in this document._";
             return json({ filename: doc.filename, content: text }, 200, cors);
           }
           if (request.method === "DELETE") {
-            if (filename.startsWith(".") || filename.includes("/") || filename.includes("\\") || filename !== docMatch[1]) {
+            if (
+              filename.startsWith(".") ||
+              filename.includes("/") ||
+              filename.includes("\\") ||
+              filename !== docMatch[1]
+            ) {
               return json({ error: "Invalid filename" }, 400, cors);
             }
             const ok = deleteDocument(db, filename);

@@ -122,12 +122,15 @@ const COLD_START_WINDOW_HOURS = 24;
 
 function sinceFor(db: Db, kind: string, now: Date = new Date()): string {
   const row = db
-    .query<{ generated_at: string }, [string]>(
-      "SELECT generated_at FROM briefing_narrative WHERE scope = ?",
-    )
+    .query<
+      { generated_at: string },
+      [string]
+    >("SELECT generated_at FROM briefing_narrative WHERE scope = ?")
     .get(kind);
   if (row?.generated_at) return row.generated_at;
-  return new Date(now.getTime() - COLD_START_WINDOW_HOURS * 60 * 60 * 1000).toISOString();
+  return new Date(
+    now.getTime() - COLD_START_WINDOW_HOURS * 60 * 60 * 1000,
+  ).toISOString();
 }
 
 function isActionable(source: string): boolean {
@@ -147,21 +150,26 @@ function parseDecisionInstanceId(topicTags: readonly string[]): number | null {
 
 // ── builders ───────────────────────────────────────────────────────────────
 
-export function buildToday(db: Db, callerPersonId: number | null = null): TodayResponse {
+export function buildToday(
+  db: Db,
+  callerPersonId: number | null = null,
+): TodayResponse {
   // Departments with goal health.
   const deptRows = db
-    .query<{ slug: string; title: string; authority_level: string }, []>(
-      "SELECT slug, title, authority_level FROM departments ORDER BY slug",
-    )
+    .query<
+      { slug: string; title: string; authority_level: string },
+      []
+    >("SELECT slug, title, authority_level FROM departments ORDER BY slug")
     .all();
 
   // Awaiting counts per department from scheduled_actions (pending, with department).
   const awaitingByDept = new Map<string, number>();
   try {
     const rows = db
-      .query<{ department: string; cnt: number }, []>(
-        "SELECT department, COUNT(*) as cnt FROM scheduled_actions WHERE status = 'pending' AND department != '' GROUP BY department",
-      )
+      .query<
+        { department: string; cnt: number },
+        []
+      >("SELECT department, COUNT(*) as cnt FROM scheduled_actions WHERE status = 'pending' AND department != '' GROUP BY department")
       .all();
     for (const r of rows) awaitingByDept.set(r.department, r.cnt);
   } catch {
@@ -170,7 +178,16 @@ export function buildToday(db: Db, callerPersonId: number | null = null): TodayR
 
   const departments: DepartmentBriefItem[] = deptRows.map((dept) => {
     const goals = db
-      .query<{ key_result: string; current: string; target: string; status: string; id: number }, [string]>(
+      .query<
+        {
+          key_result: string;
+          current: string;
+          target: string;
+          status: string;
+          id: number;
+        },
+        [string]
+      >(
         "SELECT id, key_result, current, target, status FROM department_goals WHERE department_slug = ? ORDER BY id",
       )
       .all(dept.slug);
@@ -226,12 +243,16 @@ export function buildToday(db: Db, callerPersonId: number | null = null): TodayR
   const soonestByPerson = new Map<number, string>();
   try {
     const rows = db
-      .query<{ assigned_to_person_id: number; run_at: string }, []>(
-        "SELECT assigned_to_person_id, run_at FROM scheduled_actions WHERE status = 'pending' AND assigned_to_person_id IS NOT NULL ORDER BY run_at",
-      )
+      .query<
+        { assigned_to_person_id: number; run_at: string },
+        []
+      >("SELECT assigned_to_person_id, run_at FROM scheduled_actions WHERE status = 'pending' AND assigned_to_person_id IS NOT NULL ORDER BY run_at")
       .all();
     for (const r of rows) {
-      awaitingByPerson.set(r.assigned_to_person_id, (awaitingByPerson.get(r.assigned_to_person_id) ?? 0) + 1);
+      awaitingByPerson.set(
+        r.assigned_to_person_id,
+        (awaitingByPerson.get(r.assigned_to_person_id) ?? 0) + 1,
+      );
       if (!soonestByPerson.has(r.assigned_to_person_id)) {
         soonestByPerson.set(r.assigned_to_person_id, r.run_at);
       }
@@ -244,9 +265,10 @@ export function buildToday(db: Db, callerPersonId: number | null = null): TodayR
   const scopeByPerson = new Map<number, string[]>();
   try {
     const rows = db
-      .query<{ person_id: number; scope_token: string }, []>(
-        "SELECT person_id, scope_token FROM person_authority_scope",
-      )
+      .query<
+        { person_id: number; scope_token: string },
+        []
+      >("SELECT person_id, scope_token FROM person_authority_scope")
       .all();
     for (const r of rows) {
       const arr = scopeByPerson.get(r.person_id) ?? [];
@@ -261,7 +283,9 @@ export function buildToday(db: Db, callerPersonId: number | null = null): TodayR
   const people: PersonBriefItem[] = peopleRows.map((person) => {
     const awaiting = awaitingByPerson.get(person.id) ?? 0;
     const soonest = soonestByPerson.get(person.id) ?? null;
-    const onLeave = person.on_leave_until ? new Date(person.on_leave_until) >= now : false;
+    const onLeave = person.on_leave_until
+      ? new Date(person.on_leave_until) >= now
+      : false;
     let departmentSlugs: string[] = [];
     try {
       departmentSlugs = JSON.parse(person.department_slugs_json) as string[];
@@ -298,7 +322,9 @@ export function buildToday(db: Db, callerPersonId: number | null = null): TodayR
   });
 
   // Sort people by priority desc, then name.
-  people.sort((a, b) => b.priority - a.priority || a.full_name.localeCompare(b.full_name));
+  people.sort(
+    (a, b) => b.priority - a.priority || a.full_name.localeCompare(b.full_name),
+  );
 
   // Proposals from live alerts (unread, not snoozed, inside TTL).
   // Simplified: just unread alerts, filtered by isActionable.
@@ -369,9 +395,10 @@ export function buildToday(db: Db, callerPersonId: number | null = null): TodayR
   let narrative: string | null = null;
   try {
     const cached = db
-      .query<{ narrative_text: string }, [string]>(
-        "SELECT narrative_text FROM briefing_narrative WHERE scope = ?",
-      )
+      .query<
+        { narrative_text: string },
+        [string]
+      >("SELECT narrative_text FROM briefing_narrative WHERE scope = ?")
       .get(BRIEF_KIND);
     if (cached) narrative = cached.narrative_text;
   } catch {
@@ -399,11 +426,13 @@ export function buildActivity(db: Db, limit: number): ActivityResponse {
 
   // Audit log entries since watermark.
   try {
+    const auditLimit = Math.max(1, Math.min(limit * 2, 100));
     const rows = db
-      .query<{ summary: string; event_type: string; ts: string }, [string]>(
-        `SELECT summary, event_type, ts FROM audit_log WHERE ts > ? ORDER BY ts DESC LIMIT ${Math.max(1, Math.min(limit * 2, 100))}`,
-      )
-      .all(since);
+      .query<
+        { summary: string; event_type: string; ts: string },
+        [string, number]
+      >("SELECT summary, event_type, ts FROM audit_log WHERE ts > ? ORDER BY ts DESC LIMIT ?")
+      .all(since, auditLimit);
     for (const row of rows) {
       items.push({
         kind: row.event_type,
@@ -422,16 +451,27 @@ export function buildActivity(db: Db, limit: number): ActivityResponse {
   try {
     const cap = Math.max(1, Math.min(limit, 100));
     const rows = db
-      .query<{ intent_text: string; channel: string; channel_ref: string; department: string; created_at: string; kind: string }, []>(
-        `SELECT intent_text, channel, channel_ref, department, created_at, kind FROM scheduled_actions WHERE status = 'done' ORDER BY created_at DESC LIMIT ${cap}`,
+      .query<
+        {
+          intent_text: string;
+          channel: string;
+          channel_ref: string;
+          department: string;
+          created_at: string;
+          kind: string;
+        },
+        [number]
+      >(
+        "SELECT intent_text, channel, channel_ref, department, created_at, kind FROM scheduled_actions WHERE status = 'done' ORDER BY created_at DESC LIMIT ?",
       )
-      .all();
+      .all(cap);
     for (const row of rows) {
       if (row.kind === "nudge_scan" || row.channel === "__internal__") continue;
       let kind = "action";
       if (row.kind === "proactive_nudge") kind = "nudge_sent";
       else if (row.kind === "dept_cadence") kind = "cadence_sent";
-      else if (row.channel === "slack_dm" || row.channel === "discord_dm") kind = "dm_sent";
+      else if (row.channel === "slack_dm" || row.channel === "discord_dm")
+        kind = "dm_sent";
       else if (row.channel === "email") kind = "email_sent";
       items.push({
         kind,
@@ -451,15 +491,21 @@ export function buildActivity(db: Db, limit: number): ActivityResponse {
   return { items: items.slice(0, limit) };
 }
 
-export function buildDailyActivity(db: Db, days: number): DailyActivityResponse {
+export function buildDailyActivity(
+  db: Db,
+  days: number,
+): DailyActivityResponse {
   // Count audit_log entries per day.
   const counts = new Map<string, number>();
   try {
-    const sinceIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const sinceIso = new Date(
+      Date.now() - days * 24 * 60 * 60 * 1000,
+    ).toISOString();
     const rows = db
-      .query<{ date: string; cnt: number }, [string]>(
-        "SELECT substr(ts, 1, 10) as date, COUNT(*) as cnt FROM audit_log WHERE ts >= ? GROUP BY date",
-      )
+      .query<
+        { date: string; cnt: number },
+        [string]
+      >("SELECT substr(ts, 1, 10) as date, COUNT(*) as cnt FROM audit_log WHERE ts >= ? GROUP BY date")
       .all(sinceIso);
     for (const r of rows) counts.set(r.date, r.cnt);
   } catch {
@@ -468,11 +514,14 @@ export function buildDailyActivity(db: Db, days: number): DailyActivityResponse 
 
   // Also count scheduled_actions done per day.
   try {
-    const sinceIso2 = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const sinceIso2 = new Date(
+      Date.now() - days * 24 * 60 * 60 * 1000,
+    ).toISOString();
     const rows = db
-      .query<{ date: string; cnt: number }, [string]>(
-        "SELECT substr(created_at, 1, 10) as date, COUNT(*) as cnt FROM scheduled_actions WHERE status = 'done' AND created_at >= ? GROUP BY date",
-      )
+      .query<
+        { date: string; cnt: number },
+        [string]
+      >("SELECT substr(created_at, 1, 10) as date, COUNT(*) as cnt FROM scheduled_actions WHERE status = 'done' AND created_at >= ? GROUP BY date")
       .all(sinceIso2);
     for (const r of rows) {
       counts.set(r.date, (counts.get(r.date) ?? 0) + r.cnt);
@@ -495,13 +544,19 @@ export function buildDailyActivity(db: Db, days: number): DailyActivityResponse 
   return { days: out };
 }
 
-export function resolveCallerPersonId(db: Db, email: string | null): number | null {
+export function resolveCallerPersonId(
+  db: Db,
+  email: string | null,
+): number | null {
   if (!email) return null;
   const normalized = email.trim().toLowerCase();
   if (!normalized) return null;
   try {
     const row = db
-      .query<{ id: number }, [string]>("SELECT id FROM people WHERE lower(email) = ? AND archived = 0")
+      .query<
+        { id: number },
+        [string]
+      >("SELECT id FROM people WHERE lower(email) = ? AND archived = 0")
       .get(normalized);
     if (row) return row.id;
     return null;

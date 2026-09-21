@@ -36,7 +36,7 @@ export interface KnowledgeHit {
 }
 
 export interface SearchOptions {
-  readonly domain?: string;
+  readonly domain?: string | readonly string[];
   readonly kind?: KnowledgeKind;
   readonly limit?: number;
 }
@@ -65,7 +65,9 @@ export const DOMAIN_ALIASES: Record<string, readonly string[]> = {
   talent: ["hr", "strategy"],
 };
 
-export function withGeneral(domains: readonly string[] | null | undefined): readonly string[] | null | undefined {
+export function withGeneral(
+  domains: readonly string[] | null | undefined,
+): readonly string[] | null | undefined {
   if (!domains || domains.length === 0) return domains;
   if (domains.includes("general")) return domains;
   return [...domains, "general"];
@@ -183,8 +185,16 @@ export function searchKnowledge(
   const filters: string[] = [];
   const params: string[] = [toFtsQuery(query)];
   if (options.domain) {
-    filters.push("AND domain = ?");
-    params.push(options.domain);
+    const domains = Array.isArray(options.domain)
+      ? options.domain
+      : [options.domain];
+    if (domains.length === 1) {
+      filters.push("AND domain = ?");
+      params.push(domains[0]!);
+    } else if (domains.length > 1) {
+      filters.push(`AND domain IN (${domains.map(() => "?").join(", ")})`);
+      params.push(...domains);
+    }
   }
   if (options.kind) {
     filters.push("AND kind = ?");
