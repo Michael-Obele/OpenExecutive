@@ -314,4 +314,83 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE departments ADD COLUMN watched_entities_json TEXT NOT NULL DEFAULT '[]'`,
     ],
   },
+
+  {
+    id: 6,
+    name: "state_api_memories_sessions_artifacts",
+    statements: [
+      // ── episodic memories ────────────────────────────────────────────
+      // from: memory/episodic.py
+      `CREATE TABLE IF NOT EXISTS decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        rationale TEXT DEFAULT '',
+        outcome TEXT DEFAULT '',
+        tags TEXT DEFAULT '',
+        department TEXT NOT NULL DEFAULT '',
+        session_id TEXT NOT NULL DEFAULT ''
+      )`,
+      `CREATE TABLE IF NOT EXISTS initiatives (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        summary TEXT DEFAULT '',
+        department TEXT NOT NULL DEFAULT ''
+      )`,
+      `CREATE TABLE IF NOT EXISTS advice_given (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        query_summary TEXT NOT NULL,
+        advice_summary TEXT NOT NULL,
+        department TEXT NOT NULL DEFAULT '',
+        session_id TEXT NOT NULL DEFAULT ''
+      )`,
+
+      // ── sessions ─────────────────────────────────────────────────────
+      // from: memory/session_store.py
+      `CREATE TABLE IF NOT EXISTS sessions (
+        session_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        caller_person_id INTEGER
+      )`,
+      `CREATE TABLE IF NOT EXISTS chat_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        action_chips TEXT,
+        FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_chat_messages_session
+        ON chat_messages(session_id)`,
+
+      // ── alerts lifecycle columns ─────────────────────────────────────
+      // from: alerts/store.py additive migrations
+      `ALTER TABLE alerts ADD COLUMN routed_to_person_id INTEGER`,
+      `ALTER TABLE alerts ADD COLUMN archived_at TEXT`,
+      `ALTER TABLE alerts ADD COLUMN last_seen_at TEXT`,
+      `ALTER TABLE alerts ADD COLUMN occurrence_count INTEGER NOT NULL DEFAULT 1`,
+      `ALTER TABLE alerts ADD COLUMN last_reviewed_at TEXT`,
+      `ALTER TABLE alerts ADD COLUMN review_verdict TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE alerts ADD COLUMN review_note TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE alerts ADD COLUMN recommended_move TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE alerts ADD COLUMN why_now TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE alerts ADD COLUMN due_at TEXT`,
+      `ALTER TABLE alerts ADD COLUMN superseded_by_alert_id INTEGER`,
+      `ALTER TABLE alerts ADD COLUMN snoozed_until TEXT`,
+      `ALTER TABLE alerts ADD COLUMN suggested_workflow TEXT NOT NULL DEFAULT ''`,
+
+      // ── workflow_runs artifact archive ────────────────────────────────
+      // from: workflows/persistence.py
+      `ALTER TABLE workflow_runs ADD COLUMN archived_at TEXT`,
+    ],
+  },
 ];

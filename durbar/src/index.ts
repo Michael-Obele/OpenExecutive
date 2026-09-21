@@ -55,6 +55,41 @@ import {
   validatePersonPatch,
 } from "./features/people/people.ts";
 import {
+  bulkSetStatus,
+  getAlert,
+  listLiveAlerts,
+  reopenAlert,
+  setStatus,
+  validateAckBody,
+  validateBulkAckBody,
+} from "./features/alerts/alerts.ts";
+import {
+  deleteAdvice,
+  deleteDecision,
+  deleteInitiative,
+  getAdvice,
+  getDecision,
+  getInitiative,
+  listAdvice,
+  listDecisions,
+  listInitiatives,
+  updateAdvice,
+  updateDecision,
+  updateInitiative,
+} from "./features/memories/memories.ts";
+import {
+  deleteArtifact,
+  getArtifact,
+  listArtifacts,
+  setArtifactArchived,
+} from "./features/artifacts/artifacts.ts";
+import {
+  deleteSession,
+  getSessionMetadata,
+  listSessions,
+  loadMessages,
+} from "./features/sessions/sessions.ts";
+import {
   DEFAULT_MORNING_TIME,
   pendingActions,
   PRINCIPAL_BRIEF_MORNING,
@@ -473,6 +508,270 @@ export function createApp(
               }
               throw error;
             }
+          }
+        }
+      }
+
+      // ── alerts ────────────────────────────────────────────────────────
+      // GET /alerts/review — live queue (unread, inside TTL, not snoozed).
+      // POST /alerts/review — run the Executive's relevance review on demand.
+      // Upstream is POST only; Durbar supports both: GET lists live alerts,
+      // POST runs the review (currently a no-op that returns zero counts — the
+      // model-backed review is deferred).
+      if (url.pathname === "/alerts/review" && request.method === "GET") {
+        const live = listLiveAlerts(db);
+        return json(live, 200, cors);
+      }
+      if (url.pathname === "/alerts/review" && request.method === "POST") {
+        // Model-backed review deferred — return zero counts so the contract
+        // is stable and the dashboard's "Re-check now" button works.
+        return json(
+          {
+            reviewed: 0,
+            closed: 0,
+            changed: 0,
+            routed: 0,
+            nudged: 0,
+            escalated: 0,
+            drafted: 0,
+            merged: 0,
+            suggested: 0,
+            annotated: 0,
+          },
+          200,
+          cors,
+        );
+      }
+
+      if (url.pathname === "/alerts/bulk-ack" && request.method === "POST") {
+        const body: unknown = await request.json().catch(() => null);
+        const validated = validateBulkAckBody(body);
+        if (!validated.ok) {
+          const code = validated.error.includes("required") ? 400 : 422;
+          return json({ error: validated.error }, code, cors);
+        }
+        const { status, alert_ids, older_than_days, category } = validated.data;
+        let before: string | null = null;
+        if (older_than_days !== undefined) {
+          before = new Date(Date.now() - older_than_days * 24 * 60 * 60 * 1000).toISOString();
+        }
+        const updated = bulkSetStatus(db, status, {
+          ...(alert_ids !== undefined ? { alert_ids } : {}),
+          ...(before ? { before } : {}),
+          ...(category ? { category } : {}),
+          excludeSources: ["artifact", "decision_scheduling"],
+        });
+        return json({ count: updated.length }, 200, cors);
+      }
+
+      {
+        const ackMatch = url.pathname.match(/^\/alerts\/(\d+)\/ack$/);
+        if (ackMatch && request.method === "POST") {
+          const id = Number(ackMatch[1]);
+          const existing = getAlert(db, id);
+          if (!existing) return json({ error: "Alert not found" }, 404, cors);
+          const body: unknown = await request.json().catch(() => null);
+          const validated = validateAckBody(body);
+          if (!validated.ok) return json({ error: validated.error }, 422, cors);
+          setStatus(db, id, validated.status);
+          // Mute handling deferred — requires topic pattern validation.
+          const updated = getAlert(db, id);
+          if (!updated) return json({ error: "Alert not found" }, 404, cors);
+          return json(updated, 200, cors);
+        }
+      }
+
+      {
+        const reopenMatch = url.pathname.match(/^\/alerts\/(\d+)\/reopen$/);
+        if (reopenMatch && request.method === "POST") {
+          const id = Number(reopenMatch[1]);
+          const existing = getAlert(db, id);
+          if (!existing) return json({ error: "Alert not found" }, 404, cors);
+          const ok = reopenAlert(db, id, ["artifact", "decision_scheduling"]);
+          if (!ok) {
+            return json({ error: "Only resolved, expired or dismissed alerts can be reopened" }, 409, cors);
+          }
+          const updated = getAlert(db, id);
+          if (!updated) return json({ error: "Alert not found" }, 404, cors);
+          return json(updated, 200, cors);
+        }
+      }
+
+      // ── memories ──────────────────────────────────────────────────────
+      if (url.pathname === "/memories/decisions" && request.method === "GET") {
+        return json(listDecisions(db), 200, cors);
+      }
+      if (url.pathname === "/memories/initiatives" && request.method === "GET") {
+        return json(listInitiatives(db), 200, cors);
+      }
+      if (url.pathname === "/memories/advice" && request.method === "GET") {
+        return json(listAdvice(db), 200, cors);
+      }
+
+      {
+        const decMatch = url.pathname.match(/^\/memories\/decisions\/(\d+)$/);
+        if (decMatch) {
+          const id = Number(decMatch[1]);
+          if (request.method === "PATCH") {
+            const body: unknown = await request.json().catch(() => null);
+            const patch = (body ?? {}) as Record<string, unknown>;
+            const allowed: Record<string, string> = {};
+            for (const key of ["domain", "summary", "rationale", "outcome", "tags"]) {
+              if (key in patch && patch[key] !== undefined) {
+                if (typeof patch[key] !== "string") return json({ error: `${key} must be a string` }, 422, cors);
+                allowed[key] = patch[key] as string;
+              }
+            }
+            if (!updateDecision(db, id, allowed)) return json({ error: "Decision not found" }, 404, cors);
+            const updated = getDecision(db, id);
+            if (!updated) return json({ error: "Decision not found" }, 404, cors);
+            return json(updated, 200, cors);
+          }
+          if (request.method === "DELETE") {
+            if (!deleteDecision(db, id)) return json({ error: "Decision not found" }, 404, cors);
+            return new Response(null, { status: 204, headers: cors });
+          }
+        }
+      }
+
+      {
+        const initMatch = url.pathname.match(/^\/memories\/initiatives\/(\d+)$/);
+        if (initMatch) {
+          const id = Number(initMatch[1]);
+          if (request.method === "PATCH") {
+            const body: unknown = await request.json().catch(() => null);
+            const patch = (body ?? {}) as Record<string, unknown>;
+            const allowed: Record<string, string> = {};
+            for (const key of ["title", "status", "summary"]) {
+              if (key in patch && patch[key] !== undefined) {
+                if (typeof patch[key] !== "string") return json({ error: `${key} must be a string` }, 422, cors);
+                allowed[key] = patch[key] as string;
+              }
+            }
+            if (!updateInitiative(db, id, allowed)) return json({ error: "Initiative not found" }, 404, cors);
+            const updated = getInitiative(db, id);
+            if (!updated) return json({ error: "Initiative not found" }, 404, cors);
+            return json(updated, 200, cors);
+          }
+          if (request.method === "DELETE") {
+            if (!deleteInitiative(db, id)) return json({ error: "Initiative not found" }, 404, cors);
+            return new Response(null, { status: 204, headers: cors });
+          }
+        }
+      }
+
+      {
+        const advMatch = url.pathname.match(/^\/memories\/advice\/(\d+)$/);
+        if (advMatch) {
+          const id = Number(advMatch[1]);
+          if (request.method === "PATCH") {
+            const body: unknown = await request.json().catch(() => null);
+            const patch = (body ?? {}) as Record<string, unknown>;
+            const allowed: Record<string, string> = {};
+            for (const key of ["domain", "query_summary", "advice_summary"]) {
+              if (key in patch && patch[key] !== undefined) {
+                if (typeof patch[key] !== "string") return json({ error: `${key} must be a string` }, 422, cors);
+                allowed[key] = patch[key] as string;
+              }
+            }
+            if (!updateAdvice(db, id, allowed)) return json({ error: "Advice not found" }, 404, cors);
+            const updated = getAdvice(db, id);
+            if (!updated) return json({ error: "Advice not found" }, 404, cors);
+            return json(updated, 200, cors);
+          }
+          if (request.method === "DELETE") {
+            if (!deleteAdvice(db, id)) return json({ error: "Advice not found" }, 404, cors);
+            return new Response(null, { status: 204, headers: cors });
+          }
+        }
+      }
+
+      // ── artifacts ─────────────────────────────────────────────────────
+      // Specific sub-paths before the generic /artifacts/{id} match.
+      if (url.pathname === "/artifacts" && request.method === "GET") {
+        const archived = url.searchParams.get("archived") === "true";
+        const limitRaw = url.searchParams.get("limit");
+        const limit = limitRaw ? Number(limitRaw) : 200;
+        const artifacts = listArtifacts(db, Number.isFinite(limit) ? limit : 200, archived);
+        return json({ artifacts }, 200, cors);
+      }
+
+      {
+        const archiveMatch = url.pathname.match(/^\/artifacts\/(.+)\/archive$/);
+        if (archiveMatch && request.method === "POST") {
+          const compositeId = decodeURIComponent(archiveMatch[1]!);
+          // Validate shape first: malformed id is 400, not 404.
+          const parsed = compositeId.includes(":") && (compositeId.startsWith("alert:") || compositeId.startsWith("run:"));
+          if (!parsed) return json({ error: `Malformed artifact id: ${JSON.stringify(compositeId)}` }, 400, cors);
+          const ok = setArtifactArchived(db, compositeId, true);
+          if (!ok) return json({ error: `Artifact ${JSON.stringify(compositeId)} not found` }, 404, cors);
+          return json({ status: "archived", id: compositeId }, 200, cors);
+        }
+      }
+
+      {
+        const restoreMatch = url.pathname.match(/^\/artifacts\/(.+)\/restore$/);
+        if (restoreMatch && request.method === "POST") {
+          const compositeId = decodeURIComponent(restoreMatch[1]!);
+          const parsed = compositeId.includes(":") && (compositeId.startsWith("alert:") || compositeId.startsWith("run:"));
+          if (!parsed) return json({ error: `Malformed artifact id: ${JSON.stringify(compositeId)}` }, 400, cors);
+          const ok = setArtifactArchived(db, compositeId, false);
+          if (!ok) return json({ error: `Artifact ${JSON.stringify(compositeId)} not found` }, 404, cors);
+          return json({ status: "restored", id: compositeId }, 200, cors);
+        }
+      }
+
+      {
+        const artifactMatch = url.pathname.match(/^\/artifacts\/(.+)$/);
+        if (artifactMatch) {
+          const compositeId = decodeURIComponent(artifactMatch[1]!);
+          if (request.method === "GET") {
+            const parsed = compositeId.includes(":") && (compositeId.startsWith("alert:") || compositeId.startsWith("run:"));
+            if (!parsed) return json({ error: `Malformed artifact id: ${JSON.stringify(compositeId)}` }, 400, cors);
+            const artifact = getArtifact(db, compositeId);
+            if (!artifact) return json({ error: `Artifact ${JSON.stringify(compositeId)} not found` }, 404, cors);
+            return json(artifact, 200, cors);
+          }
+          if (request.method === "DELETE") {
+            const parsed = compositeId.includes(":") && (compositeId.startsWith("alert:") || compositeId.startsWith("run:"));
+            if (!parsed) return json({ error: `Malformed artifact id: ${JSON.stringify(compositeId)}` }, 400, cors);
+            const ok = deleteArtifact(db, compositeId);
+            if (!ok) return json({ error: `Artifact ${JSON.stringify(compositeId)} not found` }, 404, cors);
+            return json({ status: "deleted", id: compositeId }, 200, cors);
+          }
+        }
+      }
+
+      // ── sessions ──────────────────────────────────────────────────────
+      // NOTE: Durbar returns all sessions newest-first. Upstream scopes by
+      // caller_person_id (auth); multiuser scoping is deferred — see the
+      // sessions module doc comment.
+      if (url.pathname === "/sessions" && request.method === "GET") {
+        return json(listSessions(db), 200, cors);
+      }
+
+      {
+        const msgMatch = url.pathname.match(/^\/sessions\/([^/]+)\/messages$/);
+        if (msgMatch && request.method === "GET") {
+          const sessionId = decodeURIComponent(msgMatch[1]!);
+          const meta = getSessionMetadata(db, sessionId);
+          if (!meta) return json({ error: "Session not found" }, 404, cors);
+          return json(loadMessages(db, sessionId), 200, cors);
+        }
+      }
+
+      {
+        const sessMatch = url.pathname.match(/^\/sessions\/([^/]+)$/);
+        if (sessMatch) {
+          const sessionId = decodeURIComponent(sessMatch[1]!);
+          if (request.method === "GET") {
+            const meta = getSessionMetadata(db, sessionId);
+            if (!meta) return json({ error: "Session not found" }, 404, cors);
+            return json(meta, 200, cors);
+          }
+          if (request.method === "DELETE") {
+            if (!deleteSession(db, sessionId)) return json({ error: "Session not found" }, 404, cors);
+            return new Response(null, { status: 204, headers: cors });
           }
         }
       }
