@@ -556,6 +556,143 @@ describe("DELETE /departments/{slug}/goals/{id}", () => {
   });
 });
 
+// ── GET /departments/{slug}/(goals|okrs) collection ───────────────────────
+
+describe("GET /departments/{slug}/goals", () => {
+  test("returns goals for a department", async () => {
+    const db = seededDb();
+    const app = appWith(db);
+    await req(app, "/departments/finance/goals", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        period_value: "Q1 2026",
+        key_result: "K1",
+        target: "T1",
+      }),
+    });
+    await req(app, "/departments/finance/goals", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        period_value: "Q2 2026",
+        key_result: "K2",
+        target: "T2",
+      }),
+    });
+    const { res, body } = await req(app, "/departments/finance/goals");
+    expect(res.status).toBe(200);
+    const goals = body as Array<{ key_result: string }>;
+    expect(goals).toHaveLength(2);
+    expect(goals[0]!.key_result).toBe("K1");
+    expect(goals[1]!.key_result).toBe("K2");
+  });
+
+  test("returns empty array when no goals", async () => {
+    const db = seededDb();
+    const app = appWith(db);
+    const { res, body } = await req(app, "/departments/finance/goals");
+    expect(res.status).toBe(200);
+    expect(body).toEqual([]);
+  });
+
+  test("404 for unknown department", async () => {
+    const db = seededDb();
+    const app = appWith(db);
+    const { res } = await req(app, "/departments/unknown/goals");
+    expect(res.status).toBe(404);
+  });
+
+  test("GET /okrs returns same data with deprecation headers", async () => {
+    const db = seededDb();
+    const app = appWith(db);
+    await req(app, "/departments/finance/goals", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        period_value: "Q1 2026",
+        key_result: "K",
+        target: "T",
+      }),
+    });
+    const { res, body } = await req(app, "/departments/finance/okrs");
+    expect(res.status).toBe(200);
+    expect((body as unknown[]).length).toBe(1);
+    expect(res.headers.get("deprecation")).toBe("true");
+    expect(res.headers.get("sunset") ?? "").toContain("2027");
+    expect(res.headers.get("link") ?? "").toContain("/goals");
+  });
+});
+
+describe("PATCH /departments/{slug} strict validation", () => {
+  test("422 when charter.mission is not a string", async () => {
+    const db = seededDb();
+    const app = appWith(db);
+    const { res, body } = await req(app, "/departments/finance", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ charter: { mission: 123 } }),
+    });
+    expect(res.status).toBe(422);
+    expect((body as { error: string }).error).toMatch(
+      /charter\.mission must be a string/,
+    );
+  });
+
+  test("422 when charter.scope is not an array", async () => {
+    const db = seededDb();
+    const app = appWith(db);
+    const { res, body } = await req(app, "/departments/finance", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ charter: { scope: "not-array" } }),
+    });
+    expect(res.status).toBe(422);
+    expect((body as { error: string }).error).toMatch(
+      /charter\.scope must be an array/,
+    );
+  });
+
+  test("422 when charter.scope contains non-string", async () => {
+    const db = seededDb();
+    const app = appWith(db);
+    const { res, body } = await req(app, "/departments/finance", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ charter: { scope: [123] } }),
+    });
+    expect(res.status).toBe(422);
+    expect((body as { error: string }).error).toMatch(
+      /charter\.scope must be an array of strings/,
+    );
+  });
+
+  test("422 when cadences value is not a string", async () => {
+    const db = seededDb();
+    const app = appWith(db);
+    const { res, body } = await req(app, "/departments/finance", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cadences: { check_in: 123 } }),
+    });
+    expect(res.status).toBe(422);
+    expect((body as { error: string }).error).toMatch(
+      /cadences\.check_in must be a string/,
+    );
+  });
+
+  test("422 when cadences is not an object", async () => {
+    const db = seededDb();
+    const app = appWith(db);
+    const { res } = await req(app, "/departments/finance", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cadences: "daily" }),
+    });
+    expect(res.status).toBe(422);
+  });
+});
+
 // ── legacy /okrs aliases ───────────────────────────────────────────────────
 
 describe("legacy /okrs aliases", () => {

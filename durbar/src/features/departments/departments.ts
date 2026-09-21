@@ -499,10 +499,307 @@ export function createDepartment(
 }
 
 export function deleteDepartment(db: Db, slug: string): boolean {
-  // Delete goals first so FK semantics are explicit even without ON DELETE CASCADE.
-  db.run("DELETE FROM department_goals WHERE department_slug = ?", [slug]);
-  const result = db.run("DELETE FROM departments WHERE slug = ?", [slug]);
-  return result.changes > 0;
+  // Atomic: goals + department in one transaction so a crash cannot leave
+  // orphaned goals or a half-deleted department.
+  return db.transaction(() => {
+    db.run("DELETE FROM department_goals WHERE department_slug = ?", [slug]);
+    const result = db.run("DELETE FROM departments WHERE slug = ?", [slug]);
+    return result.changes > 0;
+  })();
+}
+
+// ── okrs deprecation ───────────────────────────────────────────────────────
+
+/** Sunset for the deprecated /okrs aliases — update when the removal date moves. */
+export const OKRS_SUNSET = "Sun, 01 Mar 2027 00:00:00 GMT";
+
+export function okrsDeprecationHeaders(
+  slug: string,
+  id?: number,
+): Record<string, string> {
+  const path =
+    id !== undefined
+      ? `/departments/${slug}/goals/${id}`
+      : `/departments/${slug}/goals`;
+  return {
+    deprecation: "true",
+    sunset: OKRS_SUNSET,
+    link: `<${path}>; rel="successor-version"`,
+  };
+}
+
+// ── watched_entities helper (single source of truth) ───────────────────────
+
+export function validateAndCleanWatchedEntities(
+  raw: unknown,
+): { ok: true; cleaned: string[] } | { ok: false; error: string } {
+  if (!Array.isArray(raw))
+    return { ok: false, error: "watched_entities must be an array" };
+  if (raw.length > 50)
+    return {
+      ok: false,
+      error: "watched_entities must have at most 50 items",
+    };
+  for (const item of raw) {
+    if (typeof item !== "string")
+      return { ok: false, error: "watched_entities must be strings" };
+    if (item.trim().replace(/\s+/g, " ").length > 128)
+      return {
+        ok: false,
+        error: "watched entity names must be 128 characters or fewer",
+      };
+  }
+  const seen = new Set<string>();
+  const cleaned: string[] = [];
+  for (const item of raw as string[]) {
+    const name = item.trim().replace(/\s+/g, " ");
+    if (name === "") continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cleaned.push(name);
+  }
+  return { ok: true, cleaned };
+}
+
+// ── department PATCH validation (strict, no silent coercion) ───────────────
+
+export function validateDepartmentPatch(
+  body: unknown,
+): { ok: true; patch: DepartmentPatch } | { ok: false; error: string } {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, error: "body must be a JSON object" };
+  }
+  const raw = body as Record<string, unknown>;
+  if (Object.keys(raw).length === 0) {
+    return { ok: true, patch: {} };
+  }
+
+  // Pre-validate authority_level strictly before any coercion.
+  if ("authority_level" in raw && raw["authority_level"] !== undefined) {
+    const v = raw["authority_level"];
+    if (
+      typeof v !== "string" ||
+      !(AUTHORITY_LEVELS as readonly string[]).includes(v)
+    ) {
+      return {
+        ok: false,
+        error: `authority_level must be one of ${AUTHORITY_LEVELS.join(", ")}`,
+      };
+    }
+  }
+
+  // Pre-validate watched_entities strictly (single helper).
+  if ("watched_entities" in raw) {
+    const result = validateAndCleanWatchedEntities(raw["watched_entities"]);
+    if (!result.ok) return result;
+  }
+
+  // Strict charter validation — no silent defaults.
+  if (
+    "charter" in raw &&
+    raw["charter"] !== undefined &&
+    raw["charter"] !== null
+  ) {
+    const ch = raw["charter"];
+    if (typeof ch !== "object" || ch === null || Array.isArray(ch)) {
+      return { ok: false, error: "charter must be an object" };
+    }
+    const chRecord = ch as Record<string, unknown>;
+    if ("mission" in chRecord && chRecord["mission"] !== undefined) {
+      if (typeof chRecord["mission"] !== "string") {
+        return { ok: false, error: "charter.mission must be a string" };
+      }
+    }
+    if ("scope" in chRecord && chRecord["scope"] !== undefined) {
+      const scope = chRecord["scope"];
+      if (!Array.isArray(scope)) {
+        return { ok: false, error: "charter.scope must be an array" };
+      }
+      for (const item of scope) {
+        if (typeof item !== "string") {
+          return {
+            ok: false,
+            error: "charter.scope must be an array of strings",
+          };
+        }
+      }
+    }
+    if ("out_of_scope" in chRecord && chRecord["out_of_scope"] !== undefined) {
+      const out = chRecord["out_of_scope"];
+      if (!Array.isArray(out)) {
+        return { ok: false, error: "charter.out_of_scope must be an array" };
+      }
+      for (const item of out) {
+        if (typeof item !== "string") {
+          return {
+            ok: false,
+            error: "charter.out_of_scope must be an array of strings",
+          };
+        }
+      }
+    }
+  }
+
+  // Strict cadences validation — values must be strings.
+  if ("cadences" in raw && raw["cadences"] !== undefined) {
+    const v = raw["cadences"];
+    if (v !== null && (typeof v !== "object" || Array.isArray(v))) {
+      return { ok: false, error: "cadences must be an object" };
+    }
+    if (v !== null && typeof v === "object") {
+      for (const [key, value] of Object.entries(v as Record<string, unknown>)) {
+        if (typeof value !== "string") {
+          return {
+            ok: false,
+            error: `cadences.${key} must be a string`,
+          };
+        }
+      }
+    }
+  }
+
+  const patch: DepartmentPatch = {};
+  let hasField = false;
+
+  if ("title" in raw) {
+    if (
+      typeof raw["title"] !== "string" ||
+      (raw["title"] as string).trim() === ""
+    ) {
+      return { ok: false, error: "title must not be blank" };
+    }
+    patch.title = raw["title"] as string;
+    hasField = true;
+  }
+
+  if (
+    "charter" in raw &&
+    raw["charter"] !== undefined &&
+    raw["charter"] !== null
+  ) {
+    const ch = raw["charter"] as Record<string, unknown>;
+    const mission =
+      "mission" in ch && typeof ch["mission"] === "string"
+        ? (ch["mission"] as string)
+        : "";
+    const scope =
+      "scope" in ch && Array.isArray(ch["scope"])
+        ? (ch["scope"] as string[])
+        : [];
+    const out_of_scope =
+      "out_of_scope" in ch && Array.isArray(ch["out_of_scope"])
+        ? (ch["out_of_scope"] as string[])
+        : [];
+    patch.charter = { mission, scope, out_of_scope };
+    hasField = true;
+  }
+
+  if ("authority_level" in raw && raw["authority_level"] !== undefined) {
+    const v = raw["authority_level"] as string;
+    if (v === "auto_execute" || v === "propose_only" || v === "escalate") {
+      patch.authority_level = v;
+    }
+    hasField = true;
+  }
+
+  if ("head_person_id" in raw) {
+    const v = raw["head_person_id"];
+    if (v === null) {
+      patch._clear_head_person_id = true;
+      hasField = true;
+    } else if (typeof v === "number") {
+      patch.head_person_id = v;
+      hasField = true;
+    } else {
+      return { ok: false, error: "head_person_id must be a number or null" };
+    }
+  }
+
+  if ("head_persona_slug" in raw) {
+    const v = raw["head_persona_slug"];
+    if (v !== null && v !== undefined && typeof v !== "string") {
+      return { ok: false, error: "head_persona_slug must be a string or null" };
+    }
+    patch.head_persona_slug = v as string | null;
+    hasField = true;
+  }
+
+  if ("cadences" in raw && raw["cadences"] !== undefined) {
+    const v = raw["cadences"];
+    patch.cadences = (v ?? {}) as Record<string, string>;
+    hasField = true;
+  }
+
+  if ("headcount" in raw) {
+    const v = raw["headcount"];
+    if (v !== null && typeof v !== "number") {
+      return { ok: false, error: "headcount must be a number or null" };
+    }
+    patch.headcount = v as number | null;
+    hasField = true;
+  }
+
+  if ("budget_usd" in raw) {
+    const v = raw["budget_usd"];
+    if (v !== null && typeof v !== "number") {
+      return { ok: false, error: "budget_usd must be a number or null" };
+    }
+    patch.budget_usd = v as number | null;
+    hasField = true;
+  }
+
+  if ("slack_channel_id" in raw) {
+    const v = raw["slack_channel_id"];
+    if (v === null) {
+      patch._clear_slack = true;
+      hasField = true;
+    } else if (typeof v === "string") {
+      patch.slack_channel_id = v;
+      hasField = true;
+    } else {
+      return { ok: false, error: "slack_channel_id must be a string or null" };
+    }
+  }
+
+  if ("discord_channel_id" in raw) {
+    const v = raw["discord_channel_id"];
+    if (v === null) {
+      patch._clear_discord = true;
+      hasField = true;
+    } else if (typeof v === "string") {
+      patch.discord_channel_id = v;
+      hasField = true;
+    } else {
+      return {
+        ok: false,
+        error: "discord_channel_id must be a string or null",
+      };
+    }
+  }
+
+  if ("telegram_chat_id" in raw) {
+    const v = raw["telegram_chat_id"];
+    if (v === null) {
+      patch._clear_telegram = true;
+      hasField = true;
+    } else if (typeof v === "string") {
+      patch.telegram_chat_id = v;
+      hasField = true;
+    } else {
+      return { ok: false, error: "telegram_chat_id must be a string or null" };
+    }
+  }
+
+  if ("watched_entities" in raw) {
+    const result = validateAndCleanWatchedEntities(raw["watched_entities"]);
+    if (!result.ok) return result;
+    patch.watched_entities = result.cleaned;
+    hasField = true;
+  }
+
+  if (!hasField) return { ok: true, patch: {} };
+  return { ok: true, patch };
 }
 
 export interface DepartmentPatch {

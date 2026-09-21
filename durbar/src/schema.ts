@@ -46,10 +46,6 @@ export const MIGRATIONS: readonly Migration[] = [
         cadences_json TEXT NOT NULL DEFAULT '{}',
         headcount INTEGER,
         budget_usd REAL,
-        slack_channel_id TEXT,
-        discord_channel_id TEXT,
-        telegram_chat_id TEXT,
-        watched_entities_json TEXT NOT NULL DEFAULT '[]',
         updated_at TEXT NOT NULL
       )`,
 
@@ -301,6 +297,21 @@ export const MIGRATIONS: readonly Migration[] = [
         data TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )`,
+    ],
+  },
+
+  {
+    id: 5,
+    name: "departments_channels_watched",
+    statements: [
+      // Upstream added these via ALTER TABLE; Durbar's migration 1 originally
+      // declared them together, which violated append-only. This migration
+      // restores append-only: id:1 is the original DDL, this adds the columns.
+      // Each ALTER is idempotent via migrate() duplicate-column tolerance.
+      `ALTER TABLE departments ADD COLUMN slack_channel_id TEXT`,
+      `ALTER TABLE departments ADD COLUMN discord_channel_id TEXT`,
+      `ALTER TABLE departments ADD COLUMN telegram_chat_id TEXT`,
+      `ALTER TABLE departments ADD COLUMN watched_entities_json TEXT NOT NULL DEFAULT '[]'`,
     ],
   },
 ];

@@ -130,14 +130,17 @@ function asIntOrNull(value: unknown, field: string): number | null {
  */
 export function validatePatch(
   body: unknown,
-): { data: Partial<CompanyProfile>; error?: undefined } | { data?: undefined; error: string } {
+):
+  | { data: Partial<CompanyProfile>; error?: undefined }
+  | { data?: undefined; error: string } {
   if (!isRecord(body)) return { error: "body must be a JSON object" };
 
   const data: Partial<CompanyProfile> = {};
 
   try {
     if ("name" in body) data.name = asString(body["name"], "name");
-    if ("industry" in body) data.industry = asString(body["industry"], "industry");
+    if ("industry" in body)
+      data.industry = asString(body["industry"], "industry");
     if ("stage" in body) data.stage = asString(body["stage"], "stage");
     if ("founding_year" in body)
       data.founding_year = asIntOrNull(body["founding_year"], "founding_year");
@@ -158,11 +161,12 @@ export function validatePatch(
         // client learns the shape rather than silently clearing to defaults.
         throw new Error("target_customer must be an object");
       }
-      if (!isRecord(raw))
-        throw new Error("target_customer must be an object");
+      if (!isRecord(raw)) throw new Error("target_customer must be an object");
       const tc: TargetCustomer = {
         profile:
-          "profile" in raw ? asString(raw["profile"], "target_customer.profile") : "",
+          "profile" in raw
+            ? asString(raw["profile"], "target_customer.profile")
+            : "",
         pain_points:
           "pain_points" in raw
             ? asStringArray(raw["pain_points"], "target_customer.pain_points")
@@ -178,7 +182,10 @@ export function validatePatch(
       data.competitive_landscape = {
         primary_competitors:
           "primary_competitors" in raw
-            ? asStringArray(raw["primary_competitors"], "competitive_landscape.primary_competitors")
+            ? asStringArray(
+                raw["primary_competitors"],
+                "competitive_landscape.primary_competitors",
+              )
             : [],
         competitive_advantages:
           "competitive_advantages" in raw
@@ -200,7 +207,10 @@ export function validatePatch(
             : [],
         leadership_team:
           "leadership_team" in raw
-            ? asStringArray(raw["leadership_team"], "org_structure.leadership_team")
+            ? asStringArray(
+                raw["leadership_team"],
+                "org_structure.leadership_team",
+              )
             : [],
       };
     }
@@ -212,11 +222,17 @@ export function validatePatch(
       data.strategic_priorities = {
         current_year:
           "current_year" in raw
-            ? asStringArray(raw["current_year"], "strategic_priorities.current_year")
+            ? asStringArray(
+                raw["current_year"],
+                "strategic_priorities.current_year",
+              )
             : [],
         north_star_metric:
           "north_star_metric" in raw
-            ? asString(raw["north_star_metric"], "strategic_priorities.north_star_metric")
+            ? asString(
+                raw["north_star_metric"],
+                "strategic_priorities.north_star_metric",
+              )
             : "",
       };
     }
@@ -229,7 +245,10 @@ export function validatePatch(
           "values" in raw ? asStringArray(raw["values"], "culture.values") : [],
         operating_principles:
           "operating_principles" in raw
-            ? asStringArray(raw["operating_principles"], "culture.operating_principles")
+            ? asStringArray(
+                raw["operating_principles"],
+                "culture.operating_principles",
+              )
             : [],
       };
     }
@@ -240,7 +259,10 @@ export function validatePatch(
       const fm: Financials = {
         burn_rate_monthly:
           "burn_rate_monthly" in raw
-            ? asNumberOrNull(raw["burn_rate_monthly"], "financials.burn_rate_monthly")
+            ? asNumberOrNull(
+                raw["burn_rate_monthly"],
+                "financials.burn_rate_monthly",
+              )
             : null,
         runway_months:
           "runway_months" in raw
@@ -280,7 +302,8 @@ export function getCompanyProfile(db: Db): CompanyProfile | null {
   if (!row) return null;
   try {
     return JSON.parse(row.data) as CompanyProfile;
-  } catch {
+  } catch (error) {
+    console.error("getCompanyProfile: failed to parse JSON", error);
     return null;
   }
 }

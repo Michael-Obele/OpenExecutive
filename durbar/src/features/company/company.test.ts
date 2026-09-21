@@ -50,7 +50,11 @@ function appWith(db: ReturnType<typeof openDb>) {
   return createApp(context);
 }
 
-async function json(path: string, app: ReturnType<typeof createApp>, init?: RequestInit) {
+async function json(
+  path: string,
+  app: ReturnType<typeof createApp>,
+  init?: RequestInit,
+) {
   const res = await app(new Request(`http://localhost${path}`, init));
   const body: unknown = await res.json().catch(() => null);
   return { res, body };
@@ -81,15 +85,20 @@ describe("GET /company-profile", () => {
 });
 
 describe("PATCH /company-profile", () => {
-  test("returns 404 when no profile exists yet", async () => {
+  test("upserts — creates profile when none exists (brief: PATCH upserts)", async () => {
     const db = openDb();
     const app = appWith(db);
-    const { res } = await json("/company-profile", app, {
+    const { res, body } = await json("/company-profile", app, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: "Acme" }),
     });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
+    expect((body as { name: string }).name).toBe("Acme");
+    // GET now returns the created profile.
+    const { res: getRes, body: getBody } = await json("/company-profile", app);
+    expect(getRes.status).toBe(200);
+    expect((getBody as { name: string }).name).toBe("Acme");
   });
 
   test("upserts with validation — happy path", async () => {
@@ -119,10 +128,15 @@ describe("PATCH /company-profile", () => {
     await json("/company-profile", app, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ target_customer: { profile: "SMBs", pain_points: ["churn"] } }),
+      body: JSON.stringify({
+        target_customer: { profile: "SMBs", pain_points: ["churn"] },
+      }),
     });
     const { body } = await json("/company-profile", app);
-    expect((body as { target_customer: { profile: string } }).target_customer.profile).toBe("SMBs");
+    expect(
+      (body as { target_customer: { profile: string } }).target_customer
+        .profile,
+    ).toBe("SMBs");
   });
 
   test("422 on invalid shape", async () => {

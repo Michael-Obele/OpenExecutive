@@ -7,16 +7,16 @@
  * the relational data, so retrieval and state share one artefact to back up.
  */
 
-import { Database } from 'bun:sqlite';
-import { MIGRATIONS } from './schema.ts';
+import { Database } from "bun:sqlite";
+import { MIGRATIONS } from "./schema.ts";
 
 export type Db = Database;
 
 /** Opens a database and brings it up to the current schema version. */
-export function openDb(path = ':memory:'): Db {
+export function openDb(path = ":memory:"): Db {
   const db = new Database(path, { create: true });
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA foreign_keys = ON');
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA foreign_keys = ON");
   migrate(db);
   return db;
 }
@@ -38,7 +38,7 @@ export function migrate(db: Db): void {
 
   const applied = new Set(
     db
-      .query<{ id: number }, []>('SELECT id FROM schema_migrations')
+      .query<{ id: number }, []>("SELECT id FROM schema_migrations")
       .all()
       .map((row) => row.id),
   );
@@ -47,9 +47,22 @@ export function migrate(db: Db): void {
     if (applied.has(migration.id)) continue;
 
     const run = db.transaction(() => {
-      for (const statement of migration.statements) db.exec(statement);
+      for (const statement of migration.statements) {
+        try {
+          db.exec(statement);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          // ALTER TABLE ADD COLUMN is not idempotent in SQLite (no IF NOT EXISTS).
+          // Migration 5 adds columns that older DBs already have via the original
+          // migration 1 DDL, so tolerate duplicate-column errors for append-only
+          // migration compatibility.
+          if (message.includes("duplicate column name")) continue;
+          throw error;
+        }
+      }
       db.run(
-        'INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)',
+        "INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)",
         [migration.id, migration.name, new Date().toISOString()],
       );
     });
@@ -58,7 +71,7 @@ export function migrate(db: Db): void {
 }
 
 if (import.meta.main) {
-  const path = process.env['DURBAR_DB_PATH'] ?? './durbar.db';
+  const path = process.env["DURBAR_DB_PATH"] ?? "./durbar.db";
   const db = openDb(path);
 
   // FTS5 creates five shadow tables per virtual table (`_config`, `_content`,
@@ -76,7 +89,7 @@ if (import.meta.main) {
 
   const shadows = new Set(
     ftsTables.flatMap((name) =>
-      ['config', 'content', 'data', 'docsize', 'idx'].map(
+      ["config", "content", "data", "docsize", "idx"].map(
         (suffix) => `${name}_${suffix}`,
       ),
     ),
@@ -92,6 +105,6 @@ if (import.meta.main) {
     .filter((name) => !shadows.has(name));
 
   console.log(`initialised ${path}`);
-  console.log(`tables (${tables.length}): ${tables.join(', ')}`);
+  console.log(`tables (${tables.length}): ${tables.join(", ")}`);
   db.close();
 }
