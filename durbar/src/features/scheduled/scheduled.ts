@@ -112,13 +112,17 @@ export function cancelScheduledAction(db: Db, id: number): "not_found" | "not_ca
 
 /**
  * Constant-time string comparison to avoid timing leaks on the admin token.
- * Falls back to false when lengths differ without early exit on content.
+ * Iterates over max length and pads the shorter input with 0 so the loop
+ * length does not leak which side is longer; length equality is folded into
+ * the final diff without an early return.
  */
 export function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  const maxLen = Math.max(a.length, b.length);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < maxLen; i += 1) {
+    const ca = i < a.length ? a.charCodeAt(i) : 0;
+    const cb = i < b.length ? b.charCodeAt(i) : 0;
+    diff |= ca ^ cb;
   }
   return diff === 0;
 }

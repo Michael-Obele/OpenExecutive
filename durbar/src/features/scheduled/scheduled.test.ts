@@ -127,7 +127,10 @@ describe("DELETE /scheduled/{id}", () => {
     const db = openDb();
     const id = insertScheduled(db, { status: "pending" });
     const app = appWith(db);
-    const { res, body } = await req(app, `/scheduled/${id}`, { method: "DELETE" });
+    const { res, body } = await req(app, `/scheduled/${id}`, {
+      method: "DELETE",
+      headers: { "x-forwarded-for": "127.0.0.1" },
+    });
     expect(res.status).toBe(200);
     expect((body as { status: string }).status).toBe("cancelled");
   });
@@ -135,7 +138,10 @@ describe("DELETE /scheduled/{id}", () => {
   test("404 for unknown id", async () => {
     const db = openDb();
     const app = appWith(db);
-    const { res } = await req(app, "/scheduled/99999", { method: "DELETE" });
+    const { res } = await req(app, "/scheduled/99999", {
+      method: "DELETE",
+      headers: { "x-forwarded-for": "127.0.0.1" },
+    });
     expect(res.status).toBe(404);
   });
 
@@ -143,7 +149,10 @@ describe("DELETE /scheduled/{id}", () => {
     const db = openDb();
     const id = insertScheduled(db, { status: "done" });
     const app = appWith(db);
-    const { res } = await req(app, `/scheduled/${id}`, { method: "DELETE" });
+    const { res } = await req(app, `/scheduled/${id}`, {
+      method: "DELETE",
+      headers: { "x-forwarded-for": "127.0.0.1" },
+    });
     expect(res.status).toBe(409);
   });
 
@@ -187,5 +196,24 @@ describe("DELETE /scheduled/{id}", () => {
       headers: { "x-forwarded-for": "1.2.3.4" },
     });
     expect(res.status).toBe(503);
+  });
+
+  test("503 when no X-Forwarded-For and no token (fail-closed)", async () => {
+    const db = openDb();
+    const id = insertScheduled(db);
+    const app = appWith(db);
+    const { res } = await req(app, `/scheduled/${id}`, { method: "DELETE" });
+    expect(res.status).toBe(503);
+  });
+
+  test("handles comma-separated X-Forwarded-For taking first IP", async () => {
+    const db = openDb();
+    const id = insertScheduled(db);
+    const app = appWith(db);
+    const { res } = await req(app, `/scheduled/${id}`, {
+      method: "DELETE",
+      headers: { "x-forwarded-for": "127.0.0.1, 10.0.0.1" },
+    });
+    expect(res.status).toBe(200);
   });
 });

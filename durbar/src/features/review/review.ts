@@ -166,6 +166,30 @@ export function setReviewPriority(db: Db, itemId: string, priority: Priority): R
   return getReviewItem(db, itemId);
 }
 
+export function setReviewStatusAndPriority(
+  db: Db,
+  itemId: string,
+  status: ReviewStatus,
+  priority: Priority,
+  notes?: string,
+): ReviewItem | null {
+  const now = new Date().toISOString();
+  const existing = getReviewItem(db, itemId);
+  if (!existing) return null;
+  const reviewerNotes = notes !== undefined ? notes : existing.reviewer_notes;
+  const tx = db.transaction(() => {
+    db.run("UPDATE review_items SET status = ?, reviewer_notes = ?, reviewed_at = ? WHERE item_id = ?", [
+      status,
+      reviewerNotes,
+      now,
+      itemId,
+    ]);
+    db.run("UPDATE review_items SET priority = ? WHERE item_id = ?", [priority, itemId]);
+  });
+  tx();
+  return getReviewItem(db, itemId);
+}
+
 export function bulkApprove(db: Db, domain?: string | null): number {
   if (domain) {
     const result = db.run("UPDATE review_items SET status = 'approved', reviewed_at = ? WHERE status = 'pending' AND domain = ?", [
@@ -203,7 +227,7 @@ export function listAnnotations(
 }
 
 export function addAnnotation(db: Db, itemId: string, domain: string, correction: string): Annotation {
-  const id = `annot_${Math.random().toString(36).slice(2, 10)}_${Date.now()}`;
+  const id = `annot_${crypto.randomUUID()}`;
   const now = new Date().toISOString();
   db.run(
     "INSERT INTO review_annotations (annotation_id, item_id, domain, correction, is_active, created_at) VALUES (?, ?, ?, ?, 1, ?)",

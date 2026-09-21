@@ -154,6 +154,7 @@ import {
   REVIEW_STATUSES,
   setReviewPriority,
   setReviewStatus,
+  setReviewStatusAndPriority,
   toggleAnnotation,
   updateAnnotation,
   updateReviewNotes,
@@ -1571,10 +1572,13 @@ export function createApp(
       if (url.pathname === "/workflows/custom" && request.method === "POST") {
         const body: unknown = await request.json().catch(() => null);
         if (!body || typeof body !== "object") return json({ error: "Invalid JSON" }, 400, cors);
-        const defn = body as Record<string, unknown> & { name: string };
-        if (!defn.name) return json({ error: "name is required" }, 400, cors);
-        if (getDynamicDef(db, defn.name)) {
-          return json({ error: `A custom workflow named ${JSON.stringify(defn.name)} already exists` }, 409, cors);
+        const defn = body as Record<string, unknown>;
+        if (typeof defn["name"] !== "string" || !(defn["name"] as string).trim()) {
+          return json({ error: "name is required" }, 400, cors);
+        }
+        const name = defn["name"] as string;
+        if (getDynamicDef(db, name)) {
+          return json({ error: `A custom workflow named ${JSON.stringify(name)} already exists` }, 409, cors);
         }
         const errors = validateDynamicDef(defn as unknown as Parameters<typeof validateDynamicDef>[0]);
         if (errors.length > 0) return json({ error: errors.join("; "), detail: errors }, 422, cors);
@@ -1664,7 +1668,7 @@ export function createApp(
             return json({ error: "Invalid JSON" }, 400, cors);
           }
           const inputs = payload as Record<string, unknown>;
-          const runId = Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+          const runId = crypto.randomUUID();
           const title = deriveTitle(name, inputs);
           createRun(db, runId, name, title, inputs);
           // Stub execution: immediately complete with a placeholder artifact so the
@@ -1716,14 +1720,16 @@ export function createApp(
             return json(row, 200, cors);
           }
           if (request.method === "DELETE") {
-            // Admin gate: mirrors Python require_admin_token.
+            // Admin gate: mirrors Python require_admin_token (fail-closed).
+            // X-Forwarded-For is comma-split; first entry is the originating IP.
+            // Missing header is treated as NOT loopback so remote curl without
+            // the header cannot bypass the 503 when SCHEDULED_ADMIN_TOKEN is unset.
             const expected = settings.scheduledAdminToken;
             const headerToken = request.headers.get("x-admin-token");
-            // Determine loopback: Bun's request does not expose remote addr directly;
-            // use X-Forwarded-For / absence as heuristic. In tests there is no
-            // forwarding header, so treat as loopback when no X-Forwarded-For.
             const forwarded = request.headers.get("x-forwarded-for");
-            const isLoopback = !forwarded || forwarded === "127.0.0.1" || forwarded === "::1" || forwarded === "localhost";
+            const firstForwarded = forwarded ? forwarded.split(",")[0]!.trim() : null;
+            const LOOPBACKS = new Set(["127.0.0.1", "::1", "localhost"]);
+            const isLoopback = firstForwarded !== null && LOOPBACKS.has(firstForwarded);
             if (expected) {
               if (!headerToken || !timingSafeEqual(headerToken, expected)) {
                 return json({ error: "Invalid or missing X-Admin-Token" }, 401, cors);
@@ -1816,13 +1822,27 @@ export function createApp(
             }
             let item = getReviewItem(db, itemId);
             if (!item) return json({ error: "Review item not found" }, 404, cors);
-            if (status) {
+            if (status && priority) {
+              const notes = reviewerNotes !== undefined ? reviewerNotes : item.reviewer_notes;
+              item = setReviewStatusAndPriority(
+                db,
+                itemId,
+                status as (typeof REVIEW_STATUSES)[number],
+                priority as (typeof PRIORITIES)[number],
+                notes,
+              ) as typeof item;
+            } else if (status) {
               const notes = reviewerNotes !== undefined ? reviewerNotes : item.reviewer_notes;
               item = setReviewStatus(db, itemId, status as (typeof REVIEW_STATUSES)[number], notes) as typeof item;
+              if (priority) {
+                item = setReviewPriority(db, itemId, priority as (typeof PRIORITIES)[number]) as typeof item;
+              }
             } else if (reviewerNotes !== undefined) {
               item = updateReviewNotes(db, itemId, reviewerNotes) as typeof item;
-            }
-            if (priority) {
+              if (priority) {
+                item = setReviewPriority(db, itemId, priority as (typeof PRIORITIES)[number]) as typeof item;
+              }
+            } else if (priority) {
               item = setReviewPriority(db, itemId, priority as (typeof PRIORITIES)[number]) as typeof item;
             }
             return json(item, 200, cors);
@@ -1938,6 +1958,18 @@ export function createApp(
         const offsetRaw = url.searchParams.get("offset");
         const limit = limitRaw ? Number(limitRaw) : 100;
         const offset = offsetRaw ? Number(offsetRaw) : 0;
+        if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+          return json({ error: "limit must be an integer in [1, 1000]" }, 400, cors);
+        }
+        if (!Number.isInteger(offset) || offset < 0) {
+          return json({ error: "offset must be a non-negative integer" }, 400, cors);
+        }
+        if (since !== null && Number.isNaN(Date.parse(since))) {
+          return json({ error: "since must be an ISO8601 timestamp" }, 400, cors);
+        }
+        if (until !== null && Number.isNaN(Date.parse(until))) {
+          return json({ error: "until must be an ISO8601 timestamp" }, 400, cors);
+        }
         if (eventType && !EVENT_TYPES.includes(eventType as (typeof EVENT_TYPES)[number])) {
           return json({ error: `Unknown event_type: ${JSON.stringify(eventType)}` }, 422, cors);
         }

@@ -634,7 +634,5 @@ export function deriveTitle(workflowName: string, payload: Record<string, unknow
   }
   const meta = BUILTINS.find((w) => w.name === workflowName);
   if (meta) return meta.title;
-  const dyn = null;
-  void dyn;
   return workflowName;
 }

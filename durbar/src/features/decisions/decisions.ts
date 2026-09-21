@@ -97,17 +97,21 @@ function parsePayload(json: string): Record<string, unknown> {
   }
 }
 
+function canonicalPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(payload).sort()) {
+    const val = payload[key];
+    if (key === "attendee_emails" && Array.isArray(val)) {
+      out[key] = [...(val as string[])].sort();
+    } else {
+      out[key] = val;
+    }
+  }
+  return out;
+}
+
 function payloadDiff(original: Record<string, unknown>, final: Record<string, unknown>): boolean {
-  for (const key of ["title", "start", "end", "description"]) {
-    if (original[key] !== final[key]) return true;
-  }
-  const origAtt = [...((original["attendee_emails"] as string[] | undefined) ?? [])].sort();
-  const finalAtt = [...((final["attendee_emails"] as string[] | undefined) ?? [])].sort();
-  if (origAtt.length !== finalAtt.length) return true;
-  for (let i = 0; i < origAtt.length; i += 1) {
-    if (origAtt[i] !== finalAtt[i]) return true;
-  }
-  return false;
+  return JSON.stringify(canonicalPayload(original)) !== JSON.stringify(canonicalPayload(final));
 }
 
 // ── store ──────────────────────────────────────────────────────────────────
@@ -179,10 +183,9 @@ export function approveDecision(
   const original = parsePayload(instance.proposed_payload_json);
   const finalPayload: Record<string, unknown> = { ...original };
   if (edits) {
-    for (const key of ["title", "start", "end", "description"]) {
-      if (key in edits) finalPayload[key] = edits[key];
+    for (const [k, v] of Object.entries(edits)) {
+      finalPayload[k] = v;
     }
-    if ("attendee_emails" in edits) finalPayload["attendee_emails"] = edits["attendee_emails"];
   }
   const edited = payloadDiff(original, finalPayload);
   const outcome = edited ? STATUS_APPROVED_WITH_EDIT : STATUS_APPROVED_UNCHANGED;

@@ -25,6 +25,8 @@ export const EVENT_TYPES = [
   "scheduled_action",
   "alert",
   "peer_memory",
+  "auth_login",
+  "auth_logout",
 ] as const;
 
 export interface AuditEvent {
@@ -231,7 +233,7 @@ export function queryAudit(
     params.push(`%${escapeLike(opts.q)}%`);
   }
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
-  const sql = `SELECT id, ts, event_type, session_id, turn_id, actor, summary, details_json, department FROM audit_log ${where} ORDER BY id DESC LIMIT ? OFFSET ?`;
+  const sql = `SELECT id, ts, event_type, session_id, turn_id, actor, summary, details_json, full_json, department FROM audit_log ${where} ORDER BY id DESC LIMIT ? OFFSET ?`;
   params.push(limit, offset);
   return db
     .query<Record<string, unknown>, (string | number | null)[]>(sql)
