@@ -13,7 +13,8 @@
     "start": "bun run src/index.ts",
     "test": "bun test",
     "check": "bunx tsc --noEmit",
-    "db:init": "bun run src/db.ts --init"
+    "db:init": "bun run src/db.ts --init",
+    "cli": "bun run src/cli.ts"
   },
   "engines": {
     "bun": ">=1.1.0"
