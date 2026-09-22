@@ -18,5 +18,5 @@
     "exactOptionalPropertyTypes": true
   },
   "include": ["src/**/*.ts", "packages/**/*.ts"],
-  "exclude": ["node_modules", "dashboard"]
+  "exclude": ["node_modules", "dashboard", "packages/web"]
 }
