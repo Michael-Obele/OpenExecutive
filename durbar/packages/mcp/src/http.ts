@@ -32,6 +32,9 @@ const instance = serve({
     if (new URL(request.url).pathname === "/health") {
       return Response.json({ status: "ok", server: "durbar-mcp" });
     }
+    // Origin gate: Durbar MCP is same-origin only by default. Any `Origin` header is rejected
+    // to avoid replaying the API key to a third-party site via a browser fetch. If you need
+    // cross-origin access, put Durbar behind an explicit allow-list proxy instead of opening this.
     if (request.headers.get("origin")) {
       return new Response("Cross-origin requests are not accepted", { status: 403 });
     }

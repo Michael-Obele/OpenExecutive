@@ -1,7 +1,7 @@
 {
   "name": "@durbar/mcp",
   "version": "0.1.0",
-  "description": "Durbar MCP server — read and update the company through any AI agent",
+  "description": "Durbar MCP server \u2014 read and update the company through any AI agent",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
@@ -12,7 +12,11 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["mcp", "tmcp", "durbar"],
+  "keywords": [
+    "mcp",
+    "tmcp",
+    "durbar"
+  ],
   "dependencies": {
     "tmcp": "^1.20.0",
     "@tmcp/adapter-valibot": "^0.1.6",
@@ -22,7 +26,7 @@
     "srvx": "^1.0.5"
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "@types/bun": "^1.2.13",
     "typescript": "^7.0.0"
   }
 }

@@ -111,6 +111,8 @@ async function execute(spec: ActionSpec, raw: Record<string, unknown>): Promise<
 
   const body = spec.bodyIs ? raw[spec.bodyIs] : spec.bodyFrom ? pick(raw, spec.bodyFrom) : undefined;
 
+  // Empty-PATCH guard: Durbar rejects PATCH/PUT with no fields (would be a no-op). Fail fast
+  // here so the tool call returns a clear validation error instead of a backend 422.
   if (
     (method === "PATCH" || method === "PUT") &&
     body !== null &&

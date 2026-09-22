@@ -1458,6 +1458,43 @@ export function createApp(
         return json({ files }, 200, cors);
       }
 
+      // GET /knowledge/builtin/{domain}/{filename}
+      {
+        const builtinMatch = url.pathname.match(
+          /^\/knowledge\/builtin\/([^/]+)\/([^/]+)$/,
+        );
+        if (builtinMatch && request.method === "GET") {
+          const domain = decodeURIComponent(builtinMatch[1]!);
+          const filename = decodeURIComponent(builtinMatch[2]!);
+          if (!UPLOAD_DOMAINS.has(domain) && domain !== "general") {
+            return json({ error: `Unknown domain: ${domain}` }, 400, cors);
+          }
+          if (
+            !filename.endsWith(".md") ||
+            filename.includes("..") ||
+            filename.includes("/")
+          ) {
+            return json({ error: "Invalid filename" }, 400, cors);
+          }
+          const { readFileSync } = await import("node:fs");
+          const { join } = await import("node:path");
+          const filePath = join(
+            import.meta.dir,
+            "..",
+            "knowledge",
+            "builtin",
+            domain,
+            filename,
+          );
+          try {
+            const content = readFileSync(filePath, "utf8");
+            return json({ domain, filename, content }, 200, cors);
+          } catch {
+            return json({ error: "File not found" }, 404, cors);
+          }
+        }
+      }
+
       if (url.pathname === "/knowledge/search" && request.method === "POST") {
         const body: unknown = await request.json().catch(() => null);
         const b = (body ?? {}) as Record<string, unknown>;

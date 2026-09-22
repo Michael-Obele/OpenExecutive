@@ -12,10 +12,15 @@
 const BACKEND_BASE_URL = process.env.BACKEND_BASE_URL ?? process.env.DURBAR_URL ?? "http://localhost:8787";
 const BACKEND_SHARED_SECRET = process.env.BACKEND_SHARED_SECRET ?? process.env.DURBAR_API_KEY ?? "";
 
-const REQUEST_TIMEOUT_MS = Number(process.env.MCP_REQUEST_TIMEOUT_MS ?? 30_000);
-const UPLOAD_TIMEOUT_MS = Number(process.env.MCP_UPLOAD_TIMEOUT_MS ?? 120_000);
-const STREAM_TIMEOUT_MS = Number(process.env.MCP_STREAM_TIMEOUT_MS ?? 600_000);
-const STREAM_MAX_BYTES = Number(process.env.MCP_STREAM_MAX_BYTES ?? 64 * 1024 * 1024);
+function parseTimeout(env: string | undefined, fallback: number): number {
+  const n = Number(env);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+const REQUEST_TIMEOUT_MS = parseTimeout(process.env.MCP_REQUEST_TIMEOUT_MS, 30_000);
+const UPLOAD_TIMEOUT_MS = parseTimeout(process.env.MCP_UPLOAD_TIMEOUT_MS, 120_000);
+const STREAM_TIMEOUT_MS = parseTimeout(process.env.MCP_STREAM_TIMEOUT_MS, 600_000);
+const STREAM_MAX_BYTES = parseTimeout(process.env.MCP_STREAM_MAX_BYTES, 64 * 1024 * 1024);
 
 export class BackendError extends Error {
   readonly status: number;
@@ -39,7 +44,8 @@ function authHeaders(): Record<string, string> {
 }
 
 function buildUrl(path: string, query?: Record<string, string>): URL {
-  const url = new URL(`${BACKEND_BASE_URL}/${path.replace(/^\//, "")}`);
+  const base = BACKEND_BASE_URL.endsWith("/") ? BACKEND_BASE_URL : `${BACKEND_BASE_URL}/`;
+  const url = new URL(path.replace(/^\//, ""), base);
   for (const [k, v] of Object.entries(query ?? {})) url.searchParams.append(k, v);
   return url;
 }
@@ -86,7 +92,12 @@ async function send(url: URL, init: RequestInit, label: string, timeoutMs: numbe
 async function parse<T>(res: Response): Promise<T> {
   if (res.status === 204) return undefined as T;
   const text = await res.text();
-  return (text ? JSON.parse(text) : undefined) as T;
+  if (!text) return undefined as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return text as unknown as T;
+  }
 }
 
 export async function backend<T>(path: string, opts: RequestOptions = {}): Promise<T> {
@@ -121,6 +132,25 @@ export async function backendEvents(
   let buffer = "";
   let received = 0;
 
+  function processFrame(frame: string): void {
+    const payload = frame
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim())
+      .join("\n");
+    if (!payload) return;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(payload) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    const keepPartial = onEvent(event);
+    if (event.type === "error" && keepPartial !== "keep-partial") {
+      throw new BackendError(502, `Backend POST ${path} streamed an error: ${String(event.message ?? "unknown")}`);
+    }
+  }
+
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -134,23 +164,17 @@ export async function backendEvents(
       while ((separator = buffer.indexOf("\n\n")) !== -1) {
         const frame = buffer.slice(0, separator);
         buffer = buffer.slice(separator + 2);
-        const payload = frame
-          .split("\n")
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trim())
-          .join("\n");
-        if (!payload) continue;
-        let event: Record<string, unknown>;
-        try {
-          event = JSON.parse(payload) as Record<string, unknown>;
-        } catch {
-          continue;
-        }
-        const keepPartial = onEvent(event);
-        if (event.type === "error" && keepPartial !== "keep-partial") {
-          throw new BackendError(502, `Backend POST ${path} streamed an error: ${String(event.message ?? "unknown")}`);
-        }
+        processFrame(frame);
       }
+    }
+    // Flush decoder remainder and handle final frame that lacks trailing \n\n.
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      // The remainder may contain one last frame without a trailing separator.
+      // Process it as-is; if it contains multiple frames without separators,
+      // the data: lines will still be joined correctly.
+      processFrame(buffer);
+      buffer = "";
     }
   } catch (err) {
     if (err instanceof BackendError) throw err;

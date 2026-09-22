@@ -103,13 +103,13 @@ describe("tool surface", () => {
       oe_company: 16,
       oe_people: 6,
       oe_departments: 8,
-      oe_knowledge: 17,
+      oe_knowledge: 10,
       oe_artifacts: 5,
       oe_talent: 21,
       oe_watchlist: 8,
       oe_operations: 20,
     });
-    expect(Object.values(counts).reduce((a, b) => a + b, 0)).toBe(101);
+    expect(Object.values(counts).reduce((a, b) => a + b, 0)).toBe(94);
   });
 
   test("every action variant carries an action literal and clients see a typed object", async () => {
@@ -144,6 +144,63 @@ describe("tool surface", () => {
     });
     expect(result.isError).toBe(true);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("per-tool happy paths", () => {
+  test("oe_company get_profile -> GET /company-profile", async () => {
+    await call("oe_company", { action: "get_profile" });
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.path).toBe("/company-profile");
+  });
+
+  test("oe_people list -> GET /people", async () => {
+    await call("oe_people", { action: "list" });
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.path).toBe("/people");
+  });
+
+  test("oe_departments list -> GET /departments", async () => {
+    await call("oe_departments", { action: "list" });
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.path).toBe("/departments");
+  });
+
+  test("oe_knowledge list_builtin -> GET /knowledge/builtin", async () => {
+    await call("oe_knowledge", { action: "list_builtin" });
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.path).toBe("/knowledge/builtin");
+  });
+
+  test("oe_knowledge search -> POST /knowledge/search with body", async () => {
+    await call("oe_knowledge", { action: "search", query: "pricing" });
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.path).toBe("/knowledge/search");
+    expect(calls[0]!.body).toEqual(expect.objectContaining({ query: "pricing" }));
+  });
+
+  test("oe_artifacts list -> GET /artifacts", async () => {
+    await call("oe_artifacts", { action: "list" });
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.path).toBe("/artifacts");
+  });
+
+  test("oe_talent list_engagements -> GET /engagements", async () => {
+    await call("oe_talent", { action: "list_engagements" });
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.path).toBe("/engagements");
+  });
+
+  test("oe_watchlist list -> GET /watchlist", async () => {
+    await call("oe_watchlist", { action: "list" });
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.path).toBe("/watchlist");
+  });
+
+  test("oe_operations list_review -> GET /review/items", async () => {
+    await call("oe_operations", { action: "list_review" });
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.path).toBe("/review/items");
   });
 });
 

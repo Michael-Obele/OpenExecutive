@@ -4,9 +4,20 @@
  * Durbar's knowledge surface is smaller than the reference Python backend:
  * builtin/failures are read-only files on disk, there is no mutable
  * builtin/failure store. Uploads go to `/documents` (company knowledge).
- * This tool exposes what Durbar actually serves.
+ * This tool exposes what Durbar actually serves — 10 read/search actions.
+ *
+ * Writable knowledge (create/replace/delete builtin/failure) and
+ * `peek_external` are intentionally not exposed: Durbar's builtin corpus
+ * lives as Markdown files on disk (`knowledge/builtin/`) and is indexed
+ * at boot via FTS5. There is no mutable store to POST/PUT/DELETE against,
+ * and external sources are not yet indexed (external stays empty). Keeping
+ * those actions would make the tool surface lie — every call would 404.
+ * If Durbar later adds a writable store, re-add them with real routes.
  */
 
+import { constants } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
+import { basename, extname, resolve, sep } from "node:path";
 import { backendForm } from "../backend.ts";
 import { type ActionSpec, defineDomainTool, optionalList, optionalNumber, optionalText, text } from "./registry.ts";
 
@@ -23,15 +34,14 @@ const MIME_TYPES: Record<string, string> = {
 };
 
 const DOCUMENT_ROOT = process.env.MCP_DOCUMENT_ROOT ?? process.cwd();
-const MAX_UPLOAD_BYTES = Number(process.env.MCP_MAX_UPLOAD_BYTES ?? 50 * 1024 * 1024);
+const MAX_UPLOAD_BYTES = (() => {
+  const n = Number(process.env.MCP_MAX_UPLOAD_BYTES ?? 50 * 1024 * 1024);
+  return Number.isFinite(n) && n > 0 ? n : 50 * 1024 * 1024;
+})();
 
 async function uploadDocument(input: Record<string, unknown>): Promise<unknown> {
   const filePath = String(input.file_path ?? "");
   if (!filePath) throw new Error("upload_document: 'file_path' is required");
-
-  const { basename, extname, resolve, sep } = await import("node:path");
-  const { lstat, open, realpath } = await import("node:fs/promises");
-  const { constants } = await import("node:fs");
 
   const requested = resolve(filePath);
   if ((await lstat(requested).catch(() => null))?.isSymbolicLink()) {
@@ -77,29 +87,6 @@ const actions: ActionSpec[] = [
     path: "/knowledge/builtin/:domain/:filename",
     fields: { domain: text(DOMAINS), filename: text(FILENAME) },
   },
-  {
-    name: "create_builtin",
-    description: "Add a new built-in knowledge file. Fails with 409 if it already exists — use `replace_builtin` to change an existing file. Used to ground specialist answers.",
-    method: "POST",
-    path: "/knowledge/builtin",
-    fields: { domain: text(DOMAINS), filename: text(FILENAME), content: text("Full Markdown content of the file.") },
-    bodyFrom: ["domain", "filename", "content"],
-  },
-  {
-    name: "replace_builtin",
-    description: "Replace an existing built-in knowledge file's content (re-indexes its chunks). 404 if it does not exist.",
-    method: "PUT",
-    path: "/knowledge/builtin/:domain/:filename",
-    fields: { domain: text(DOMAINS), filename: text(FILENAME), content: text("Full replacement Markdown content.") },
-    bodyFrom: ["domain", "filename", "content"],
-  },
-  {
-    name: "delete_builtin",
-    description: "⚠️ destructive — delete a built-in knowledge file and remove its indexed chunks.",
-    method: "DELETE",
-    path: "/knowledge/builtin/:domain/:filename",
-    fields: { domain: text(DOMAINS), filename: text(FILENAME) },
-  },
   { name: "list_failures", description: "List every failure-library file with its size.", method: "GET", path: "/knowledge/failures" },
   {
     name: "get_failure",
@@ -108,38 +95,7 @@ const actions: ActionSpec[] = [
     path: "/knowledge/failures/:domain/:filename",
     fields: { domain: text(DOMAINS), filename: text(FILENAME) },
   },
-  {
-    name: "create_failure",
-    description: "Add a new failure-library file. Fails with 409 if it already exists — use `replace_failure` to change an existing file.",
-    method: "POST",
-    path: "/knowledge/failures",
-    fields: { domain: text(DOMAINS), filename: text(FILENAME), content: text("Full Markdown content of the file.") },
-    bodyFrom: ["domain", "filename", "content"],
-  },
-  {
-    name: "replace_failure",
-    description: "Replace an existing failure-library file's content (re-indexes its chunks). 404 if it does not exist.",
-    method: "PUT",
-    path: "/knowledge/failures/:domain/:filename",
-    fields: { domain: text(DOMAINS), filename: text(FILENAME), content: text("Full replacement Markdown content.") },
-    bodyFrom: ["domain", "filename", "content"],
-  },
-  {
-    name: "delete_failure",
-    description: "⚠️ destructive — delete a failure-library file and remove its indexed chunks.",
-    method: "DELETE",
-    path: "/knowledge/failures/:domain/:filename",
-    fields: { domain: text(DOMAINS), filename: text(FILENAME) },
-  },
   { name: "list_external", description: "List third-party research sources with ingestion status, chunk counts and licence. Read-only.", method: "GET", path: "/knowledge/external" },
-  {
-    name: "peek_external",
-    description: "Show the first few stored chunks of one external source — use it to judge relevance before trusting a citation.",
-    method: "GET",
-    path: "/knowledge/external/:source_id/peek",
-    fields: { source_id: text("External source id (letters, digits, hyphens, underscores)."), limit: optionalNumber("How many chunks to return (1–25, default 5).") },
-    query: ["limit"],
-  },
   {
     name: "search",
     description:
