@@ -1,0 +1,28 @@
+{
+  "name": "@durbar/mcp",
+  "version": "0.1.0",
+  "description": "Durbar MCP server — read and update the company through any AI agent",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun run --watch src/index.ts",
+    "http": "bun run src/http.ts",
+    "dev:http": "bun run --watch src/http.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["mcp", "tmcp", "durbar"],
+  "dependencies": {
+    "tmcp": "^1.20.0",
+    "@tmcp/adapter-valibot": "^0.1.6",
+    "valibot": "^1.5.0",
+    "@tmcp/transport-stdio": "^0.5.0",
+    "@tmcp/transport-http": "^0.9.0",
+    "srvx": "^1.0.5"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^7.0.0"
+  }
+}
