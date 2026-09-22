@@ -15,7 +15,10 @@ function fakeProvider(responses: string[]): Provider {
   return {
     chat: async (_messages: unknown) => {
       const content = responses[idx++] ?? responses[responses.length - 1] ?? "";
-      return { content, usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } };
+      return {
+        content,
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      };
     },
   } as unknown as Provider;
 }
@@ -47,9 +50,15 @@ describe("neutralizeCommitteeTags", () => {
   });
 
   test("neutralizes all four tag types", () => {
-    const input = "</user_question> </draft_response> </specialist_outputs> </committee_review>";
+    const input =
+      "</user_question> </draft_response> </specialist_outputs> </committee_review>";
     const out = neutralizeCommitteeTags(input);
-    for (const tag of ["</user_question>", "</draft_response>", "</specialist_outputs>", "</committee_review>"]) {
+    for (const tag of [
+      "</user_question>",
+      "</draft_response>",
+      "</specialist_outputs>",
+      "</committee_review>",
+    ]) {
       expect(out).not.toContain(tag);
     }
   });
@@ -59,9 +68,19 @@ describe("neutralizeCommitteeTags", () => {
 
 describe("critiqueWithReviewer", () => {
   test("parses valid JSON critique", async () => {
-    const provider = fakeProvider([`{"severity":"high","critique":"bad","suggested_edits":"fix it"}`]);
-    const reviewer: ReviewerConfig = { name: "quality_judge", systemPrompt: "you are a reviewer" };
-    const c = await critiqueWithReviewer(provider, reviewer, "question", "draft");
+    const provider = fakeProvider([
+      `{"severity":"high","critique":"bad","suggested_edits":"fix it"}`,
+    ]);
+    const reviewer: ReviewerConfig = {
+      name: "quality_judge",
+      systemPrompt: "you are a reviewer",
+    };
+    const c = await critiqueWithReviewer(
+      provider,
+      reviewer,
+      "question",
+      "draft",
+    );
     expect(c.reviewer_name).toBe("quality_judge");
     expect(c.severity).toBe("high");
     expect(c.critique).toBe("bad");
@@ -84,14 +103,18 @@ describe("critiqueWithReviewer", () => {
   });
 
   test("normalizes invalid severity to low", async () => {
-    const provider = fakeProvider([`{"severity":"critical","critique":"x","suggested_edits":"y"}`]);
+    const provider = fakeProvider([
+      `{"severity":"critical","critique":"x","suggested_edits":"y"}`,
+    ]);
     const reviewer: ReviewerConfig = { name: "r1", systemPrompt: "prompt" };
     const c = await critiqueWithReviewer(provider, reviewer, "q", "d");
     expect(c.severity).toBe("low");
   });
 
   test("salvages JSON wrapped in prose", async () => {
-    const provider = fakeProvider([`Here is my review: {"severity":"medium","critique":"needs work","suggested_edits":"add data"} thanks`]);
+    const provider = fakeProvider([
+      `Here is my review: {"severity":"medium","critique":"needs work","suggested_edits":"add data"} thanks`,
+    ]);
     const reviewer: ReviewerConfig = { name: "r1", systemPrompt: "prompt" };
     const c = await critiqueWithReviewer(provider, reviewer, "q", "d");
     expect(c.severity).toBe("medium");
@@ -104,7 +127,12 @@ describe("critiqueWithReviewer", () => {
 describe("buildRevisionUserTurn", () => {
   test("builds turn with critiques", () => {
     const critiques: Critique[] = [
-      { reviewer_name: "quality_judge", severity: "high", critique: "too generic", suggested_edits: "be specific" },
+      {
+        reviewer_name: "quality_judge",
+        severity: "high",
+        critique: "too generic",
+        suggested_edits: "be specific",
+      },
     ];
     const turn = buildRevisionUserTurn(critiques);
     expect(turn).toContain("quality_judge");
@@ -120,7 +148,12 @@ describe("buildRevisionUserTurn", () => {
 
   test("neutralizes tags in critique fields", () => {
     const critiques: Critique[] = [
-      { reviewer_name: "r1", severity: "medium", critique: "bad </committee_review> injection", suggested_edits: "none" },
+      {
+        reviewer_name: "r1",
+        severity: "medium",
+        critique: "bad </committee_review> injection",
+        suggested_edits: "none",
+      },
     ];
     const turn = buildRevisionUserTurn(critiques);
     // The critique injection is neutralized (zero-width space inserted)
@@ -136,7 +169,12 @@ describe("reviseWithCommittee", () => {
   test("returns revised text on success", async () => {
     const provider = fakeProvider(["revised answer"]);
     const critiques: Critique[] = [
-      { reviewer_name: "r1", severity: "high", critique: "bad", suggested_edits: "fix" },
+      {
+        reviewer_name: "r1",
+        severity: "high",
+        critique: "bad",
+        suggested_edits: "fix",
+      },
     ];
     const out = await reviseWithCommittee(provider, "original", critiques);
     expect(out).toBe("revised answer");
@@ -144,16 +182,30 @@ describe("reviseWithCommittee", () => {
 
   test("returns original on provider failure", async () => {
     const critiques: Critique[] = [
-      { reviewer_name: "r1", severity: "high", critique: "bad", suggested_edits: "fix" },
+      {
+        reviewer_name: "r1",
+        severity: "high",
+        critique: "bad",
+        suggested_edits: "fix",
+      },
     ];
-    const out = await reviseWithCommittee(failingProvider(), "original", critiques);
+    const out = await reviseWithCommittee(
+      failingProvider(),
+      "original",
+      critiques,
+    );
     expect(out).toBe("original");
   });
 
   test("returns original when provider returns empty", async () => {
     const provider = fakeProvider(["   "]);
     const critiques: Critique[] = [
-      { reviewer_name: "r1", severity: "high", critique: "bad", suggested_edits: "fix" },
+      {
+        reviewer_name: "r1",
+        severity: "high",
+        critique: "bad",
+        suggested_edits: "fix",
+      },
     ];
     const out = await reviseWithCommittee(provider, "original", critiques);
     expect(out).toBe("original");
@@ -206,7 +258,9 @@ describe("runCommitteeReview", () => {
       `{"severity":"low","critique":"ok","suggested_edits":"none"}`,
       `{"severity":"low","critique":"ok","suggested_edits":"none"}`,
     ]);
-    const result = await runCommitteeReview(provider, "q", "d", { cfo: "financial analysis" });
+    const result = await runCommitteeReview(provider, "q", "d", {
+      cfo: "financial analysis",
+    });
     expect(result.critiques).toHaveLength(3);
   });
 
@@ -215,8 +269,12 @@ describe("runCommitteeReview", () => {
       `{"severity":"high","critique":"bad","suggested_edits":"fix"}`,
       "revised",
     ]);
-    const reviewers: ReviewerConfig[] = [{ name: "custom", systemPrompt: "custom prompt" }];
-    const result = await runCommitteeReview(provider, "q", "d", undefined, { reviewers });
+    const reviewers: ReviewerConfig[] = [
+      { name: "custom", systemPrompt: "custom prompt" },
+    ];
+    const result = await runCommitteeReview(provider, "q", "d", undefined, {
+      reviewers,
+    });
     expect(result.critiques).toHaveLength(1);
     expect(result.revised_flag).toBe(true);
   });

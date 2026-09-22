@@ -16,7 +16,8 @@ import { loadSettings } from "./config.ts";
 import { createProvider } from "./providers.ts";
 
 function printHelp(): void {
-  console.log(`
+  console.log(
+    `
 Durbar — lean Bun + SQLite reimplementation of OpenExecutive
 
 Usage: bun run src/cli.ts <command> [options]
@@ -35,7 +36,8 @@ Commands:
 Options:
   --help, -h            Show help
   --version, -v         Show version
-`.trim());
+`.trim(),
+  );
 }
 
 function printVersion(): void {
@@ -53,7 +55,10 @@ async function cmdAsk(question: string): Promise<void> {
   console.log(`\n[Executive]\n`);
   try {
     const result = await provider.chat([{ role: "user", content: question }]);
-    const text = typeof result === "string" ? result : (result as { content?: string }).content ?? "";
+    const text =
+      typeof result === "string"
+        ? result
+        : ((result as { content?: string }).content ?? "");
     console.log(text);
   } catch (err) {
     console.error(`[error] ${(err as Error).message}`);
@@ -71,7 +76,10 @@ async function cmdChat(): Promise<void> {
   console.log("Durbar chat — type 'exit' to quit\n");
 
   const readline = await import("node:readline");
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
 
   const ask = (prompt: string): Promise<string> =>
     new Promise((resolve) => rl.question(prompt, resolve));
@@ -85,7 +93,10 @@ async function cmdChat(): Promise<void> {
     }
     try {
       const result = await provider.chat([{ role: "user", content: input }]);
-      const text = typeof result === "string" ? result : (result as { content?: string }).content ?? "";
+      const text =
+        typeof result === "string"
+          ? result
+          : ((result as { content?: string }).content ?? "");
       console.log(`\n[Executive] ${text}\n`);
     } catch (err) {
       console.error(`[error] ${(err as Error).message}`);
@@ -106,17 +117,28 @@ function cmdDbStatus(): void {
   const settings = loadSettings();
   const db = openDb(settings.dbPath);
   migrate(db);
-  const rows = db.query<Record<string, unknown>, []>("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();
+  const rows = db
+    .query<
+      Record<string, unknown>,
+      []
+    >("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+    .all();
   console.log(`Database: ${settings.dbPath}`);
   console.log(`Tables: ${rows.map((r) => r["name"]).join(", ")}`);
   const migrations = db
-    .query<Record<string, unknown>, []>("SELECT id, name, applied_at FROM schema_migrations ORDER BY id")
+    .query<
+      Record<string, unknown>,
+      []
+    >("SELECT id, name, applied_at FROM schema_migrations ORDER BY id")
     .all();
-  console.log(`Migrations: ${migrations.map((m) => `${m["id"]}:${m["name"]}`).join(", ") || "(none)"}`);
+  console.log(
+    `Migrations: ${migrations.map((m) => `${m["id"]}:${m["name"]}`).join(", ") || "(none)"}`,
+  );
 }
 
 function cmdFixtures(): void {
-  const { readdirSync, statSync } = require("node:fs") as typeof import("node:fs");
+  const { readdirSync, statSync } =
+    require("node:fs") as typeof import("node:fs");
   const { join } = require("node:path") as typeof import("node:path");
   const candidates = [
     join(import.meta.dir, "../fixtures/companies"),
@@ -199,7 +221,11 @@ async function main(): Promise<void> {
     case "serve": {
       // Re-exec as the server entry
       const { spawn } = await import("node:child_process");
-      const child = spawn("bun", ["run", "src/index.ts"], { stdio: "inherit" }) as unknown as { on: (ev: string, cb: (code: number | null) => void) => void };
+      const child = spawn("bun", ["run", "src/index.ts"], {
+        stdio: "inherit",
+      }) as unknown as {
+        on: (ev: string, cb: (code: number | null) => void) => void;
+      };
       child.on("exit", (code: number | null) => process.exit(code ?? 0));
       break;
     }
@@ -219,7 +245,9 @@ async function main(): Promise<void> {
         process.exitCode = 1;
         return;
       }
-      console.log(`Loading fixture: ${name} (stubbed — full restore not yet wired)`);
+      console.log(
+        `Loading fixture: ${name} (stubbed — full restore not yet wired)`,
+      );
       break;
     }
     case "personas":

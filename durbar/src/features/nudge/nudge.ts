@@ -85,9 +85,10 @@ function selectStalledWorkflowCandidates(
   let rows: Record<string, unknown>[] = [];
   try {
     rows = db
-      .query<Record<string, unknown>, []>(
-        "SELECT run_id, workflow_name, title, status, awaiting_person_id, awaiting_until, updated_at FROM workflow_runs WHERE status = 'awaiting_human'",
-      )
+      .query<
+        Record<string, unknown>,
+        []
+      >("SELECT run_id, workflow_name, title, status, awaiting_person_id, awaiting_until, updated_at FROM workflow_runs WHERE status = 'awaiting_human'")
       .all();
   } catch {
     return [];
@@ -103,7 +104,8 @@ function selectStalledWorkflowCandidates(
     if (updatedAt && now.getTime() - updatedAt.getTime() < minQuietMs) continue;
 
     const runId = row["run_id"] as string;
-    const title = (row["title"] as string) || (row["workflow_name"] as string) || runId;
+    const title =
+      (row["title"] as string) || (row["workflow_name"] as string) || runId;
     const intent =
       `Nudge the approver about the paused workflow "${title}" (run_id=${runId}). ` +
       `It is awaiting a human decision and times out at ${awaitingUntil.toISOString()}. ` +
@@ -133,9 +135,10 @@ function selectStaleCommitmentCandidates(
   let rows: Record<string, unknown>[] = [];
   try {
     rows = db
-      .query<Record<string, unknown>, [string]>(
-        "SELECT id, channel, channel_ref, intent_text, originating_session_id, assigned_to_person_id, awaiting_response_since, department FROM scheduled_actions WHERE awaiting_response_since IS NOT NULL AND status IN ('pending', 'done') AND kind != 'proactive_nudge' AND awaiting_response_since <= ? ORDER BY awaiting_response_since",
-      )
+      .query<
+        Record<string, unknown>,
+        [string]
+      >("SELECT id, channel, channel_ref, intent_text, originating_session_id, assigned_to_person_id, awaiting_response_since, department FROM scheduled_actions WHERE awaiting_response_since IS NOT NULL AND status IN ('pending', 'done') AND kind != 'proactive_nudge' AND awaiting_response_since <= ? ORDER BY awaiting_response_since")
       .all(cutoff.toISOString());
   } catch {
     return [];
@@ -178,9 +181,10 @@ function selectIdleInitiativeCandidates(
   let rows: Record<string, unknown>[] = [];
   try {
     rows = db
-      .query<Record<string, unknown>, []>(
-        "SELECT id, title, status, updated_at, department FROM initiatives WHERE status = 'active'",
-      )
+      .query<
+        Record<string, unknown>,
+        []
+      >("SELECT id, title, status, updated_at, department FROM initiatives WHERE status = 'active'")
       .all();
   } catch {
     return [];
@@ -195,9 +199,10 @@ function selectIdleInitiativeCandidates(
     if (slug) {
       try {
         const cadenceRow = db
-          .query<Record<string, unknown>, [string, string]>(
-            "SELECT 1 as x FROM scheduled_actions WHERE kind = 'dept_cadence' AND department = ? AND status IN ('done', 'running') AND run_at >= ? LIMIT 1",
-          )
+          .query<
+            Record<string, unknown>,
+            [string, string]
+          >("SELECT 1 as x FROM scheduled_actions WHERE kind = 'dept_cadence' AND department = ? AND status IN ('done', 'running') AND run_at >= ? LIMIT 1")
           .get(slug, threshold.toISOString());
         if (cadenceRow) continue;
       } catch {
@@ -210,7 +215,10 @@ function selectIdleInitiativeCandidates(
     if (slug) {
       try {
         const dept = db
-          .query<Record<string, unknown>, [string]>("SELECT head_person_id FROM departments WHERE slug = ?")
+          .query<
+            Record<string, unknown>,
+            [string]
+          >("SELECT head_person_id FROM departments WHERE slug = ?")
           .get(slug);
         if (dept) personId = dept["head_person_id"] as number | null;
       } catch {
@@ -242,9 +250,10 @@ function selectIdleInitiativeCandidates(
 function recentNudgeForScope(db: Db, scopeKey: string, since: Date): boolean {
   try {
     const row = db
-      .query<Record<string, unknown>, [string, string]>(
-        "SELECT 1 as x FROM scheduled_actions WHERE scope_key = ? AND kind = 'proactive_nudge' AND created_at >= ? LIMIT 1",
-      )
+      .query<
+        Record<string, unknown>,
+        [string, string]
+      >("SELECT 1 as x FROM scheduled_actions WHERE scope_key = ? AND kind = 'proactive_nudge' AND created_at >= ? LIMIT 1")
       .get(scopeKey, since.toISOString());
     return !!row;
   } catch {
@@ -255,9 +264,10 @@ function recentNudgeForScope(db: Db, scopeKey: string, since: Date): boolean {
 function countNudgesForScope(db: Db, scopeKey: string): number {
   try {
     const row = db
-      .query<Record<string, unknown>, [string]>(
-        "SELECT COUNT(*) as n FROM scheduled_actions WHERE scope_key = ? AND kind = 'proactive_nudge'",
-      )
+      .query<
+        Record<string, unknown>,
+        [string]
+      >("SELECT COUNT(*) as n FROM scheduled_actions WHERE scope_key = ? AND kind = 'proactive_nudge'")
       .get(scopeKey);
     return (row?.["n"] as number) ?? 0;
   } catch {
@@ -269,7 +279,9 @@ function applyCaps(
   candidates: NudgeCandidate[],
   opts: { maxTotal: number; maxPerPerson: number },
 ): NudgeCandidate[] {
-  const ranked = [...candidates].sort((a, b) => a.urgency_seconds - b.urgency_seconds);
+  const ranked = [...candidates].sort(
+    (a, b) => a.urgency_seconds - b.urgency_seconds,
+  );
   const perPerson = new Map<number, number>();
   const accepted: NudgeCandidate[] = [];
   for (const c of ranked) {
@@ -294,9 +306,10 @@ function routeCandidate(
     // Look up person's preferred channel from people table
     try {
       const person = db
-        .query<Record<string, unknown>, [number]>(
-          "SELECT preferred_channel, email, slack_user_id, telegram_chat_id, discord_user_id FROM people WHERE id = ? AND archived = 0",
-        )
+        .query<
+          Record<string, unknown>,
+          [number]
+        >("SELECT preferred_channel, email, slack_user_id, telegram_chat_id, discord_user_id FROM people WHERE id = ? AND archived = 0")
         .get(candidate.person_id);
       if (!person) return null;
       const pref = (person["preferred_channel"] as string) ?? "any";
@@ -328,7 +341,10 @@ function routeCandidate(
   }
   // No person — fallback to original action's channel (commitment source only)
   if (candidate.fallback_channel && candidate.fallback_channel_ref) {
-    return { channel: candidate.fallback_channel, channel_ref: candidate.fallback_channel_ref };
+    return {
+      channel: candidate.fallback_channel,
+      channel_ref: candidate.fallback_channel_ref,
+    };
   }
   return null;
 }
@@ -375,7 +391,8 @@ export function runNudgeScan(
     candidates.push(
       ...selectStaleCommitmentCandidates(db, now, {
         staleDays: o.commitmentStaleDays ?? DEFAULTS.commitmentStaleDays,
-        cooldownHours: o.commitmentCooldownHours ?? DEFAULTS.commitmentCooldownHours,
+        cooldownHours:
+          o.commitmentCooldownHours ?? DEFAULTS.commitmentCooldownHours,
       }),
     );
   } catch {
@@ -385,7 +402,8 @@ export function runNudgeScan(
     candidates.push(
       ...selectIdleInitiativeCandidates(db, now, {
         idleDays: o.initiativeIdleDays ?? DEFAULTS.initiativeIdleDays,
-        cooldownDays: o.initiativeCooldownDays ?? DEFAULTS.initiativeCooldownDays,
+        cooldownDays:
+          o.initiativeCooldownDays ?? DEFAULTS.initiativeCooldownDays,
       }),
     );
   } catch {
@@ -405,7 +423,11 @@ export function runNudgeScan(
   for (const cand of ranked) {
     const since = new Date(now.getTime() - cand.cooldown_ms);
     if (recentNudgeForScope(db, cand.scope_key, since)) continue;
-    if (maxPerScope > 0 && countNudgesForScope(db, cand.scope_key) >= maxPerScope) continue;
+    if (
+      maxPerScope > 0 &&
+      countNudgesForScope(db, cand.scope_key) >= maxPerScope
+    )
+      continue;
 
     const routed = routeCandidate(db, cand);
     if (!routed) continue;
@@ -439,9 +461,10 @@ export function runNudgeScan(
 function heartbeatPending(db: Db): boolean {
   try {
     const row = db
-      .query<Record<string, unknown>, [string]>(
-        "SELECT 1 as x FROM scheduled_actions WHERE kind = ? AND status IN ('pending', 'running') LIMIT 1",
-      )
+      .query<
+        Record<string, unknown>,
+        [string]
+      >("SELECT 1 as x FROM scheduled_actions WHERE kind = ? AND status IN ('pending', 'running') LIMIT 1")
       .get(HEARTBEAT_KIND);
     return !!row;
   } catch {
@@ -455,11 +478,20 @@ function heartbeatPending(db: Db): boolean {
  */
 export function bootstrapNudgeScan(db: Db, now = new Date()): number | null {
   if (heartbeatPending(db)) return null;
-  const runAt = new Date(now.getTime() + DEFAULTS.scanIntervalMinutes * 60 * 1000);
+  const runAt = new Date(
+    now.getTime() + DEFAULTS.scanIntervalMinutes * 60 * 1000,
+  );
   try {
     const result = db.run(
       "INSERT INTO scheduled_actions (created_at, run_at, channel, channel_ref, intent_text, status, attempts, kind) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?)",
-      [now.toISOString(), runAt.toISOString(), HEARTBEAT_CHANNEL, HEARTBEAT_CHANNEL_REF, HEARTBEAT_INTENT, HEARTBEAT_KIND],
+      [
+        now.toISOString(),
+        runAt.toISOString(),
+        HEARTBEAT_CHANNEL,
+        HEARTBEAT_CHANNEL_REF,
+        HEARTBEAT_INTENT,
+        HEARTBEAT_KIND,
+      ],
     );
     return Number(result.lastInsertRowid);
   } catch {
@@ -473,11 +505,20 @@ export function bootstrapNudgeScan(db: Db, now = new Date()): number | null {
  */
 export function enqueueNextScan(db: Db, after?: Date): number | null {
   const base = after ?? new Date();
-  const runAt = new Date(base.getTime() + DEFAULTS.scanIntervalMinutes * 60 * 1000);
+  const runAt = new Date(
+    base.getTime() + DEFAULTS.scanIntervalMinutes * 60 * 1000,
+  );
   try {
     const result = db.run(
       "INSERT INTO scheduled_actions (created_at, run_at, channel, channel_ref, intent_text, status, attempts, kind) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?)",
-      [base.toISOString(), runAt.toISOString(), HEARTBEAT_CHANNEL, HEARTBEAT_CHANNEL_REF, HEARTBEAT_INTENT, HEARTBEAT_KIND],
+      [
+        base.toISOString(),
+        runAt.toISOString(),
+        HEARTBEAT_CHANNEL,
+        HEARTBEAT_CHANNEL_REF,
+        HEARTBEAT_INTENT,
+        HEARTBEAT_KIND,
+      ],
     );
     return Number(result.lastInsertRowid);
   } catch {

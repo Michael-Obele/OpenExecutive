@@ -10,8 +10,13 @@ import { registerTalentTools } from "./tools/talent.ts";
 import { registerWatchlistTools } from "./tools/watchlist.ts";
 
 class FixedValibotAdapter extends ValibotJsonSchemaAdapter {
-  override async toJsonSchema(schema: unknown): Promise<Record<string, unknown>> {
-    const jsonSchema = (await super.toJsonSchema(schema as never)) as Record<string, unknown>;
+  override async toJsonSchema(
+    schema: unknown,
+  ): Promise<Record<string, unknown>> {
+    const jsonSchema = (await super.toJsonSchema(schema as never)) as Record<
+      string,
+      unknown
+    >;
     if (!jsonSchema.type && (jsonSchema.oneOf ?? jsonSchema.anyOf)) {
       jsonSchema.type = "object";
     }
@@ -44,7 +49,8 @@ export function createServer(): McpServer {
     {
       name: "durbar",
       version: "0.1.0",
-      description: "Durbar — read and update the whole company through any AI agent. 8 resource-oriented tools, each multiplexing a domain behind an `action` enum.",
+      description:
+        "Durbar — read and update the whole company through any AI agent. 8 resource-oriented tools, each multiplexing a domain behind an `action` enum.",
     },
     {
       adapter: new FixedValibotAdapter(),

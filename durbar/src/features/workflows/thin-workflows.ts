@@ -336,8 +336,21 @@ Be welcoming and clear about expectations.`,
 // string fields so the model gets grounded inputs.
 
 export const REQUIRED_FIELDS: Record<string, string[]> = {
-  annual_plan: ["year_label", "prior_year_recap", "strategic_thesis", "revenue_and_capital", "top_priorities"],
-  board_prep: ["quarter_label", "meeting_date", "headline_metrics", "wins", "challenges", "deep_dive_topic_1"],
+  annual_plan: [
+    "year_label",
+    "prior_year_recap",
+    "strategic_thesis",
+    "revenue_and_capital",
+    "top_priorities",
+  ],
+  board_prep: [
+    "quarter_label",
+    "meeting_date",
+    "headline_metrics",
+    "wins",
+    "challenges",
+    "deep_dive_topic_1",
+  ],
   candidate_outreach: ["candidate_id"],
   candidate_screen: ["engagement_id", "candidate_id"],
   churn_deep_dive: ["overview", "cohort_data"],
@@ -346,30 +359,62 @@ export const REQUIRED_FIELDS: Record<string, string[]> = {
   crisis_comms: ["incident_summary", "audiences"],
   department_check_in: ["department_slug"],
   engagement_value_report: [],
-  exec_search_brief: ["role_title", "function", "business_context", "year_one_outcomes"],
-  fundraising_prep: ["round_label", "traction_metrics", "narrative_thesis", "use_of_funds"],
-  gtm_launch: ["launch_name", "target_audience", "value_proposition", "success_metrics"],
+  exec_search_brief: [
+    "role_title",
+    "function",
+    "business_context",
+    "year_one_outcomes",
+  ],
+  fundraising_prep: [
+    "round_label",
+    "traction_metrics",
+    "narrative_thesis",
+    "use_of_funds",
+  ],
+  gtm_launch: [
+    "launch_name",
+    "target_audience",
+    "value_proposition",
+    "success_metrics",
+  ],
   interview_coordination: ["candidate_id"],
   investor_update: ["month_label", "highlights", "lowlights", "metrics"],
   ma_evaluation: ["target", "strategic_rationale"],
-  mbr: ["month_label", "financial_actuals", "kpi_movements", "function_updates"],
+  mbr: [
+    "month_label",
+    "financial_actuals",
+    "kpi_movements",
+    "function_updates",
+  ],
   new_hire_onboarding: ["candidate_id"],
   offer_approval: ["candidate_id"],
   org_design: ["current_structure", "proposed_structure", "motivation"],
   performance_review: ["review_period", "manager_role", "direct_reports"],
   pricing_review: ["proposed_change", "current_packaging", "motivation"],
   product_strategy: ["horizon", "jobs_to_be_done", "current_bets"],
-  quarterly_plan: ["quarter_label", "prior_quarter_recap", "top_strategic_priorities", "biggest_bets"],
+  quarterly_plan: [
+    "quarter_label",
+    "prior_quarter_recap",
+    "top_strategic_priorities",
+    "biggest_bets",
+  ],
   reference_check: ["candidate_id"],
   risk_register: ["review_period", "business_context", "known_concerns"],
   role_onboarding: [],
 };
 
-function validateInputs(name: string, inputs: Record<string, unknown>): string | null {
+function validateInputs(
+  name: string,
+  inputs: Record<string, unknown>,
+): string | null {
   const required = REQUIRED_FIELDS[name] ?? [];
   for (const field of required) {
     const value = inputs[field];
-    if (value === undefined || value === null || (typeof value === "string" && value.trim() === "")) {
+    if (
+      value === undefined ||
+      value === null ||
+      (typeof value === "string" && value.trim() === "")
+    ) {
       return `Missing required field: ${field}`;
     }
   }
@@ -379,7 +424,18 @@ function validateInputs(name: string, inputs: Record<string, unknown>): string |
 // ── core runner ────────────────────────────────────────────────────────────
 
 function artifactTitle(name: string, inputs: Record<string, unknown>): string {
-  const labelFields = ["quarter_label", "year_label", "month_label", "period_label", "launch_name", "role_title", "competitor", "target", "review_period", "horizon"];
+  const labelFields = [
+    "quarter_label",
+    "year_label",
+    "month_label",
+    "period_label",
+    "launch_name",
+    "role_title",
+    "competitor",
+    "target",
+    "review_period",
+    "horizon",
+  ];
   for (const field of labelFields) {
     const val = inputs[field];
     if (typeof val === "string" && val) return `${name} — ${val}`;
@@ -401,24 +457,38 @@ export async function runThinWorkflow(
   if (validationError) {
     const narrative = `# ${name}\n\n_Error: ${validationError}_`;
     const timestamp = now.toISOString();
-    const existing = db.query<{ run_id: string }, [string]>("SELECT run_id FROM workflow_runs WHERE run_id = ?").get(runId);
+    const existing = db
+      .query<
+        { run_id: string },
+        [string]
+      >("SELECT run_id FROM workflow_runs WHERE run_id = ?")
+      .get(runId);
     if (existing) {
-      db.run(`UPDATE workflow_runs SET artifact = ?, status = 'failed', updated_at = ? WHERE run_id = ?`, [
-        narrative,
-        timestamp,
-        runId,
-      ]);
+      db.run(
+        `UPDATE workflow_runs SET artifact = ?, status = 'failed', updated_at = ? WHERE run_id = ?`,
+        [narrative, timestamp, runId],
+      );
     } else {
       db.run(
         `INSERT INTO workflow_runs (run_id, workflow_name, title, status, inputs, artifact, created_at, updated_at)
          VALUES (?, ?, ?, 'failed', ?, ?, ?, ?)`,
-        [runId, name, artifactTitle(name, inputs), JSON.stringify(inputs), narrative, timestamp, timestamp],
+        [
+          runId,
+          name,
+          artifactTitle(name, inputs),
+          JSON.stringify(inputs),
+          narrative,
+          timestamp,
+          timestamp,
+        ],
       );
     }
     return { runId, narrative };
   }
 
-  const systemPrompt = PROMPTS[name] ?? `You are the Executive drafting the ${name} workflow. Produce a Markdown artifact grounded in the inputs.`;
+  const systemPrompt =
+    PROMPTS[name] ??
+    `You are the Executive drafting the ${name} workflow. Produce a Markdown artifact grounded in the inputs.`;
   const companyContext = renderCompanyContext(db);
   const deptContext = renderDepartmentContext(db);
   const inputsBlock = renderInputs(inputs);
@@ -448,14 +518,31 @@ export async function runThinWorkflow(
   const timestamp = now.toISOString();
   const status = failed ? "failed" : "succeeded";
   // Persist — idempotent on runId (caller may have already created the run)
-  const existing = db.query<{ run_id: string }, [string]>("SELECT run_id FROM workflow_runs WHERE run_id = ?").get(runId);
+  const existing = db
+    .query<
+      { run_id: string },
+      [string]
+    >("SELECT run_id FROM workflow_runs WHERE run_id = ?")
+    .get(runId);
   if (existing) {
-    db.run(`UPDATE workflow_runs SET artifact = ?, status = ?, updated_at = ? WHERE run_id = ?`, [narrative, status, timestamp, runId]);
+    db.run(
+      `UPDATE workflow_runs SET artifact = ?, status = ?, updated_at = ? WHERE run_id = ?`,
+      [narrative, status, timestamp, runId],
+    );
   } else {
     db.run(
       `INSERT INTO workflow_runs (run_id, workflow_name, title, status, inputs, artifact, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [runId, name, artifactTitle(name, inputs), status, JSON.stringify(inputs), narrative, timestamp, timestamp],
+      [
+        runId,
+        name,
+        artifactTitle(name, inputs),
+        status,
+        JSON.stringify(inputs),
+        narrative,
+        timestamp,
+        timestamp,
+      ],
     );
   }
 

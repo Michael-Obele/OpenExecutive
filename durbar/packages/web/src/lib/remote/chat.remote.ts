@@ -8,23 +8,30 @@
  * (suggested prompts, session listing) as `query` and a helper to build the
  * SSE URL so the client never hard-codes the Durbar origin.
  */
-import * as v from 'valibot';
-import { query } from '$app/server';
-import { durbarJson } from '$lib/server/durbar.js';
+import * as v from "valibot";
+import { query } from "$app/server";
+import { durbarJson } from "$lib/server/durbar.js";
 
 export interface SuggestedPrompt {
-	prompt: string;
-	[key: string]: unknown;
+  prompt: string;
+  [key: string]: unknown;
 }
 
-export const getSuggestedPrompts = query(async (): Promise<SuggestedPrompt[]> => {
-	return durbarJson<SuggestedPrompt[]>('/chat/suggested-prompts');
-});
+export const getSuggestedPrompts = query(
+  async (): Promise<SuggestedPrompt[]> => {
+    return durbarJson<SuggestedPrompt[]>("/chat/suggested-prompts");
+  },
+);
 
 export const listSessions = query(async (): Promise<unknown[]> => {
-	return durbarJson<unknown[]>('/sessions');
+  return durbarJson<unknown[]>("/sessions");
 });
 
-export const getSessionMessages = query(v.string(), async (id): Promise<unknown[]> => {
-	return durbarJson<unknown[]>(`/sessions/${encodeURIComponent(id)}/messages`);
-});
+export const getSessionMessages = query(
+  v.string(),
+  async (id): Promise<unknown[]> => {
+    return durbarJson<unknown[]>(
+      `/sessions/${encodeURIComponent(id)}/messages`,
+    );
+  },
+);

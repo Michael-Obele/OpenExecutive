@@ -106,16 +106,15 @@ export interface ReviewerConfig {
 
 // ── JSON parsing ─────────────────────────────────────────────────────────
 
-function parseCritiqueJson(
-  reviewerName: string,
-  text: string,
-): Critique {
+function parseCritiqueJson(reviewerName: string, text: string): Critique {
   try {
     const start = text.indexOf("{");
     const end = text.lastIndexOf("}") + 1;
     if (start < 0 || end <= start) throw new Error("no JSON object found");
     const data = JSON.parse(text.slice(start, end)) as Record<string, unknown>;
-    let severity = String(data["severity"] ?? "low").trim().toLowerCase();
+    let severity = String(data["severity"] ?? "low")
+      .trim()
+      .toLowerCase();
     if (!VALID_SEVERITIES.has(severity)) severity = "low";
     return {
       reviewer_name: reviewerName,
@@ -154,11 +153,16 @@ export async function critiqueWithReviewer(
     const chunks: string[] = [];
     for (const [name, out] of Object.entries(specialistOutputs)) {
       if (!out) continue;
-      const excerpt = neutralizeCommitteeTags(out.slice(0, SPECIALIST_EXCERPT_CHARS));
+      const excerpt = neutralizeCommitteeTags(
+        out.slice(0, SPECIALIST_EXCERPT_CHARS),
+      );
       chunks.push(`[${name}]\n${excerpt}`);
     }
     if (chunks.length > 0) {
-      specBlock = "\n\n<specialist_outputs>\n" + chunks.join("\n\n") + "\n</specialist_outputs>";
+      specBlock =
+        "\n\n<specialist_outputs>\n" +
+        chunks.join("\n\n") +
+        "\n</specialist_outputs>";
     }
   }
 
@@ -174,7 +178,10 @@ export async function critiqueWithReviewer(
       { role: "system", content: reviewer.systemPrompt },
       { role: "user", content: userContent },
     ]);
-    text = typeof result === "string" ? result : (result as { content?: string }).content ?? "";
+    text =
+      typeof result === "string"
+        ? result
+        : ((result as { content?: string }).content ?? "");
   } catch {
     return {
       reviewer_name: reviewer.name,
@@ -213,7 +220,7 @@ export function buildRevisionUserTurn(critiques: Critique[]): string {
     "Reviewers critiqued your previous draft. They are adversarial — be selective and trust your executive judgment.\n\n" +
     `${body}\n` +
     "</committee_review>\n\n" +
-    "Revise your previous response. Address high- and medium-severity critiques. Ignore low-severity nits if addressing them would harm clarity or directness. Output the full revised response only — no meta-commentary, no diff, no \"here is the revision\" preamble."
+    'Revise your previous response. Address high- and medium-severity critiques. Ignore low-severity nits if addressing them would harm clarity or directness. Output the full revised response only — no meta-commentary, no diff, no "here is the revision" preamble.'
   );
 }
 
@@ -229,13 +236,19 @@ export async function reviseWithCommittee(
 ): Promise<string> {
   const userTurn = buildRevisionUserTurn(critiques);
   try {
-    const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
+    const messages: Array<{
+      role: "system" | "user" | "assistant";
+      content: string;
+    }> = [];
     if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
     // Provide the original draft as assistant context so the model knows what to revise
     messages.push({ role: "assistant", content: originalDraft });
     messages.push({ role: "user", content: userTurn });
     const result = await provider.chat(messages);
-    const content = typeof result === "string" ? result : (result as { content?: string }).content ?? "";
+    const content =
+      typeof result === "string"
+        ? result
+        : ((result as { content?: string }).content ?? "");
     return content.trim() ? content.trim() : originalDraft;
   } catch {
     return originalDraft;
@@ -280,14 +293,23 @@ export async function runCommitteeReview(
   ];
 
   const critiques = await Promise.all(
-    reviewers.map((r) => critiqueWithReviewer(provider, r, userMessage, draft, specialistOutputs)),
+    reviewers.map((r) =>
+      critiqueWithReviewer(provider, r, userMessage, draft, specialistOutputs),
+    ),
   );
 
-  const needsRevision = critiques.some((c) => c.severity === "high" || c.severity === "medium");
+  const needsRevision = critiques.some(
+    (c) => c.severity === "high" || c.severity === "medium",
+  );
   if (!needsRevision) {
     return { revised: draft, critiques, revised_flag: false };
   }
 
-  const revised = await reviseWithCommittee(provider, draft, critiques, opts?.systemPrompt);
+  const revised = await reviseWithCommittee(
+    provider,
+    draft,
+    critiques,
+    opts?.systemPrompt,
+  );
   return { revised, critiques, revised_flag: true };
 }
