@@ -47,8 +47,7 @@ export async function durbarFetch(path: string, opts: DurbarFetchOpts = {}): Pro
 export async function durbarJson<T>(path: string, opts: DurbarFetchOpts = {}): Promise<T> {
 	const res = await durbarFetch(path, {
 		contentType: 'application/json',
-		...opts,
-		...(opts.headers !== undefined ? { headers: opts.headers } : {})
+		...opts
 	});
 	if (!res.ok) {
 		let detail = res.statusText;

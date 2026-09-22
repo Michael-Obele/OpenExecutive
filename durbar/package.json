@@ -21,5 +21,8 @@
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^7.0.0"
+  },
+  "dependencies": {
+    "valibot": "^1.5.0"
   }
 }

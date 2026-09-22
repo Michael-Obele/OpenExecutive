@@ -1,10 +1,12 @@
 <script lang="ts">
 	import { page } from "$app/state";
-	import { onMount } from "svelte";
 	import { getWorkflow } from "$lib/remote/workflows.remote.js";
 	let data = $state<unknown>(null); let err = $state<string | null>(null);
 	let wfName = $derived(page.params.name ?? "");
-	onMount(async () => { try { data = await getWorkflow(wfName); } catch (e) { err = e instanceof Error ? e.message : String(e); } });
+	$effect(() => {
+		if (!wfName) return;
+		(async () => { try { data = await getWorkflow(wfName); err = null; } catch (e) { err = e instanceof Error ? e.message : String(e); } })();
+	});
 </script>
 <div class="mx-auto max-w-3xl px-6 py-8">
 	<h1 class="text-xl font-semibold text-zinc-100">Workflow: {page.params.name}</h1>

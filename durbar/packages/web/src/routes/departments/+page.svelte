@@ -13,5 +13,5 @@
 		<button onclick={async () => { if (!title.trim()) return; await createDepartment({ title: title.trim() }); title=""; depts = await listDepartments() as unknown[]; }} class="rounded bg-indigo-600 px-3 py-1.5 text-sm text-white hover:bg-indigo-500">Create</button>
 	</div>
 	{#if depts.length===0 && !err}<p class="mt-4 text-sm text-zinc-500">No departments yet.</p>{/if}
-	<ul class="mt-4 space-y-2">{#each depts as d (JSON.stringify(d))}<li class="rounded border border-zinc-800 bg-zinc-900 p-3 text-sm text-zinc-300"><pre class="text-xs text-zinc-400">{JSON.stringify(d, null, 2)}</pre></li>{/each}</ul>
+	<ul class="mt-4 space-y-2">{#each depts as d ((d as Record<string, unknown>).slug ?? (d as Record<string, unknown>).id ?? JSON.stringify(d))}<li class="rounded border border-zinc-800 bg-zinc-900 p-3 text-sm text-zinc-300"><pre class="text-xs text-zinc-400">{JSON.stringify(d, null, 2)}</pre></li>{/each}</ul>
 </div>

@@ -16,7 +16,13 @@
 		{ href: '/jobs', label: 'Workflows' },
 		{ href: '/knowledge', label: 'Knowledge' },
 		{ href: '/artifacts', label: 'Artifacts' },
-		{ href: '/audit', label: 'Audit' }
+		{ href: '/audit', label: 'Audit' },
+		{ href: '/review', label: 'Review' },
+		{ href: '/clients', label: 'Clients' },
+		{ href: '/talent', label: 'Talent' },
+		{ href: '/watchlist', label: 'Watchlist' },
+		{ href: '/memories', label: 'Memories' },
+		{ href: '/architecture', label: 'Architecture' }
 	];
 </script>
 
