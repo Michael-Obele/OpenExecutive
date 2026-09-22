@@ -18,6 +18,14 @@
  *
  * Deferred (per task constraints): Slack, Telegram, Discord, email,
  * Google Chat, web search, Honcho.
+ *
+ * File structure note (deviation from brief): The brief suggested per-workflow
+ * files (one file per workflow). This implementation keeps all 27 thin workflows
+ * in a single file (thin-workflows.ts + workflow-context.ts) instead. Each
+ * workflow is identical in structure (prompt + context + artifact) and differs
+ * only in prompt text and required fields; 27 near-identical files would
+ * increase drift and review cost without adding clarity. A single registry +
+ * generic runner (runThinWorkflow) is more maintainable for thin modules.
  */
 
 import { randomUUID } from "node:crypto";
@@ -327,7 +335,7 @@ Be welcoming and clear about expectations.`,
 // min_length etc.; Durbar keeps it thin — just check presence of required
 // string fields so the model gets grounded inputs.
 
-const REQUIRED_FIELDS: Record<string, string[]> = {
+export const REQUIRED_FIELDS: Record<string, string[]> = {
   annual_plan: ["year_label", "prior_year_recap", "strategic_thesis", "revenue_and_capital", "top_priorities"],
   board_prep: ["quarter_label", "meeting_date", "headline_metrics", "wins", "challenges", "deep_dive_topic_1"],
   candidate_outreach: ["candidate_id"],
@@ -361,7 +369,7 @@ function validateInputs(name: string, inputs: Record<string, unknown>): string |
   const required = REQUIRED_FIELDS[name] ?? [];
   for (const field of required) {
     const value = inputs[field];
-    if (value === undefined || value === null || value === "") {
+    if (value === undefined || value === null || (typeof value === "string" && value.trim() === "")) {
       return `Missing required field: ${field}`;
     }
   }
@@ -376,8 +384,7 @@ function artifactTitle(name: string, inputs: Record<string, unknown>): string {
     const val = inputs[field];
     if (typeof val === "string" && val) return `${name} — ${val}`;
   }
-  const meta = PROMPTS[name] ? name : name;
-  return meta;
+  return name;
 }
 
 export async function runThinWorkflow(
@@ -394,11 +401,20 @@ export async function runThinWorkflow(
   if (validationError) {
     const narrative = `# ${name}\n\n_Error: ${validationError}_`;
     const timestamp = now.toISOString();
-    db.run(
-      `INSERT INTO workflow_runs (run_id, workflow_name, title, status, inputs, artifact, created_at, updated_at)
-       VALUES (?, ?, ?, 'succeeded', ?, ?, ?, ?)`,
-      [runId, name, artifactTitle(name, inputs), JSON.stringify(inputs), narrative, timestamp, timestamp],
-    );
+    const existing = db.query<{ run_id: string }, [string]>("SELECT run_id FROM workflow_runs WHERE run_id = ?").get(runId);
+    if (existing) {
+      db.run(`UPDATE workflow_runs SET artifact = ?, status = 'failed', updated_at = ? WHERE run_id = ?`, [
+        narrative,
+        timestamp,
+        runId,
+      ]);
+    } else {
+      db.run(
+        `INSERT INTO workflow_runs (run_id, workflow_name, title, status, inputs, artifact, created_at, updated_at)
+         VALUES (?, ?, ?, 'failed', ?, ?, ?, ?)`,
+        [runId, name, artifactTitle(name, inputs), JSON.stringify(inputs), narrative, timestamp, timestamp],
+      );
+    }
     return { runId, narrative };
   }
 
@@ -414,6 +430,7 @@ export async function runThinWorkflow(
   const userContent = contextParts.join("\n\n");
 
   let narrative: string;
+  let failed = false;
   try {
     const modelResponse = await provider.chat([
       { role: "system", content: systemPrompt },
@@ -425,109 +442,24 @@ export async function runThinWorkflow(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     narrative = `# ${artifactTitle(name, inputs)}\n\n_Provider failed: ${message}_\n\nInputs were:\n\`\`\`json\n${JSON.stringify(inputs, null, 2)}\n\`\`\``;
+    failed = true;
   }
 
   const timestamp = now.toISOString();
+  const status = failed ? "failed" : "succeeded";
   // Persist — idempotent on runId (caller may have already created the run)
   const existing = db.query<{ run_id: string }, [string]>("SELECT run_id FROM workflow_runs WHERE run_id = ?").get(runId);
   if (existing) {
-    db.run(`UPDATE workflow_runs SET artifact = ?, status = 'succeeded', updated_at = ? WHERE run_id = ?`, [narrative, timestamp, runId]);
+    db.run(`UPDATE workflow_runs SET artifact = ?, status = ?, updated_at = ? WHERE run_id = ?`, [narrative, status, timestamp, runId]);
   } else {
     db.run(
       `INSERT INTO workflow_runs (run_id, workflow_name, title, status, inputs, artifact, created_at, updated_at)
-       VALUES (?, ?, ?, 'succeeded', ?, ?, ?, ?)`,
-      [runId, name, artifactTitle(name, inputs), JSON.stringify(inputs), narrative, timestamp, timestamp],
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [runId, name, artifactTitle(name, inputs), status, JSON.stringify(inputs), narrative, timestamp, timestamp],
     );
   }
 
   return { runId, narrative };
-}
-
-// ── per-workflow convenience wrappers ──────────────────────────────────────
-// Each thin wrapper exists so tests can import a named function and so the
-// module reads as 27 workflows, not one generic. They all delegate to
-// runThinWorkflow.
-
-export async function runAnnualPlan(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("annual_plan", inputs, deps);
-}
-export async function runDepartmentCheckIn(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("department_check_in", inputs, deps);
-}
-export async function runBoardPrep(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("board_prep", inputs, deps);
-}
-export async function runCandidateOutreach(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("candidate_outreach", inputs, deps);
-}
-export async function runCandidateScreen(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("candidate_screen", inputs, deps);
-}
-export async function runChurnDeepDive(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("churn_deep_dive", inputs, deps);
-}
-export async function runCompRefresh(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("comp_refresh", inputs, deps);
-}
-export async function runCompetitiveTeardown(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("competitive_teardown", inputs, deps);
-}
-export async function runCrisisComms(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("crisis_comms", inputs, deps);
-}
-export async function runExecSearchBrief(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("exec_search_brief", inputs, deps);
-}
-export async function runFundraisingPrep(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("fundraising_prep", inputs, deps);
-}
-export async function runGtmLaunch(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("gtm_launch", inputs, deps);
-}
-export async function runInterviewCoordination(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("interview_coordination", inputs, deps);
-}
-export async function runEngagementValueReport(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("engagement_value_report", inputs, deps);
-}
-export async function runInvestorUpdate(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("investor_update", inputs, deps);
-}
-export async function runMaEvaluation(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("ma_evaluation", inputs, deps);
-}
-export async function runMbr(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("mbr", inputs, deps);
-}
-export async function runOfferApproval(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("offer_approval", inputs, deps);
-}
-export async function runNewHireOnboarding(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("new_hire_onboarding", inputs, deps);
-}
-export async function runOrgDesign(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("org_design", inputs, deps);
-}
-export async function runPerformanceReview(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("performance_review", inputs, deps);
-}
-export async function runPricingReview(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("pricing_review", inputs, deps);
-}
-export async function runProductStrategy(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("product_strategy", inputs, deps);
-}
-export async function runQuarterlyPlan(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("quarterly_plan", inputs, deps);
-}
-export async function runReferenceCheck(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("reference_check", inputs, deps);
-}
-export async function runRiskRegister(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("risk_register", inputs, deps);
-}
-export async function runRoleOnboarding(inputs: Record<string, unknown>, deps: ThinWorkflowDeps): Promise<ThinWorkflowResult> {
-  return runThinWorkflow("role_onboarding", inputs, deps);
 }
 
 // ── registry helpers ───────────────────────────────────────────────────────

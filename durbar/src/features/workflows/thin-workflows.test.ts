@@ -6,6 +6,9 @@
  *   - validation edge: missing required field produces error artifact without calling provider
  *   - provider failure: graceful fallback artifact, run still persisted
  *   - registry helpers: isThinWorkflow, getThinWorkflowPrompt, THIN_WORKFLOW_NAMES
+ *
+ * Isolation: openDb() returns an isolated in-memory SQLite DB per test — no
+ * shared state between tests, no cleanup needed.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -14,6 +17,7 @@ import type { ChatMessage, ChatOptions, Provider } from "../../providers.ts";
 import {
   getThinWorkflowPrompt,
   isThinWorkflow,
+  REQUIRED_FIELDS,
   runThinWorkflow,
   THIN_WORKFLOW_NAMES,
 } from "./thin-workflows.ts";
@@ -165,9 +169,10 @@ describe("runThinWorkflow — validation edge", () => {
     expect(result.narrative).toContain("Missing required field");
     expect(provider.calls).toHaveLength(0);
     const row = db
-      .query<{ artifact: string }, [string]>("SELECT artifact FROM workflow_runs WHERE run_id = ?")
+      .query<{ artifact: string; status: string }, [string]>("SELECT artifact, status FROM workflow_runs WHERE run_id = ?")
       .get(result.runId);
     expect(row?.artifact).toContain("Missing required field");
+    expect(row?.status).toBe("failed");
   });
 
   test("board_prep: missing required field", async () => {
@@ -201,10 +206,51 @@ describe("runThinWorkflow — validation edge", () => {
     expect(provider.calls).toHaveLength(1);
     expect(result.narrative).toContain("Role onboarding artifact");
   });
+
+  test("whitespace-only required field is rejected", async () => {
+    const db = openDb();
+    const provider = fakeProvider("should not be called");
+    const result = await runThinWorkflow("annual_plan", { year_label: "   " }, { db, provider });
+    expect(result.narrative).toContain("Missing required field");
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  test("validation is idempotent on retry with same runId", async () => {
+    const db = openDb();
+    const provider = fakeProvider("should not be called");
+    const runId = "validation-retry-id";
+    const r1 = await runThinWorkflow("annual_plan", {}, { db, provider, runId });
+    expect(r1.narrative).toContain("Missing required field");
+    const r2 = await runThinWorkflow("annual_plan", {}, { db, provider, runId });
+    expect(r2.narrative).toContain("Missing required field");
+    expect(r2.runId).toBe(runId);
+    const row = db.query<{ status: string }, [string]>("SELECT status FROM workflow_runs WHERE run_id = ?").get(runId);
+    expect(row?.status).toBe("failed");
+  });
+
+  // Parameterized: every workflow with required fields must reject missing field
+  for (const name of ALL_THIN_NAMES) {
+    const required = REQUIRED_FIELDS[name] ?? [];
+    if (required.length === 0) continue;
+    const firstRequired = required[0] as string;
+    test(`${name}: missing required field '${firstRequired}' → failed without provider call`, async () => {
+      const db = openDb();
+      const provider = fakeProvider("should not be called");
+      // Provide all valid inputs except the first required field
+      const inputs = { ...(VALID_INPUTS[name] ?? {}) };
+      delete (inputs as Record<string, unknown>)[firstRequired];
+      const result = await runThinWorkflow(name, inputs, { db, provider });
+      expect(result.narrative).toContain("Missing required field");
+      expect(result.narrative).toContain(firstRequired);
+      expect(provider.calls).toHaveLength(0);
+      const row = db.query<{ status: string }, [string]>("SELECT status FROM workflow_runs WHERE run_id = ?").get(result.runId);
+      expect(row?.status).toBe("failed");
+    });
+  }
 });
 
 describe("runThinWorkflow — provider failure", () => {
-  test("gracefully renders fallback artifact and still persists", async () => {
+  test("gracefully renders fallback artifact and persists as failed", async () => {
     const db = openDb();
     const provider = failingProvider("deepseek 429 rate limited");
     const inputs = VALID_INPUTS["annual_plan"] ?? {};
@@ -216,17 +262,32 @@ describe("runThinWorkflow — provider failure", () => {
         "SELECT status, artifact FROM workflow_runs WHERE run_id = ?",
       )
       .get(result.runId);
-    expect(row?.status).toBe("succeeded");
+    expect(row?.status).toBe("failed");
     expect(row?.artifact).toContain("Provider failed");
   });
 
-  test("churn_deep_dive: provider failure still persists", async () => {
+  test("churn_deep_dive: provider failure persists as failed", async () => {
     const db = openDb();
     const provider = failingProvider("timeout");
     const inputs = VALID_INPUTS["churn_deep_dive"] ?? {};
     const result = await runThinWorkflow("churn_deep_dive", inputs, { db, provider });
     expect(result.narrative).toContain("Provider failed");
+    const row = db.query<{ status: string }, [string]>("SELECT status FROM workflow_runs WHERE run_id = ?").get(result.runId);
+    expect(row?.status).toBe("failed");
   });
+
+  // Parameterized: sample of workflows — provider failure must persist as failed
+  for (const name of ["board_prep", "gtm_launch", "risk_register", "mbr", "pricing_review"] as const) {
+    test(`${name}: provider failure persists as failed`, async () => {
+      const db = openDb();
+      const provider = failingProvider("provider down");
+      const inputs = VALID_INPUTS[name] ?? {};
+      const result = await runThinWorkflow(name, inputs, { db, provider });
+      expect(result.narrative).toContain("Provider failed");
+      const row = db.query<{ status: string }, [string]>("SELECT status FROM workflow_runs WHERE run_id = ?").get(result.runId);
+      expect(row?.status).toBe("failed");
+    });
+  }
 });
 
 describe("runThinWorkflow — context assembly", () => {
@@ -278,5 +339,22 @@ describe("runThinWorkflow — context assembly", () => {
     const row = db.query<{ artifact: string; status: string }, [string]>("SELECT artifact, status FROM workflow_runs WHERE run_id = ?").get(runId);
     expect(row?.artifact).toContain("updated artifact");
     expect(row?.status).toBe("succeeded");
+  });
+});
+
+describe("workflow-context truncation", () => {
+  test("renderInputs truncates values longer than 2000 chars", async () => {
+    const { renderInputs } = await import("./workflow-context.ts");
+    const longValue = "x".repeat(3000);
+    const rendered = renderInputs({ big_field: longValue });
+    expect(rendered).toContain("…");
+    expect(rendered.length).toBeLessThan(3000 + 100);
+  });
+
+  test("renderInputs does not truncate short values", async () => {
+    const { renderInputs } = await import("./workflow-context.ts");
+    const rendered = renderInputs({ short: "hello world" });
+    expect(rendered).toContain("hello world");
+    expect(rendered).not.toContain("…");
   });
 });
