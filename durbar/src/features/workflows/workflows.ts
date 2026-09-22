@@ -102,22 +102,40 @@ const BUILTINS: readonly WorkflowMeta[] = [
   {
     name: "annual_plan",
     title: "Annual Operating Plan",
-    description: "Company-wide annual plan with per-function targets and risks.",
+    description:
+      "Company-wide annual plan with per-function targets and risks.",
     section: "Operating Cadence",
     estimated_minutes: 8,
     input_schema: { type: "object", properties: {} },
     steps: [
-      { id: "context", title: "Load context", description: "Gather company state" },
-      { id: "strategic_anchor", title: "Strategic anchor", description: "Define strategic pillars" },
-      { id: "financial_frame", title: "Financial frame", description: "Model financial constraints" },
-      { id: "assemble", title: "Assemble plan", description: "Render final artifact" },
+      {
+        id: "context",
+        title: "Load context",
+        description: "Gather company state",
+      },
+      {
+        id: "strategic_anchor",
+        title: "Strategic anchor",
+        description: "Define strategic pillars",
+      },
+      {
+        id: "financial_frame",
+        title: "Financial frame",
+        description: "Model financial constraints",
+      },
+      {
+        id: "assemble",
+        title: "Assemble plan",
+        description: "Render final artifact",
+      },
     ],
     is_custom: false,
   },
   {
     name: "board_prep",
     title: "Board Prep Deck",
-    description: "Board meeting preparation with executive summary and deep dives.",
+    description:
+      "Board meeting preparation with executive summary and deep dives.",
     section: "Board",
     estimated_minutes: 6,
     input_schema: { type: "object", properties: {} },
@@ -217,8 +235,17 @@ const BUILTINS: readonly WorkflowMeta[] = [
       },
     },
     steps: [
-      { id: "load_context", title: "Gather today's actions and pending state", description: "Pull today's activity, pending proposals, and at-risk goals." },
-      { id: "synthesize", title: "Synthesize the digest", description: "Render a ≤200-word EoD digest in the Executive's voice." },
+      {
+        id: "load_context",
+        title: "Gather today's actions and pending state",
+        description:
+          "Pull today's activity, pending proposals, and at-risk goals.",
+      },
+      {
+        id: "synthesize",
+        title: "Synthesize the digest",
+        description: "Render a ≤200-word EoD digest in the Executive's voice.",
+      },
     ],
     is_custom: false,
   },
@@ -256,9 +283,22 @@ const BUILTINS: readonly WorkflowMeta[] = [
       },
     },
     steps: [
-      { id: "gather_signals", title: "Gather org signals", description: "Pull today's state, activity, and open alerts." },
-      { id: "decide", title: "Decide per signal", description: "Walk the signals and pick: act now, notify, raise in brief, or ignore." },
-      { id: "emit_artifact", title: "Emit summary", description: "Render a short Markdown summary for the audit trail." },
+      {
+        id: "gather_signals",
+        title: "Gather org signals",
+        description: "Pull today's state, activity, and open alerts.",
+      },
+      {
+        id: "decide",
+        title: "Decide per signal",
+        description:
+          "Walk the signals and pick: act now, notify, raise in brief, or ignore.",
+      },
+      {
+        id: "emit_artifact",
+        title: "Emit summary",
+        description: "Render a short Markdown summary for the audit trail.",
+      },
     ],
     is_custom: false,
   },
@@ -275,11 +315,33 @@ const BUILTINS: readonly WorkflowMeta[] = [
       },
     },
     steps: [
-      { id: "gather_context", title: "Gather company context", description: "Load company profile, initiatives, and watchlist." },
-      { id: "research_specialists", title: "Fan out to specialists", description: "Each specialist researches their domain in parallel." },
-      { id: "dedup", title: "Dedup findings", description: "Collapse near-identical findings across specialists." },
-      { id: "executive_synthesis", title: "Executive routes findings", description: "Executive reviews findings and fires the right tool per finding." },
-      { id: "emit_artifact", title: "Emit summary", description: "Short Markdown — what was researched, what was routed, what was ignored." },
+      {
+        id: "gather_context",
+        title: "Gather company context",
+        description: "Load company profile, initiatives, and watchlist.",
+      },
+      {
+        id: "research_specialists",
+        title: "Fan out to specialists",
+        description: "Each specialist researches their domain in parallel.",
+      },
+      {
+        id: "dedup",
+        title: "Dedup findings",
+        description: "Collapse near-identical findings across specialists.",
+      },
+      {
+        id: "executive_synthesis",
+        title: "Executive routes findings",
+        description:
+          "Executive reviews findings and fires the right tool per finding.",
+      },
+      {
+        id: "emit_artifact",
+        title: "Emit summary",
+        description:
+          "Short Markdown — what was researched, what was routed, what was ignored.",
+      },
     ],
     is_custom: false,
   },
@@ -466,7 +528,9 @@ export function validateDynamicDef(defn: DynamicWorkflowDef): string[] {
   if (!defn.name || !NAME_RE.test(defn.name)) {
     errors.push("name must be snake_case, 3-49 chars, starting with a letter");
   } else if (BUILTIN_NAMES.has(defn.name)) {
-    errors.push(`name ${JSON.stringify(defn.name)} collides with a built-in workflow`);
+    errors.push(
+      `name ${JSON.stringify(defn.name)} collides with a built-in workflow`,
+    );
   }
   if (!defn.title || !defn.title.trim()) {
     errors.push("title must not be empty");
@@ -541,25 +605,26 @@ export function createRun(
 
 export function completeRun(db: Db, runId: string, artifact: string): void {
   const now = new Date().toISOString();
-  db.run(`UPDATE workflow_runs SET status = 'done', artifact = ?, updated_at = ? WHERE run_id = ?`, [
-    artifact,
-    now,
-    runId,
-  ]);
+  db.run(
+    `UPDATE workflow_runs SET status = 'done', artifact = ?, updated_at = ? WHERE run_id = ?`,
+    [artifact, now, runId],
+  );
 }
 
 export function failRun(db: Db, runId: string, error: string): void {
   const now = new Date().toISOString();
-  db.run(`UPDATE workflow_runs SET status = 'error', error = ?, updated_at = ? WHERE run_id = ?`, [
-    error,
-    now,
-    runId,
-  ]);
+  db.run(
+    `UPDATE workflow_runs SET status = 'error', error = ?, updated_at = ? WHERE run_id = ?`,
+    [error, now, runId],
+  );
 }
 
 export function getRun(db: Db, runId: string): Record<string, unknown> | null {
   const row = db
-    .query<Record<string, unknown>, [string]>("SELECT * FROM workflow_runs WHERE run_id = ?",)
+    .query<
+      Record<string, unknown>,
+      [string]
+    >("SELECT * FROM workflow_runs WHERE run_id = ?")
     .get(runId);
   if (!row) return null;
   // Parse inputs JSON for the API response.
@@ -601,32 +666,49 @@ export function deleteRun(db: Db, runId: string): boolean {
 
 // ── dynamic store ──────────────────────────────────────────────────────────
 
-export function listDynamicDefs(db: Db, activeOnly = false): DynamicWorkflowDef[] {
+export function listDynamicDefs(
+  db: Db,
+  activeOnly = false,
+): DynamicWorkflowDef[] {
   const rows = activeOnly
     ? db
-        .query<{ definition: string }, []>(
-          "SELECT definition FROM dynamic_workflows WHERE is_active = 1 ORDER BY name",
-        )
+        .query<
+          { definition: string },
+          []
+        >("SELECT definition FROM dynamic_workflows WHERE is_active = 1 ORDER BY name")
         .all()
     : db
-        .query<{ definition: string }, []>("SELECT definition FROM dynamic_workflows ORDER BY name")
+        .query<
+          { definition: string },
+          []
+        >("SELECT definition FROM dynamic_workflows ORDER BY name")
         .all();
   return rows.map((r) => JSON.parse(r.definition) as DynamicWorkflowDef);
 }
 
 export function getDynamicDef(db: Db, name: string): DynamicWorkflowDef | null {
   const row = db
-    .query<{ definition: string }, [string]>("SELECT definition FROM dynamic_workflows WHERE name = ?")
+    .query<
+      { definition: string },
+      [string]
+    >("SELECT definition FROM dynamic_workflows WHERE name = ?")
     .get(name);
   if (!row) return null;
   return JSON.parse(row.definition) as DynamicWorkflowDef;
 }
 
-export function upsertDynamicDef(db: Db, defn: DynamicWorkflowDef): DynamicWorkflowDef {
+export function upsertDynamicDef(
+  db: Db,
+  defn: DynamicWorkflowDef,
+): DynamicWorkflowDef {
   const now = new Date().toISOString();
   const existing = getDynamicDef(db, defn.name);
   const createdAt = existing?.created_at ?? now;
-  const stored: DynamicWorkflowDef = { ...defn, created_at: createdAt, updated_at: now };
+  const stored: DynamicWorkflowDef = {
+    ...defn,
+    created_at: createdAt,
+    updated_at: now,
+  };
   const isActive = stored.is_active !== false ? 1 : 0;
   db.run(
     `INSERT INTO dynamic_workflows (name, definition, is_active, created_at, updated_at)
@@ -642,7 +724,11 @@ export function deleteDynamicDef(db: Db, name: string): boolean {
   return result.changes > 0;
 }
 
-export function setDynamicActive(db: Db, name: string, isActive: boolean): boolean {
+export function setDynamicActive(
+  db: Db,
+  name: string,
+  isActive: boolean,
+): boolean {
   const defn = getDynamicDef(db, name);
   if (!defn) return false;
   defn.is_active = isActive;
@@ -655,7 +741,10 @@ export function setDynamicActive(db: Db, name: string, isActive: boolean): boole
   return true;
 }
 
-export function deriveTitle(workflowName: string, payload: Record<string, unknown>): string {
+export function deriveTitle(
+  workflowName: string,
+  payload: Record<string, unknown>,
+): string {
   const MAX = 80;
   for (const field of ["quarter_label", "period", "title", "topic"]) {
     const val = payload[field];

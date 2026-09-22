@@ -91,7 +91,14 @@ describe("TRIAGE_PROMPT", () => {
 
   test("contains external signals section covering all adapter sources", () => {
     expect(TRIAGE_PROMPT).toContain("## External Signals");
-    for (const source of ["vendor_status", "rss", "stock", "query", "edgar", "page_watch"]) {
+    for (const source of [
+      "vendor_status",
+      "rss",
+      "stock",
+      "query",
+      "edgar",
+      "page_watch",
+    ]) {
       expect(TRIAGE_PROMPT).toContain(source);
     }
   });
@@ -125,12 +132,16 @@ describe("TRIAGE_TOOL", () => {
   });
 
   test("severity enum covers all levels", () => {
-    const severityProp = TRIAGE_TOOL.input_schema.properties["severity"] as { enum: readonly string[] };
+    const severityProp = TRIAGE_TOOL.input_schema.properties["severity"] as {
+      enum: readonly string[];
+    };
     expect(severityProp.enum).toEqual(["low", "medium", "high", "urgent"]);
   });
 
   test("channels enum includes broadcast channels", () => {
-    const channelsProp = TRIAGE_TOOL.input_schema.properties["channels"] as { items: { enum: readonly string[] } };
+    const channelsProp = TRIAGE_TOOL.input_schema.properties["channels"] as {
+      items: { enum: readonly string[] };
+    };
     expect(channelsProp.items.enum).toContain("department_channel");
     expect(channelsProp.items.enum).toContain("company_broadcast");
   });
@@ -141,10 +152,28 @@ describe("TRIAGE_TOOL", () => {
 describe("buildUserContent", () => {
   test("includes event, recent_alerts, muted_topics, active_initiatives blocks", () => {
     const content = buildUserContent(
-      { source: "email", external_id: "msg-1", subject: "Hello", body: "World" },
-      [{ headline: "Prior alert", severity: "high", dedup_key: "k1", topic_tags: ["finance"] }],
+      {
+        source: "email",
+        external_id: "msg-1",
+        subject: "Hello",
+        body: "World",
+      },
+      [
+        {
+          headline: "Prior alert",
+          severity: "high",
+          dedup_key: "k1",
+          topic_tags: ["finance"],
+        },
+      ],
       ["weekly_newsletter"],
-      [{ title: "Reduce churn", status: "active", summary: "Lower churn to <2%" }],
+      [
+        {
+          title: "Reduce churn",
+          status: "active",
+          summary: "Lower churn to <2%",
+        },
+      ],
     );
     expect(content).toContain("<event>");
     expect(content).toContain("Hello");
@@ -157,13 +186,25 @@ describe("buildUserContent", () => {
   });
 
   test("renders (none) for empty context", () => {
-    const content = buildUserContent({ source: "email", external_id: "x", body: "hi" }, [], [], []);
+    const content = buildUserContent(
+      { source: "email", external_id: "x", body: "hi" },
+      [],
+      [],
+      [],
+    );
     expect(content).toContain("(none)");
   });
 
   test("includes slack channel/user/title when present", () => {
     const content = buildUserContent(
-      { source: "slack", external_id: "s1", channel: "general", user: "U123", title: "Doc title", body: "hi" },
+      {
+        source: "slack",
+        external_id: "s1",
+        channel: "general",
+        user: "U123",
+        title: "Doc title",
+        body: "hi",
+      },
       [],
       [],
       [],
@@ -198,7 +239,14 @@ describe("parseDecision", () => {
   });
 
   test("always includes persisted in channels", () => {
-    const decision = parseDecision({ alert: true, severity: "high", channels: ["web"], headline: "x", body: "y", dedup_key: "k" });
+    const decision = parseDecision({
+      alert: true,
+      severity: "high",
+      channels: ["web"],
+      headline: "x",
+      body: "y",
+      dedup_key: "k",
+    });
     expect(decision.channels).toContain("persisted");
   });
 
@@ -219,13 +267,24 @@ describe("parseDecision", () => {
   });
 
   test("unknown severity falls to low", () => {
-    const decision = parseDecision({ alert: true, severity: "OMG_CRITICAL", channels: [] });
+    const decision = parseDecision({
+      alert: true,
+      severity: "OMG_CRITICAL",
+      channels: [],
+    });
     expect(decision.severity).toBe("low");
     expect(decision.channels).toEqual(["persisted"]);
   });
 
   test("unknown channel values are dropped", () => {
-    const decision = parseDecision({ alert: true, severity: "high", channels: ["web", "unknown_channel"], headline: "x", body: "y", dedup_key: "k" });
+    const decision = parseDecision({
+      alert: true,
+      severity: "high",
+      channels: ["web", "unknown_channel"],
+      headline: "x",
+      body: "y",
+      dedup_key: "k",
+    });
     expect(decision.channels).toContain("web");
     expect(decision.channels).not.toContain("unknown_channel" as never);
   });
@@ -259,7 +318,15 @@ describe("parseDecision", () => {
   });
 
   test("lowercases topic tags", () => {
-    const decision = parseDecision({ alert: true, severity: "high", channels: ["web"], headline: "x", body: "y", dedup_key: "k", topic_tags: ["Finance", "LEGAL"] });
+    const decision = parseDecision({
+      alert: true,
+      severity: "high",
+      channels: ["web"],
+      headline: "x",
+      body: "y",
+      dedup_key: "k",
+      topic_tags: ["Finance", "LEGAL"],
+    });
     expect(decision.topic_tags).toEqual(["finance", "legal"]);
   });
 });
@@ -270,7 +337,11 @@ describe("triageEvent", () => {
   test("returns parsed decision and passes context to provider", async () => {
     resetRateLimiter();
     const db = openDb();
-    insertInitiative(db, { title: "Reduce churn", status: "active", summary: "Lower 6m churn to <2%" });
+    insertInitiative(db, {
+      title: "Reduce churn",
+      status: "active",
+      summary: "Lower 6m churn to <2%",
+    });
     addMute(db, "weekly_newsletter");
 
     let capturedMessages: Array<{ role: string; content: string }> = [];
@@ -278,13 +349,25 @@ describe("triageEvent", () => {
       name: "fake",
       defaultModel: "fake-model",
       async chat(messages): Promise<string> {
-        capturedMessages = [...messages] as Array<{ role: string; content: string }>;
-        return jsonDecision({ headline: "Top customer cancelling", severity: "urgent", dedup_key: "churn-acme" });
+        capturedMessages = [...messages] as Array<{
+          role: string;
+          content: string;
+        }>;
+        return jsonDecision({
+          headline: "Top customer cancelling",
+          severity: "urgent",
+          dedup_key: "churn-acme",
+        });
       },
     };
 
     const decision = await triageEvent(
-      { source: "email", external_id: "msg-1", subject: "Cancelling our subscription", body: "We will be cancelling next month." },
+      {
+        source: "email",
+        external_id: "msg-1",
+        subject: "Cancelling our subscription",
+        body: "We will be cancelling next month.",
+      },
       { db, provider },
     );
 
@@ -293,7 +376,8 @@ describe("triageEvent", () => {
     expect(decision.headline).toBe("Top customer cancelling");
     expect(decision.dedup_key).toBe("churn-acme");
 
-    const userMsg = capturedMessages.find((m) => m.role === "user")?.content ?? "";
+    const userMsg =
+      capturedMessages.find((m) => m.role === "user")?.content ?? "";
     expect(userMsg).toContain("<event>");
     expect(userMsg).toContain("Cancelling our subscription");
     expect(userMsg).toContain("<recent_alerts>");
@@ -302,7 +386,8 @@ describe("triageEvent", () => {
     expect(userMsg).toContain("<active_initiatives>");
     expect(userMsg).toContain("Reduce churn");
 
-    const systemMsg = capturedMessages.find((m) => m.role === "system")?.content ?? "";
+    const systemMsg =
+      capturedMessages.find((m) => m.role === "system")?.content ?? "";
     expect(systemMsg).toContain("Chief of Staff");
   });
 
@@ -333,7 +418,8 @@ describe("triageEvent", () => {
   test("handles JSON wrapped in markdown fences", async () => {
     resetRateLimiter();
     const db = openDb();
-    const fenced = "```json\n" + jsonDecision({ headline: "Fenced headline" }) + "\n```";
+    const fenced =
+      "```json\n" + jsonDecision({ headline: "Fenced headline" }) + "\n```";
     const decision = await triageEvent(
       { source: "email", external_id: "m-4", subject: "hi", body: "b" },
       { db, provider: fakeProvider(fenced) },
@@ -344,7 +430,10 @@ describe("triageEvent", () => {
   test("handles tool_use wrapper shape", async () => {
     resetRateLimiter();
     const db = openDb();
-    const wrapped = JSON.stringify({ name: "emit_alert_decision", input: JSON.parse(jsonDecision({ headline: "Wrapped" })) });
+    const wrapped = JSON.stringify({
+      name: "emit_alert_decision",
+      input: JSON.parse(jsonDecision({ headline: "Wrapped" })),
+    });
     const decision = await triageEvent(
       { source: "email", external_id: "m-5", subject: "hi", body: "b" },
       { db, provider: fakeProvider(wrapped) },
@@ -355,19 +444,35 @@ describe("triageEvent", () => {
   test("includes recent alerts in context", async () => {
     resetRateLimiter();
     const db = openDb();
-    insertAlert(db, { source: "email", external_id: "prior-1", severity: "high", headline: "Prior alert", body: "prior body", dedup_key: "prior-key" });
+    insertAlert(db, {
+      source: "email",
+      external_id: "prior-1",
+      severity: "high",
+      headline: "Prior alert",
+      body: "prior body",
+      dedup_key: "prior-key",
+    });
 
     let capturedUser = "";
     const provider: Provider = {
       name: "fake",
       defaultModel: "fake-model",
       async chat(messages): Promise<string> {
-        capturedUser = (messages.find((m) => m.role === "user")?.content as string) ?? "";
+        capturedUser =
+          (messages.find((m) => m.role === "user")?.content as string) ?? "";
         return jsonDecision();
       },
     };
 
-    await triageEvent({ source: "email", external_id: "new-1", subject: "new", body: "new body" }, { db, provider });
+    await triageEvent(
+      {
+        source: "email",
+        external_id: "new-1",
+        subject: "new",
+        body: "new body",
+      },
+      { db, provider },
+    );
     expect(capturedUser).toContain("Prior alert");
     expect(capturedUser).toContain("prior-key");
   });
@@ -381,7 +486,12 @@ describe("evaluateAndDispatch", () => {
     const db = openDb();
     const result = await evaluateAndDispatch(
       { source: "email", external_id: "msg-x", subject: "hi", body: "world" },
-      { db, provider: fakeProvider(jsonDecision({ headline: "Stub alert", body: "A real signal" })) },
+      {
+        db,
+        provider: fakeProvider(
+          jsonDecision({ headline: "Stub alert", body: "A real signal" }),
+        ),
+      },
     );
     expect(result.decision.alert).toBe(true);
     expect(result.alertId).not.toBeNull();
@@ -393,8 +503,23 @@ describe("evaluateAndDispatch", () => {
     resetRateLimiter();
     const db = openDb();
     const result = await evaluateAndDispatch(
-      { source: "email", external_id: "msg-quiet", subject: "newsletter", body: "noise" },
-      { db, provider: fakeProvider(jsonDecision({ alert: false, severity: "low", channels: ["persisted"], reason_if_suppressed: "low_signal" })) },
+      {
+        source: "email",
+        external_id: "msg-quiet",
+        subject: "newsletter",
+        body: "noise",
+      },
+      {
+        db,
+        provider: fakeProvider(
+          jsonDecision({
+            alert: false,
+            severity: "low",
+            channels: ["persisted"],
+            reason_if_suppressed: "low_signal",
+          }),
+        ),
+      },
     );
     expect(result.decision.alert).toBe(false);
     expect(result.alertId).toBeNull();
@@ -406,7 +531,12 @@ describe("evaluateAndDispatch", () => {
     addMute(db, "hiring");
     const result = await evaluateAndDispatch(
       { source: "email", external_id: "m-mute", subject: "cand", body: "b" },
-      { db, provider: fakeProvider(jsonDecision({ topic_tags: ["hiring"], dedup_key: "cand-1" })) },
+      {
+        db,
+        provider: fakeProvider(
+          jsonDecision({ topic_tags: ["hiring"], dedup_key: "cand-1" }),
+        ),
+      },
     );
     expect(result.decision.alert).toBe(false);
     expect(result.decision.reason_if_suppressed).toBe("muted_post_triage");
@@ -417,9 +547,15 @@ describe("evaluateAndDispatch", () => {
     resetRateLimiter();
     const db = openDb();
     const provider = fakeProvider(jsonDecision({ dedup_key: "same-key" }));
-    const first = await evaluateAndDispatch({ source: "email", external_id: "msg-1", body: "x" }, { db, provider });
+    const first = await evaluateAndDispatch(
+      { source: "email", external_id: "msg-1", body: "x" },
+      { db, provider },
+    );
     expect(first.alertId).not.toBeNull();
-    const second = await evaluateAndDispatch({ source: "email", external_id: "msg-1", body: "x" }, { db, provider });
+    const second = await evaluateAndDispatch(
+      { source: "email", external_id: "msg-1", body: "x" },
+      { db, provider },
+    );
     expect(second.alertId).toBeNull();
     const alert = getAlert(db, first.alertId!);
     expect(alert?.occurrence_count).toBe(1);
@@ -428,10 +564,18 @@ describe("evaluateAndDispatch", () => {
   test("coalesces same dedup_key without re-dispatch when severity does not rise", async () => {
     resetRateLimiter();
     const db = openDb();
-    const lowProvider = fakeProvider(jsonDecision({ severity: "low", dedup_key: "k", body: "first" }));
-    const first = await evaluateAndDispatch({ source: "stock", external_id: "day1", body: "x" }, { db, provider: lowProvider });
+    const lowProvider = fakeProvider(
+      jsonDecision({ severity: "low", dedup_key: "k", body: "first" }),
+    );
+    const first = await evaluateAndDispatch(
+      { source: "stock", external_id: "day1", body: "x" },
+      { db, provider: lowProvider },
+    );
     expect(first.alertId).not.toBeNull();
-    const second = await evaluateAndDispatch({ source: "stock", external_id: "day2", body: "x" }, { db, provider: lowProvider });
+    const second = await evaluateAndDispatch(
+      { source: "stock", external_id: "day2", body: "x" },
+      { db, provider: lowProvider },
+    );
     expect(second.alertId).toBeNull();
     const alert = getAlert(db, first.alertId!);
     expect(alert?.occurrence_count).toBe(2);
@@ -440,11 +584,21 @@ describe("evaluateAndDispatch", () => {
   test("re-dispatches coalesced alert when severity escalates to urgent", async () => {
     resetRateLimiter();
     const db = openDb();
-    const lowProvider = fakeProvider(jsonDecision({ severity: "low", dedup_key: "k", body: "low body" }));
-    const first = await evaluateAndDispatch({ source: "stock", external_id: "day1", body: "x" }, { db, provider: lowProvider });
+    const lowProvider = fakeProvider(
+      jsonDecision({ severity: "low", dedup_key: "k", body: "low body" }),
+    );
+    const first = await evaluateAndDispatch(
+      { source: "stock", external_id: "day1", body: "x" },
+      { db, provider: lowProvider },
+    );
     expect(first.alertId).not.toBeNull();
-    const urgentProvider = fakeProvider(jsonDecision({ severity: "urgent", dedup_key: "k", body: "crash" }));
-    const third = await evaluateAndDispatch({ source: "stock", external_id: "day3", body: "crash" }, { db, provider: urgentProvider });
+    const urgentProvider = fakeProvider(
+      jsonDecision({ severity: "urgent", dedup_key: "k", body: "crash" }),
+    );
+    const third = await evaluateAndDispatch(
+      { source: "stock", external_id: "day3", body: "crash" },
+      { db, provider: urgentProvider },
+    );
     expect(third.alertId).toBe(first.alertId);
     const alert = getAlert(db, first.alertId!);
     expect(alert?.severity).toBe("urgent");
@@ -454,12 +608,33 @@ describe("evaluateAndDispatch", () => {
     resetRateLimiter();
     const db = openDb();
     const provider = fakeProvider(jsonDecision({ dedup_key: "model-key" }));
-    const first = await evaluateAndDispatch({ source: "stock", external_id: "s1", body: "x", dedup_hint: "watch:my-watch" }, { db, provider });
+    const first = await evaluateAndDispatch(
+      {
+        source: "stock",
+        external_id: "s1",
+        body: "x",
+        dedup_hint: "watch:my-watch",
+      },
+      { db, provider },
+    );
     expect(first.alertId).not.toBeNull();
     const alert = getAlert(db, first.alertId!);
     expect(alert?.dedup_key).toBe("watch:my-watch");
     // Second event with same dedup_hint should coalesce, not create new.
-    const second = await evaluateAndDispatch({ source: "stock", external_id: "s2", body: "x", dedup_hint: "watch:my-watch" }, { db, provider: fakeProvider(jsonDecision({ severity: "low", dedup_key: "other-key" })) });
+    const second = await evaluateAndDispatch(
+      {
+        source: "stock",
+        external_id: "s2",
+        body: "x",
+        dedup_hint: "watch:my-watch",
+      },
+      {
+        db,
+        provider: fakeProvider(
+          jsonDecision({ severity: "low", dedup_key: "other-key" }),
+        ),
+      },
+    );
     expect(second.alertId).toBeNull();
   });
 
@@ -481,10 +656,17 @@ describe("evaluateAndDispatch", () => {
     // Use distinct dedup_keys so coalescing does not collapse the second event.
     const providerA = fakeProvider(jsonDecision({ dedup_key: "route-a" }));
     const providerB = fakeProvider(jsonDecision({ dedup_key: "route-b" }));
-    const routed = await evaluateAndDispatch({ source: "email", external_id: "f", body: "x", routed_to_person_id: 4 }, { db, provider: providerA });
+    const routed = await evaluateAndDispatch(
+      { source: "email", external_id: "f", body: "x", routed_to_person_id: 4 },
+      { db, provider: providerA },
+    );
     expect(getAlert(db, routed.alertId!)?.routed_to_person_id).toBe(4);
-    const viaUser = await evaluateAndDispatch({ source: "email", external_id: "u", body: "x", user: "person:9" }, { db, provider: providerB });
-    const viaUserAlert = viaUser.alertId !== null ? getAlert(db, viaUser.alertId) : null;
+    const viaUser = await evaluateAndDispatch(
+      { source: "email", external_id: "u", body: "x", user: "person:9" },
+      { db, provider: providerB },
+    );
+    const viaUserAlert =
+      viaUser.alertId !== null ? getAlert(db, viaUser.alertId) : null;
     expect(viaUserAlert).not.toBeNull();
     expect(viaUserAlert?.routed_to_person_id).toBeNull();
   });
@@ -505,7 +687,11 @@ describe("evaluateAndDispatch", () => {
     resetRateLimiter();
     const db = openDb();
     const result = await evaluateAndDispatch(
-      { source: "email", external_id: "", body: "hi" } as unknown as TriageEvent,
+      {
+        source: "email",
+        external_id: "",
+        body: "hi",
+      } as unknown as TriageEvent,
       { db, provider: fakeProvider(jsonDecision()) },
     );
     expect(result.decision.alert).toBe(false);
@@ -531,9 +717,15 @@ describe("evaluateAndDispatch", () => {
     const provider = fakeProvider(jsonDecision());
     // Fill the window.
     for (let idx = 0; idx < 60; idx++) {
-      await evaluateAndDispatch({ source: "email", external_id: `rate-${idx}`, body: "x" }, { db, provider });
+      await evaluateAndDispatch(
+        { source: "email", external_id: `rate-${idx}`, body: "x" },
+        { db, provider },
+      );
     }
-    const limited = await evaluateAndDispatch({ source: "email", external_id: "rate-60", body: "x" }, { db, provider });
+    const limited = await evaluateAndDispatch(
+      { source: "email", external_id: "rate-60", body: "x" },
+      { db, provider },
+    );
     expect(limited.decision.reason_if_suppressed).toBe("rate_limited");
     expect(limited.alertId).toBeNull();
     resetRateLimiter();
@@ -558,7 +750,9 @@ describe("evaluateAndDispatch", () => {
     );
     // Should still create an alert but without broadcast channels.
     if (result.alertId !== null) {
-      expect(result.decision.channels).not.toContain("department_channel" as never);
+      expect(result.decision.channels).not.toContain(
+        "department_channel" as never,
+      );
       expect(result.decision.department_slug).toBe("");
       expect(result.decision.broadcast_integration).toBe("");
     } else {
@@ -593,7 +787,12 @@ describe("evaluateAndDispatch", () => {
 
 describe("validateTriageEvent", () => {
   test("accepts a valid event", () => {
-    const result = validateTriageEvent({ source: "email", external_id: "msg-1", subject: "hi", body: "hello" });
+    const result = validateTriageEvent({
+      source: "email",
+      external_id: "msg-1",
+      subject: "hi",
+      body: "hello",
+    });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.event.source).toBe("email");
@@ -637,7 +836,10 @@ describe("validateTriageEvent", () => {
   });
 
   test("trims source and external_id", () => {
-    const result = validateTriageEvent({ source: "  email  ", external_id: "  msg-1  " });
+    const result = validateTriageEvent({
+      source: "  email  ",
+      external_id: "  msg-1  ",
+    });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.event.source).toBe("email");
@@ -654,13 +856,39 @@ describe("triage HTTP routes", () => {
     const { createApp } = await import("../../index.ts");
     const db = open();
     const provider = fakeProvider("{}");
-    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", eodDigestTime: "18:00", reflectionTime: "07:30", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
-    const res = await app(new Request("http://localhost/features/triage/prompt"));
+    const app = createApp({
+      settings: {
+        dbPath: ":memory:",
+        port: 8787,
+        publicServerUrl: "",
+        allowedOrigins: [],
+        morningBriefTime: "08:00",
+        eodDigestTime: "18:00",
+        reflectionTime: "07:30",
+        scheduledAdminToken: "",
+        provider: {
+          name: "deepseek",
+          baseUrl: "https://api.deepseek.com",
+          apiKey: "test",
+          model: "deepseek-chat",
+          reasoningModel: "deepseek-reasoner",
+          routingModel: "deepseek-chat",
+          headers: {},
+        },
+      },
+      db,
+      provider,
+    });
+    const res = await app(
+      new Request("http://localhost/features/triage/prompt"),
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
     expect(typeof body["prompt"]).toBe("string");
     expect((body["prompt"] as string).length).toBeGreaterThan(1000);
-    expect((body["tool"] as Record<string, unknown>)["name"]).toBe("emit_alert_decision");
+    expect((body["tool"] as Record<string, unknown>)["name"]).toBe(
+      "emit_alert_decision",
+    );
   });
 
   test("POST /features/triage/classify validates and classifies", async () => {
@@ -668,13 +896,42 @@ describe("triage HTTP routes", () => {
     const { createApp } = await import("../../index.ts");
     resetRateLimiter();
     const db = open();
-    const provider = fakeProvider(jsonDecision({ headline: "Classified headline" }));
-    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", eodDigestTime: "18:00", reflectionTime: "07:30", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
+    const provider = fakeProvider(
+      jsonDecision({ headline: "Classified headline" }),
+    );
+    const app = createApp({
+      settings: {
+        dbPath: ":memory:",
+        port: 8787,
+        publicServerUrl: "",
+        allowedOrigins: [],
+        morningBriefTime: "08:00",
+        eodDigestTime: "18:00",
+        reflectionTime: "07:30",
+        scheduledAdminToken: "",
+        provider: {
+          name: "deepseek",
+          baseUrl: "https://api.deepseek.com",
+          apiKey: "test",
+          model: "deepseek-chat",
+          reasoningModel: "deepseek-reasoner",
+          routingModel: "deepseek-chat",
+          headers: {},
+        },
+      },
+      db,
+      provider,
+    });
     const res = await app(
       new Request("http://localhost/features/triage/classify", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ source: "email", external_id: "test-1", subject: "hi", body: "hello" }),
+        body: JSON.stringify({
+          source: "email",
+          external_id: "test-1",
+          subject: "hi",
+          body: "hello",
+        }),
       }),
     );
     expect(res.status).toBe(200);
@@ -687,7 +944,29 @@ describe("triage HTTP routes", () => {
     const { createApp } = await import("../../index.ts");
     const db = open();
     const provider = fakeProvider("{}");
-    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", eodDigestTime: "18:00", reflectionTime: "07:30", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
+    const app = createApp({
+      settings: {
+        dbPath: ":memory:",
+        port: 8787,
+        publicServerUrl: "",
+        allowedOrigins: [],
+        morningBriefTime: "08:00",
+        eodDigestTime: "18:00",
+        reflectionTime: "07:30",
+        scheduledAdminToken: "",
+        provider: {
+          name: "deepseek",
+          baseUrl: "https://api.deepseek.com",
+          apiKey: "test",
+          model: "deepseek-chat",
+          reasoningModel: "deepseek-reasoner",
+          routingModel: "deepseek-chat",
+          headers: {},
+        },
+      },
+      db,
+      provider,
+    });
     const res = await app(
       new Request("http://localhost/features/triage/classify", {
         method: "POST",
@@ -703,13 +982,42 @@ describe("triage HTTP routes", () => {
     const { createApp } = await import("../../index.ts");
     resetRateLimiter();
     const db = open();
-    const provider = fakeProvider(jsonDecision({ headline: "Evaluated headline" }));
-    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", eodDigestTime: "18:00", reflectionTime: "07:30", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
+    const provider = fakeProvider(
+      jsonDecision({ headline: "Evaluated headline" }),
+    );
+    const app = createApp({
+      settings: {
+        dbPath: ":memory:",
+        port: 8787,
+        publicServerUrl: "",
+        allowedOrigins: [],
+        morningBriefTime: "08:00",
+        eodDigestTime: "18:00",
+        reflectionTime: "07:30",
+        scheduledAdminToken: "",
+        provider: {
+          name: "deepseek",
+          baseUrl: "https://api.deepseek.com",
+          apiKey: "test",
+          model: "deepseek-chat",
+          reasoningModel: "deepseek-reasoner",
+          routingModel: "deepseek-chat",
+          headers: {},
+        },
+      },
+      db,
+      provider,
+    });
     const res = await app(
       new Request("http://localhost/features/triage/evaluate", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ source: "email", external_id: "eval-1", subject: "hi", body: "hello" }),
+        body: JSON.stringify({
+          source: "email",
+          external_id: "eval-1",
+          subject: "hi",
+          body: "hello",
+        }),
       }),
     );
     expect(res.status).toBe(200);
@@ -725,17 +1033,46 @@ describe("triage HTTP routes", () => {
     resetRateLimiter();
     const db = open();
     const provider = fakeProvider(jsonDecision({ headline: "Alias headline" }));
-    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", eodDigestTime: "18:00", reflectionTime: "07:30", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
+    const app = createApp({
+      settings: {
+        dbPath: ":memory:",
+        port: 8787,
+        publicServerUrl: "",
+        allowedOrigins: [],
+        morningBriefTime: "08:00",
+        eodDigestTime: "18:00",
+        reflectionTime: "07:30",
+        scheduledAdminToken: "",
+        provider: {
+          name: "deepseek",
+          baseUrl: "https://api.deepseek.com",
+          apiKey: "test",
+          model: "deepseek-chat",
+          reasoningModel: "deepseek-reasoner",
+          routingModel: "deepseek-chat",
+          headers: {},
+        },
+      },
+      db,
+      provider,
+    });
     const res = await app(
       new Request("http://localhost/triage/evaluate", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ source: "email", external_id: "alias-1", subject: "hi", body: "hello" }),
+        body: JSON.stringify({
+          source: "email",
+          external_id: "alias-1",
+          subject: "hi",
+          body: "hello",
+        }),
       }),
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
-    expect((body["decision"] as Record<string, unknown>)["headline"]).toBe("Alias headline");
+    expect((body["decision"] as Record<string, unknown>)["headline"]).toBe(
+      "Alias headline",
+    );
   });
 
   test("POST /triage/debug returns prompt context without calling provider", async () => {
@@ -743,19 +1080,48 @@ describe("triage HTTP routes", () => {
     const { createApp } = await import("../../index.ts");
     const db = open();
     const provider = throwingProvider();
-    const app = createApp({ settings: { dbPath: ":memory:", port: 8787, publicServerUrl: "", allowedOrigins: [], morningBriefTime: "08:00", eodDigestTime: "18:00", reflectionTime: "07:30", scheduledAdminToken: "", provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} } }, db, provider });
+    const app = createApp({
+      settings: {
+        dbPath: ":memory:",
+        port: 8787,
+        publicServerUrl: "",
+        allowedOrigins: [],
+        morningBriefTime: "08:00",
+        eodDigestTime: "18:00",
+        reflectionTime: "07:30",
+        scheduledAdminToken: "",
+        provider: {
+          name: "deepseek",
+          baseUrl: "https://api.deepseek.com",
+          apiKey: "test",
+          model: "deepseek-chat",
+          reasoningModel: "deepseek-reasoner",
+          routingModel: "deepseek-chat",
+          headers: {},
+        },
+      },
+      db,
+      provider,
+    });
     const res = await app(
       new Request("http://localhost/triage/debug", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ event: { source: "email", external_id: "dbg-1", subject: "debug me", body: "hello" } }),
+        body: JSON.stringify({
+          event: {
+            source: "email",
+            external_id: "dbg-1",
+            subject: "debug me",
+            body: "hello",
+          },
+        }),
       }),
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
     expect(typeof body["system"]).toBe("string");
     expect(typeof body["user"]).toBe("string");
-    expect((body["user"] as string)).toContain("debug me");
+    expect(body["user"] as string).toContain("debug me");
   });
 });
 

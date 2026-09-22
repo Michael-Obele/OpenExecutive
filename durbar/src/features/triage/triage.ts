@@ -144,7 +144,8 @@ export const TRIAGE_TOOL = {
     properties: {
       alert: {
         type: "boolean" as const,
-        description: "True if the user should be alerted; false if the event is not worth surfacing.",
+        description:
+          "True if the user should be alerted; false if the event is not worth surfacing.",
       },
       severity: {
         type: "string" as const,
@@ -154,34 +155,66 @@ export const TRIAGE_TOOL = {
         type: "array" as const,
         items: {
           type: "string" as const,
-          enum: ["web", "slack_dm", "email", "persisted", "department_channel", "company_broadcast"] as const,
+          enum: [
+            "web",
+            "slack_dm",
+            "email",
+            "persisted",
+            "department_channel",
+            "company_broadcast",
+          ] as const,
         },
         description:
           "Which channels to deliver on. Always include 'persisted'. Use 'department_channel' for dept-scoped alerts; 'company_broadcast' for company-wide.",
       },
-      headline: { type: "string" as const, description: "<= 100 chars. The single most important fact." },
-      body: { type: "string" as const, description: "1-3 sentence summary with implication." },
+      headline: {
+        type: "string" as const,
+        description: "<= 100 chars. The single most important fact.",
+      },
+      body: {
+        type: "string" as const,
+        description: "1-3 sentence summary with implication.",
+      },
       suggested_action: {
         type: "string" as const,
-        description: "The single concrete action the Executive will take on approval (first-person imperative, <= 1 sentence). Empty string if none.",
+        description:
+          "The single concrete action the Executive will take on approval (first-person imperative, <= 1 sentence). Empty string if none.",
       },
-      topic_tags: { type: "array" as const, items: { type: "string" as const }, description: "1-4 lowercase topic tags." },
-      dedup_key: { type: "string" as const, description: "Stable summary key. Same underlying event must produce the same key." },
+      topic_tags: {
+        type: "array" as const,
+        items: { type: "string" as const },
+        description: "1-4 lowercase topic tags.",
+      },
+      dedup_key: {
+        type: "string" as const,
+        description:
+          "Stable summary key. Same underlying event must produce the same key.",
+      },
       reason_if_suppressed: {
         type: "string" as const,
-        description: "Reason when alert=false ('duplicate', 'muted: <pattern>', 'low_signal'). Empty otherwise.",
+        description:
+          "Reason when alert=false ('duplicate', 'muted: <pattern>', 'low_signal'). Empty otherwise.",
       },
       department_slug: {
         type: "string" as const,
-        description: "Required when channels includes 'department_channel'. The slug of the department whose team room to post to. Empty otherwise.",
+        description:
+          "Required when channels includes 'department_channel'. The slug of the department whose team room to post to. Empty otherwise.",
       },
       broadcast_integration: {
         type: "string" as const,
         enum: ["slack", "discord", "telegram"] as const,
-        description: "Required when channels includes 'department_channel' or 'company_broadcast'. The integration to broadcast on.",
+        description:
+          "Required when channels includes 'department_channel' or 'company_broadcast'. The integration to broadcast on.",
       },
     },
-    required: ["alert", "severity", "channels", "headline", "body", "dedup_key"] as const,
+    required: [
+      "alert",
+      "severity",
+      "channels",
+      "headline",
+      "body",
+      "dedup_key",
+    ] as const,
   },
 } as const;
 
@@ -273,7 +306,10 @@ export function resetRateLimiter(): void {
 
 function formatEventBlock(event: TriageEvent): string {
   const body = (event.body ?? "").slice(0, MAX_EVENT_CHARS);
-  const parts: string[] = [`source: ${event.source}`, `external_id: ${event.external_id}`];
+  const parts: string[] = [
+    `source: ${event.source}`,
+    `external_id: ${event.external_id}`,
+  ];
   if (event.subject) parts.push(`subject: ${event.subject}`);
   if (event.from) parts.push(`from: ${event.from}`);
   if (event.channel) parts.push(`slack_channel: ${event.channel}`);
@@ -289,7 +325,9 @@ function formatRecentAlerts(recent: Array<Record<string, unknown>>): string {
   return recent
     .slice(0, 20)
     .map((a) => {
-      const tags = Array.isArray(a["topic_tags"]) ? (a["topic_tags"] as string[]).join(",") : "";
+      const tags = Array.isArray(a["topic_tags"])
+        ? (a["topic_tags"] as string[]).join(",")
+        : "";
       return `- [${String(a["severity"] ?? "?")}] ${String(a["headline"] ?? "")} | dedup_key=${String(a["dedup_key"] ?? "")} | tags=${tags}`;
     })
     .join("\n");
@@ -300,7 +338,9 @@ function formatMutes(patterns: string[]): string {
   return patterns.map((p) => `- ${p}`).join("\n");
 }
 
-function formatInitiatives(initiatives: Array<Record<string, unknown>>): string {
+function formatInitiatives(
+  initiatives: Array<Record<string, unknown>>,
+): string {
   if (initiatives.length === 0) return "(none)";
   return initiatives
     .map((item) => {
@@ -329,24 +369,38 @@ export function buildUserContent(
 // ── decision parsing (mirrors _parse_decision) ─────────────────────────────
 
 const VALID_SEVERITIES = new Set<string>(["low", "medium", "high", "urgent"]);
-const VALID_CHANNELS = new Set<string>(["web", "slack_dm", "email", "persisted", "department_channel", "company_broadcast"]);
+const VALID_CHANNELS = new Set<string>([
+  "web",
+  "slack_dm",
+  "email",
+  "persisted",
+  "department_channel",
+  "company_broadcast",
+]);
 const VALID_INTEGRATIONS = new Set<string>(["slack", "discord", "telegram"]);
 
 export function parseDecision(raw: Record<string, unknown>): TriageDecision {
   try {
     const severityRaw = String(raw["severity"] ?? "low").toLowerCase();
-    const severity: AlertSeverity = VALID_SEVERITIES.has(severityRaw) ? (severityRaw as AlertSeverity) : "low";
+    const severity: AlertSeverity = VALID_SEVERITIES.has(severityRaw)
+      ? (severityRaw as AlertSeverity)
+      : "low";
 
     const channels: AlertChannel[] = [];
-    const rawChannels = Array.isArray(raw["channels"]) ? (raw["channels"] as unknown[]) : [];
+    const rawChannels = Array.isArray(raw["channels"])
+      ? (raw["channels"] as unknown[])
+      : [];
     for (const channel of rawChannels) {
       const channelStr = String(channel).toLowerCase();
-      if (VALID_CHANNELS.has(channelStr)) channels.push(channelStr as AlertChannel);
+      if (VALID_CHANNELS.has(channelStr))
+        channels.push(channelStr as AlertChannel);
     }
     if (!channels.includes("persisted")) channels.push("persisted");
 
     const topicTags = Array.isArray(raw["topic_tags"])
-      ? (raw["topic_tags"] as unknown[]).map((tag) => String(tag).toLowerCase()).slice(0, 8)
+      ? (raw["topic_tags"] as unknown[])
+          .map((tag) => String(tag).toLowerCase())
+          .slice(0, 8)
       : [];
 
     const deptSlug = String(raw["department_slug"] ?? "").slice(0, 64);
@@ -362,7 +416,10 @@ export function parseDecision(raw: Record<string, unknown>): TriageDecision {
       suggested_action: String(raw["suggested_action"] ?? "").slice(0, 500),
       topic_tags: topicTags,
       dedup_key: String(raw["dedup_key"] ?? "").slice(0, 120),
-      reason_if_suppressed: String(raw["reason_if_suppressed"] ?? "").slice(0, 200),
+      reason_if_suppressed: String(raw["reason_if_suppressed"] ?? "").slice(
+        0,
+        200,
+      ),
       department_slug: deptSlug,
       broadcast_integration: broadcastIntegration,
     };
@@ -383,7 +440,11 @@ export function parseDecision(raw: Record<string, unknown>): TriageDecision {
   }
 }
 
-function fallbackDecision(event: TriageEvent, reason: string, dedupPrefix: string): TriageDecision {
+function fallbackDecision(
+  event: TriageEvent,
+  reason: string,
+  dedupPrefix: string,
+): TriageDecision {
   return {
     alert: false,
     severity: "low",
@@ -408,14 +469,25 @@ function extractJsonPayload(raw: string): Record<string, unknown> | null {
   // Try direct JSON parse first (provider returned raw JSON object).
   try {
     const parsed: unknown = JSON.parse(trimmed);
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
+    ) {
       // Handle tool_use wrapper: {tool: "emit_alert_decision", input: {...}}
       const wrapper = parsed as Record<string, unknown>;
-      if (wrapper["input"] !== undefined && typeof wrapper["input"] === "object" && wrapper["input"] !== null) {
+      if (
+        wrapper["input"] !== undefined &&
+        typeof wrapper["input"] === "object" &&
+        wrapper["input"] !== null
+      ) {
         return wrapper["input"] as Record<string, unknown>;
       }
       // Handle {name: "emit_alert_decision", input: {...}} shape
-      if (wrapper["name"] === "emit_alert_decision" && wrapper["input"] !== undefined) {
+      if (
+        wrapper["name"] === "emit_alert_decision" &&
+        wrapper["input"] !== undefined
+      ) {
         return wrapper["input"] as Record<string, unknown>;
       }
       return wrapper;
@@ -429,9 +501,17 @@ function extractJsonPayload(raw: string): Record<string, unknown> | null {
   if (fenceMatch?.[1]) {
     try {
       const parsed: unknown = JSON.parse(fenceMatch[1]!.trim());
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        !Array.isArray(parsed)
+      ) {
         const wrapper = parsed as Record<string, unknown>;
-        if (wrapper["input"] !== undefined && typeof wrapper["input"] === "object" && wrapper["input"] !== null) {
+        if (
+          wrapper["input"] !== undefined &&
+          typeof wrapper["input"] === "object" &&
+          wrapper["input"] !== null
+        ) {
           return wrapper["input"] as Record<string, unknown>;
         }
         return wrapper;
@@ -446,9 +526,17 @@ function extractJsonPayload(raw: string): Record<string, unknown> | null {
   if (objMatch?.[0]) {
     try {
       const parsed: unknown = JSON.parse(objMatch[0]!);
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        !Array.isArray(parsed)
+      ) {
         const wrapper = parsed as Record<string, unknown>;
-        if (wrapper["input"] !== undefined && typeof wrapper["input"] === "object" && wrapper["input"] !== null) {
+        if (
+          wrapper["input"] !== undefined &&
+          typeof wrapper["input"] === "object" &&
+          wrapper["input"] !== null
+        ) {
           return wrapper["input"] as Record<string, unknown>;
         }
         return wrapper;
@@ -463,7 +551,10 @@ function extractJsonPayload(raw: string): Record<string, unknown> | null {
 
 // ── core triage (LLM classification) ───────────────────────────────────────
 
-export async function triageEvent(event: TriageEvent, deps: TriageDeps): Promise<TriageDecision> {
+export async function triageEvent(
+  event: TriageEvent,
+  deps: TriageDeps,
+): Promise<TriageDecision> {
   const db = deps.db;
 
   // Gather context for the prompt — same as pipeline.py pre-checks.
@@ -482,7 +573,12 @@ export async function triageEvent(event: TriageEvent, deps: TriageDeps): Promise
       summary: item.summary,
     }));
 
-  const userContent = buildUserContent(event, recent, mutePatterns, initiatives);
+  const userContent = buildUserContent(
+    event,
+    recent,
+    mutePatterns,
+    initiatives,
+  );
 
   // The reference uses tool_choice forced to emit_alert_decision. Durbar's
   // provider is OpenAI-compatible chat completions, so we instruct the model
@@ -510,10 +606,15 @@ export async function triageEvent(event: TriageEvent, deps: TriageDeps): Promise
 
 // ── pipeline (classification → persistence → dispatch gating) ────────────────
 
-function withDepartmentTag(tags: string[], department: string | null | undefined): string[] {
+function withDepartmentTag(
+  tags: string[],
+  department: string | null | undefined,
+): string[] {
   const raw = (department ?? "").trim();
   if (!raw) return [...tags];
-  const slug = raw.startsWith("department:") ? raw.split(":", 2)[1]!.trim().toLowerCase() : raw.toLowerCase();
+  const slug = raw.startsWith("department:")
+    ? raw.split(":", 2)[1]!.trim().toLowerCase()
+    : raw.toLowerCase();
   if (!slug) return [...tags];
   const tag = `department:${slug}`;
   return tags.includes(tag) ? [...tags] : [...tags, tag];
@@ -524,7 +625,10 @@ function violatesPrivacyInvariant(topicTags: string[]): boolean {
   return topicTags.some((tag) => PRIVACY_SENSITIVE_TAGS.has(tag.toLowerCase()));
 }
 
-export async function evaluateAndDispatch(event: TriageEvent, deps: TriageDeps): Promise<TriageResult> {
+export async function evaluateAndDispatch(
+  event: TriageEvent,
+  deps: TriageDeps,
+): Promise<TriageResult> {
   // Rate limit guard — mirrors pipeline.py _rate_limited().
   if (isRateLimited()) {
     return {
@@ -556,7 +660,13 @@ export async function evaluateAndDispatch(event: TriageEvent, deps: TriageDeps):
   const decision = await triageEvent(event, deps);
 
   // Post-decision mute check — triage may have produced a tag we mute.
-  if (decision.alert && matchesMute(decision.topic_tags, listMutes(deps.db).map((m) => m.pattern))) {
+  if (
+    decision.alert &&
+    matchesMute(
+      decision.topic_tags,
+      listMutes(deps.db).map((m) => m.pattern),
+    )
+  ) {
     const mutedDecision: TriageDecision = {
       ...decision,
       alert: false,
@@ -568,12 +678,16 @@ export async function evaluateAndDispatch(event: TriageEvent, deps: TriageDeps):
   // Privacy invariant backstop — even if the model misroutes, never broadcast
   // board/comp/legal. Defence-in-depth: prompt is primary, this is the gate.
   if (decision.alert && violatesPrivacyInvariant(decision.topic_tags)) {
-    const hasBroadcast = decision.channels.includes("department_channel") || decision.channels.includes("company_broadcast");
+    const hasBroadcast =
+      decision.channels.includes("department_channel") ||
+      decision.channels.includes("company_broadcast");
     if (hasBroadcast) {
       const filteredChannels = decision.channels.filter(
-        (channel) => channel !== "department_channel" && channel !== "company_broadcast",
+        (channel) =>
+          channel !== "department_channel" && channel !== "company_broadcast",
       );
-      if (!filteredChannels.includes("persisted")) filteredChannels.push("persisted");
+      if (!filteredChannels.includes("persisted"))
+        filteredChannels.push("persisted");
       // If the only channels were broadcast + persisted, this becomes persisted-only
       // but still alert=true — the principal still sees it, just not the team.
       const gatedDecision: TriageDecision = {
@@ -586,8 +700,19 @@ export async function evaluateAndDispatch(event: TriageEvent, deps: TriageDeps):
       // is not needed — the alert still surfaces to the principal via persisted.
       // But if the model intended broadcast as the primary channel, we keep it
       // as a DM-equivalent (web + persisted) rather than dropping.
-      if (filteredChannels.length === 1 && filteredChannels[0] === "persisted" && decision.severity === "low") {
-        return { decision: { ...gatedDecision, alert: false, reason_if_suppressed: "privacy_gated" }, alertId: null };
+      if (
+        filteredChannels.length === 1 &&
+        filteredChannels[0] === "persisted" &&
+        decision.severity === "low"
+      ) {
+        return {
+          decision: {
+            ...gatedDecision,
+            alert: false,
+            reason_if_suppressed: "privacy_gated",
+          },
+          alertId: null,
+        };
       }
       // Continue with gated decision instead of original
       return persistDecision(event, gatedDecision, deps);
@@ -601,17 +726,33 @@ export async function evaluateAndDispatch(event: TriageEvent, deps: TriageDeps):
   return persistDecision(event, decision, deps);
 }
 
-function persistDecision(event: TriageEvent, decision: TriageDecision, deps: TriageDeps): TriageResult {
+function persistDecision(
+  event: TriageEvent,
+  decision: TriageDecision,
+  deps: TriageDeps,
+): TriageResult {
   const db = deps.db;
   const prefs = getPreferences(db);
-  const effectiveChannels = resolveChannels(decision.channels, decision.severity, prefs);
+  const effectiveChannels = resolveChannels(
+    decision.channels,
+    decision.severity,
+    prefs,
+  );
 
-  const dedupKey = event.dedup_hint?.trim() ? event.dedup_hint.trim() : decision.dedup_key;
-  const topicTags = withDepartmentTag(decision.topic_tags, event.department ?? event.channel ?? "");
+  const dedupKey = event.dedup_hint?.trim()
+    ? event.dedup_hint.trim()
+    : decision.dedup_key;
+  const topicTags = withDepartmentTag(
+    decision.topic_tags,
+    event.department ?? event.channel ?? "",
+  );
   const routedTo = event.routed_to_person_id ?? null;
 
   // Replay guard: same (source, external_id) already exists — webhook retry, not a new situation.
-  if (event.external_id && getAlertByExternal(db, event.source, event.external_id) !== null) {
+  if (
+    event.external_id &&
+    getAlertByExternal(db, event.source, event.external_id) !== null
+  ) {
     return { decision, alertId: null };
   }
 
@@ -626,7 +767,8 @@ function persistDecision(event: TriageEvent, decision: TriageDecision, deps: Tri
     });
     if (coalesced !== null) {
       const raised = coalesced.raised;
-      const shouldRedispatch = raised && REDISPATCH_SEVERITIES.has(decision.severity);
+      const shouldRedispatch =
+        raised && REDISPATCH_SEVERITIES.has(decision.severity);
       if (!shouldRedispatch) {
         return { decision, alertId: null };
       }
@@ -641,7 +783,8 @@ function persistDecision(event: TriageEvent, decision: TriageDecision, deps: Tri
 
   // If channels collapsed to persisted-only due to threshold/quiet hours,
   // still persist — the alert is recoverable, just not interrupting.
-  const headline = decision.headline || event.subject || event.title || event.source;
+  const headline =
+    decision.headline || event.subject || event.title || event.source;
   const alertId = insertAlert(db, {
     source: event.source,
     external_id: event.external_id,
@@ -678,23 +821,38 @@ export function validateTriageEvent(
   if (typeof record["source"] !== "string" || !record["source"].trim()) {
     return { ok: false, error: "source is required" };
   }
-  if (typeof record["external_id"] !== "string" || !record["external_id"].trim()) {
+  if (
+    typeof record["external_id"] !== "string" ||
+    !record["external_id"].trim()
+  ) {
     return { ok: false, error: "external_id is required" };
   }
   const event: TriageEvent = {
     source: (record["source"] as string).trim(),
     external_id: (record["external_id"] as string).trim(),
   };
-  if (typeof record["subject"] === "string") (event as { subject: string }).subject = record["subject"];
-  if (typeof record["body"] === "string") (event as { body: string }).body = record["body"];
-  if (typeof record["from"] === "string") (event as { from: string }).from = record["from"];
-  if (typeof record["channel"] === "string") (event as { channel: string }).channel = record["channel"];
-  if (typeof record["user"] === "string") (event as { user: string }).user = record["user"];
-  if (typeof record["title"] === "string") (event as { title: string }).title = record["title"];
-  if (typeof record["dedup_hint"] === "string") (event as { dedup_hint: string }).dedup_hint = record["dedup_hint"];
-  if (typeof record["department"] === "string") (event as { department: string }).department = record["department"];
-  if (typeof record["routed_to_person_id"] === "number" && Number.isInteger(record["routed_to_person_id"])) {
-    (event as { routed_to_person_id: number }).routed_to_person_id = record["routed_to_person_id"];
+  if (typeof record["subject"] === "string")
+    (event as { subject: string }).subject = record["subject"];
+  if (typeof record["body"] === "string")
+    (event as { body: string }).body = record["body"];
+  if (typeof record["from"] === "string")
+    (event as { from: string }).from = record["from"];
+  if (typeof record["channel"] === "string")
+    (event as { channel: string }).channel = record["channel"];
+  if (typeof record["user"] === "string")
+    (event as { user: string }).user = record["user"];
+  if (typeof record["title"] === "string")
+    (event as { title: string }).title = record["title"];
+  if (typeof record["dedup_hint"] === "string")
+    (event as { dedup_hint: string }).dedup_hint = record["dedup_hint"];
+  if (typeof record["department"] === "string")
+    (event as { department: string }).department = record["department"];
+  if (
+    typeof record["routed_to_person_id"] === "number" &&
+    Number.isInteger(record["routed_to_person_id"])
+  ) {
+    (event as { routed_to_person_id: number }).routed_to_person_id =
+      record["routed_to_person_id"];
   } else if (record["routed_to_person_id"] === null) {
     (event as { routed_to_person_id: null }).routed_to_person_id = null;
   }

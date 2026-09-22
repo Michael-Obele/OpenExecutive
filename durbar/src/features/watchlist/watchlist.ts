@@ -12,7 +12,13 @@ import type { Db } from "../../db.ts";
 export type WatchlistMode = "active" | "dry_run";
 export const MODES: readonly WatchlistMode[] = ["active", "dry_run"];
 export const VALID_SEVERITIES = ["low", "medium", "high", "urgent"] as const;
-export const VALID_CADENCES = ["real_time", "15min", "hourly", "daily", "weekly"] as const;
+export const VALID_CADENCES = [
+  "real_time",
+  "15min",
+  "hourly",
+  "daily",
+  "weekly",
+] as const;
 
 export interface WatchlistItem {
   id: number;
@@ -58,7 +64,9 @@ export interface ExternalSignal {
   enrichment_json: string;
 }
 
-function nowIso(): string { return new Date().toISOString(); }
+function nowIso(): string {
+  return new Date().toISOString();
+}
 
 function rowToItem(row: Record<string, unknown>): WatchlistItem {
   return {
@@ -88,56 +96,135 @@ function rowToItem(row: Record<string, unknown>): WatchlistItem {
   };
 }
 
-export function listWatchlist(db: Db, filters: { enabledOnly?: boolean; signalType?: string } = {}): WatchlistItem[] {
+export function listWatchlist(
+  db: Db,
+  filters: { enabledOnly?: boolean; signalType?: string } = {},
+): WatchlistItem[] {
   const clauses: string[] = [];
   const params: string[] = [];
-  if (filters.enabledOnly) { clauses.push("enabled = 1"); }
-  if (filters.signalType) { clauses.push("signal_type = ?"); params.push(filters.signalType); }
+  if (filters.enabledOnly) {
+    clauses.push("enabled = 1");
+  }
+  if (filters.signalType) {
+    clauses.push("signal_type = ?");
+    params.push(filters.signalType);
+  }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = params.length
-    ? db.query<Record<string, unknown>, string[]>(`SELECT * FROM watchlist ${where} ORDER BY id`).all(...params)
-    : db.query<Record<string, unknown>, []>(`SELECT * FROM watchlist ${where} ORDER BY id`).all();
+    ? db
+        .query<
+          Record<string, unknown>,
+          string[]
+        >(`SELECT * FROM watchlist ${where} ORDER BY id`)
+        .all(...params)
+    : db
+        .query<
+          Record<string, unknown>,
+          []
+        >(`SELECT * FROM watchlist ${where} ORDER BY id`)
+        .all();
   return rows.map(rowToItem);
 }
 
 export function getWatchlistBySlug(db: Db, slug: string): WatchlistItem | null {
-  const row = db.query<Record<string, unknown>, [string]>("SELECT * FROM watchlist WHERE slug = ?").get(slug);
+  const row = db
+    .query<
+      Record<string, unknown>,
+      [string]
+    >("SELECT * FROM watchlist WHERE slug = ?")
+    .get(slug);
   return row ? rowToItem(row) : null;
 }
 
 export function getWatchlistById(db: Db, id: number): WatchlistItem | null {
-  const row = db.query<Record<string, unknown>, [number]>("SELECT * FROM watchlist WHERE id = ?").get(id);
+  const row = db
+    .query<
+      Record<string, unknown>,
+      [number]
+    >("SELECT * FROM watchlist WHERE id = ?")
+    .get(id);
   return row ? rowToItem(row) : null;
 }
 
-export function createWatchlist(db: Db, data: { slug: string; signal_type: string; target: string; config?: Record<string, unknown>; trigger?: Record<string, unknown>; cadence?: string; severity_floor?: string; severity_ceiling?: string; mode?: string; route_to_specialist?: string; notes?: string }): WatchlistItem {
+export function createWatchlist(
+  db: Db,
+  data: {
+    slug: string;
+    signal_type: string;
+    target: string;
+    config?: Record<string, unknown>;
+    trigger?: Record<string, unknown>;
+    cadence?: string;
+    severity_floor?: string;
+    severity_ceiling?: string;
+    mode?: string;
+    route_to_specialist?: string;
+    notes?: string;
+  },
+): WatchlistItem {
   const now = nowIso();
   db.run(
     `INSERT INTO watchlist (slug, signal_type, target, config_json, trigger_json, cadence, severity_floor, severity_ceiling, route_to_specialist, mode, notes, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [data.slug, data.signal_type, data.target, JSON.stringify(data.config ?? {}), JSON.stringify(data.trigger ?? {}), data.cadence ?? "15min", data.severity_floor ?? "low", data.severity_ceiling ?? "urgent", data.route_to_specialist ?? "", data.mode ?? "active", data.notes ?? "", now],
+    [
+      data.slug,
+      data.signal_type,
+      data.target,
+      JSON.stringify(data.config ?? {}),
+      JSON.stringify(data.trigger ?? {}),
+      data.cadence ?? "15min",
+      data.severity_floor ?? "low",
+      data.severity_ceiling ?? "urgent",
+      data.route_to_specialist ?? "",
+      data.mode ?? "active",
+      data.notes ?? "",
+      now,
+    ],
   );
-  const id = Number(db.query<{ id: number }, []>("SELECT last_insert_rowid() as id").get()!.id);
+  const id = Number(
+    db.query<{ id: number }, []>("SELECT last_insert_rowid() as id").get()!.id,
+  );
   const created = getWatchlistById(db, id);
   if (!created) throw new Error("Watchlist vanished after insert");
   return created;
 }
 
-export function updateWatchlist(db: Db, id: number, patch: Record<string, unknown>): WatchlistItem | null {
+export function updateWatchlist(
+  db: Db,
+  id: number,
+  patch: Record<string, unknown>,
+): WatchlistItem | null {
   const existing = getWatchlistById(db, id);
   if (!existing) return null;
   const allowed: Record<string, unknown> = {};
   if ("enabled" in patch) allowed["enabled"] = patch["enabled"] ? 1 : 0;
-  if ("mode" in patch && typeof patch["mode"] === "string") allowed["mode"] = patch["mode"];
-  if ("cadence" in patch && typeof patch["cadence"] === "string") allowed["cadence"] = patch["cadence"];
-  if ("severity_floor" in patch && typeof patch["severity_floor"] === "string") allowed["severity_floor"] = patch["severity_floor"];
-  if ("severity_ceiling" in patch && typeof patch["severity_ceiling"] === "string") allowed["severity_ceiling"] = patch["severity_ceiling"];
-  if ("trigger" in patch && patch["trigger"] !== undefined) allowed["trigger_json"] = JSON.stringify(patch["trigger"]);
-  if ("notes" in patch && typeof patch["notes"] === "string") allowed["notes"] = (patch["notes"] as string).slice(0, 500);
+  if ("mode" in patch && typeof patch["mode"] === "string")
+    allowed["mode"] = patch["mode"];
+  if ("cadence" in patch && typeof patch["cadence"] === "string")
+    allowed["cadence"] = patch["cadence"];
+  if ("severity_floor" in patch && typeof patch["severity_floor"] === "string")
+    allowed["severity_floor"] = patch["severity_floor"];
+  if (
+    "severity_ceiling" in patch &&
+    typeof patch["severity_ceiling"] === "string"
+  )
+    allowed["severity_ceiling"] = patch["severity_ceiling"];
+  if ("trigger" in patch && patch["trigger"] !== undefined)
+    allowed["trigger_json"] = JSON.stringify(patch["trigger"]);
+  if ("notes" in patch && typeof patch["notes"] === "string")
+    allowed["notes"] = (patch["notes"] as string).slice(0, 500);
   if (Object.keys(allowed).length === 0) return existing;
-  const sets = Object.keys(allowed).map((k) => `${k} = ?`).join(", ");
-  const vals: Array<string | number | null> = [...Object.values(allowed) as Array<string | number | null>, id];
-  db.run(`UPDATE watchlist SET ${sets} WHERE id = ?`, vals as unknown as Array<string | number>);
+  const sets = Object.keys(allowed)
+    .map((k) => `${k} = ?`)
+    .join(", ");
+  const vals: Array<string | number | null> = [
+    ...(Object.values(allowed) as Array<string | number | null>),
+    id,
+  ];
+  db.run(
+    `UPDATE watchlist SET ${sets} WHERE id = ?`,
+    vals as unknown as Array<string | number>,
+  );
   return getWatchlistById(db, id);
 }
 
@@ -146,10 +233,17 @@ export function deleteWatchlist(db: Db, slug: string): boolean {
   return result.changes > 0;
 }
 
-export function listSignalsForWatchlist(db: Db, watchlistId: number, limit = 50): ExternalSignal[] {
-  const rows = db.query<Record<string, unknown>, [number, number]>(
-    `SELECT * FROM external_signals WHERE watchlist_id = ? ORDER BY captured_at DESC LIMIT ?`,
-  ).all(watchlistId, limit);
+export function listSignalsForWatchlist(
+  db: Db,
+  watchlistId: number,
+  limit = 50,
+): ExternalSignal[] {
+  const rows = db
+    .query<
+      Record<string, unknown>,
+      [number, number]
+    >(`SELECT * FROM external_signals WHERE watchlist_id = ? ORDER BY captured_at DESC LIMIT ?`)
+    .all(watchlistId, limit);
   return rows.map((r) => ({
     id: r["id"] as number,
     watchlist_id: r["watchlist_id"] as number,

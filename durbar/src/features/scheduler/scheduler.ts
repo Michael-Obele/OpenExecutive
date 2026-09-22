@@ -27,12 +27,12 @@
  * swept back to 'pending' at startup, or it would be stuck forever.
  */
 
-import type { Db } from '../../db.ts';
-import type { Provider } from '../../providers.ts';
-import { runMorningBrief } from '../briefings/morning-brief.ts';
-import { runEndOfDayDigest } from '../briefings/end-of-day-digest.ts';
-import { runExecutiveReflection } from '../workflows/executive-reflection.ts';
-import { runExecutiveResearch } from '../workflows/executive-research.ts';
+import type { Db } from "../../db.ts";
+import type { Provider } from "../../providers.ts";
+import { runMorningBrief } from "../briefings/morning-brief.ts";
+import { runEndOfDayDigest } from "../briefings/end-of-day-digest.ts";
+import { runExecutiveReflection } from "../workflows/executive-reflection.ts";
+import { runExecutiveResearch } from "../workflows/executive-research.ts";
 
 export interface ScheduledAction {
   readonly id: number;
@@ -76,7 +76,7 @@ export const DEFAULT_BATCH_SIZE = 10;
 /** Longest an error is stored for; a traceback should not bloat the row. */
 const MAX_ERROR_CHARS = 500;
 
-export type RetryOutcome = 'pending' | 'failed' | 'missing';
+export type RetryOutcome = "pending" | "failed" | "missing";
 
 // ── store ────────────────────────────────────────────────────────────────────
 
@@ -98,7 +98,11 @@ export function sweepStale(db: Db): number {
  *
  * `attempts` is incremented here rather than on failure — see the module note.
  */
-export function claimDue(db: Db, now: Date, limit = DEFAULT_BATCH_SIZE): ScheduledAction[] {
+export function claimDue(
+  db: Db,
+  now: Date,
+  limit = DEFAULT_BATCH_SIZE,
+): ScheduledAction[] {
   const claimed = db
     .query<ScheduledAction, [string, number]>(
       `UPDATE scheduled_actions
@@ -148,11 +152,12 @@ export function markFailedOrRetry(
   now: Date = new Date(),
 ): RetryOutcome {
   const row = db
-    .query<{ attempts: number }, [number]>(
-      'SELECT attempts FROM scheduled_actions WHERE id = ?',
-    )
+    .query<
+      { attempts: number },
+      [number]
+    >("SELECT attempts FROM scheduled_actions WHERE id = ?")
     .get(id);
-  if (row === null) return 'missing';
+  if (row === null) return "missing";
 
   const message = error.slice(0, MAX_ERROR_CHARS);
 
@@ -161,7 +166,7 @@ export function markFailedOrRetry(
       `UPDATE scheduled_actions SET status = 'failed', last_error = ? WHERE id = ?`,
       [message, id],
     );
-    return 'failed';
+    return "failed";
   }
 
   // Unknown attempt counts fall back to the longest backoff: retrying too
@@ -175,10 +180,14 @@ export function markFailedOrRetry(
       WHERE id = ?`,
     [nextRun.toISOString(), message, id],
   );
-  return 'pending';
+  return "pending";
 }
 
-export function scheduleAction(db: Db, action: NewAction, now = new Date()): number {
+export function scheduleAction(
+  db: Db,
+  action: NewAction,
+  now = new Date(),
+): number {
   const result = db.run(
     `INSERT INTO scheduled_actions
        (created_at, run_at, channel, channel_ref, intent_text,
@@ -187,8 +196,8 @@ export function scheduleAction(db: Db, action: NewAction, now = new Date()): num
     [
       now.toISOString(),
       action.runAt,
-      action.channel ?? '__internal__',
-      action.channelRef ?? '',
+      action.channel ?? "__internal__",
+      action.channelRef ?? "",
       action.intentText,
       action.originatingSessionId ?? null,
       action.kind,
@@ -218,13 +227,16 @@ export function pendingActions(db: Db, kind?: string): ScheduledAction[] {
 // ── daily recurrence ─────────────────────────────────────────────────────────
 
 /** Parses 'HH:MM', falling back when absent or malformed. */
-export function parseHhmm(spec: string | undefined, fallback: string): [number, number] {
-  const match = (spec ?? '').match(/^(\d{1,2}):(\d{2})$/);
-  if (!match) return parseHhmm(fallback, '00:00');
+export function parseHhmm(
+  spec: string | undefined,
+  fallback: string,
+): [number, number] {
+  const match = (spec ?? "").match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return parseHhmm(fallback, "00:00");
 
   const hours = Number(match[1]);
   const minutes = Number(match[2]);
-  if (hours > 23 || minutes > 59) return parseHhmm(fallback, '00:00');
+  if (hours > 23 || minutes > 59) return parseHhmm(fallback, "00:00");
   return [hours, minutes];
 }
 
@@ -258,25 +270,30 @@ export function seedDaily(
 ): number | null {
   if (pendingActions(db, kind).length > 0) return null;
 
-  const [hh, mm] = parseHhmm(hhmm, '08:00');
+  const [hh, mm] = parseHhmm(hhmm, "08:00");
   return scheduleAction(
     db,
     {
       runAt: nextOccurrence(now, hh, mm).toISOString(),
       kind,
-      intentText: `Daily ${kind.replace(/_/g, ' ')}`,
+      intentText: `Daily ${kind.replace(/_/g, " ")}`,
     },
     now,
   );
 }
 
 /** Enqueues the next day's occurrence. This is how recurrence happens. */
-export function chainDaily(db: Db, kind: string, after: Date, hhmm: string): number {
-  const [hh, mm] = parseHhmm(hhmm, '08:00');
+export function chainDaily(
+  db: Db,
+  kind: string,
+  after: Date,
+  hhmm: string,
+): number {
+  const [hh, mm] = parseHhmm(hhmm, "08:00");
   return scheduleAction(db, {
     runAt: nextOccurrence(after, hh, mm).toISOString(),
     kind,
-    intentText: `Daily ${kind.replace(/_/g, ' ')}`,
+    intentText: `Daily ${kind.replace(/_/g, " ")}`,
   });
 }
 
@@ -293,14 +310,14 @@ export interface SchedulerDeps {
   readonly now?: () => Date;
 }
 
-export const PRINCIPAL_BRIEF_MORNING = 'principal_brief_morning';
-export const PRINCIPAL_BRIEF_EOD = 'principal_brief_eod';
-export const EXECUTIVE_REFLECTION = 'executive_reflection';
-export const WATCHLIST_RESEARCH = 'watchlist_research_scan';
+export const PRINCIPAL_BRIEF_MORNING = "principal_brief_morning";
+export const PRINCIPAL_BRIEF_EOD = "principal_brief_eod";
+export const EXECUTIVE_REFLECTION = "executive_reflection";
+export const WATCHLIST_RESEARCH = "watchlist_research_scan";
 
-export const DEFAULT_MORNING_TIME = '08:00';
-export const DEFAULT_EOD_TIME = '18:00';
-export const DEFAULT_REFLECTION_TIME = '07:30';
+export const DEFAULT_MORNING_TIME = "08:00";
+export const DEFAULT_EOD_TIME = "18:00";
+export const DEFAULT_REFLECTION_TIME = "07:30";
 
 export type ActionHandler = (
   action: ScheduledAction,
@@ -310,9 +327,10 @@ export type ActionHandler = (
 /** True when a non-archived principal exists to deliver to. */
 function hasPrincipal(db: Db): boolean {
   const row = db
-    .query<{ n: number }, []>(
-      'SELECT COUNT(*) AS n FROM people WHERE is_principal = 1 AND archived = 0',
-    )
+    .query<
+      { n: number },
+      []
+    >("SELECT COUNT(*) AS n FROM people WHERE is_principal = 1 AND archived = 0")
     .get();
   return (row?.n ?? 0) > 0;
 }
@@ -329,12 +347,16 @@ export const HANDLERS: Readonly<Record<string, ActionHandler>> = {
   [PRINCIPAL_BRIEF_MORNING]: async (action, deps) => {
     if (!hasPrincipal(deps.db)) {
       reschedule(deps.db, action.id, new Date(Date.now() + 60 * 60 * 1000));
-      return { status: 'deferred' };
+      return { status: "deferred" };
     }
 
     const result = await runMorningBrief(
       {},
-      { db: deps.db, provider: deps.provider, now: deps.now ?? (() => new Date()) },
+      {
+        db: deps.db,
+        provider: deps.provider,
+        now: deps.now ?? (() => new Date()),
+      },
     );
 
     // Chain the next occurrence only after a successful delivery, so a failed
@@ -346,18 +368,22 @@ export const HANDLERS: Readonly<Record<string, ActionHandler>> = {
       deps.morningTime ?? DEFAULT_MORNING_TIME,
     );
 
-    return { status: result.suppressed ? 'suppressed' : 'sent' };
+    return { status: result.suppressed ? "suppressed" : "sent" };
   },
 
   [PRINCIPAL_BRIEF_EOD]: async (action, deps) => {
     if (!hasPrincipal(deps.db)) {
       reschedule(deps.db, action.id, new Date(Date.now() + 60 * 60 * 1000));
-      return { status: 'deferred' };
+      return { status: "deferred" };
     }
 
     const result = await runEndOfDayDigest(
       {},
-      { db: deps.db, provider: deps.provider, now: deps.now ?? (() => new Date()) },
+      {
+        db: deps.db,
+        provider: deps.provider,
+        now: deps.now ?? (() => new Date()),
+      },
     );
 
     chainDaily(
@@ -367,13 +393,17 @@ export const HANDLERS: Readonly<Record<string, ActionHandler>> = {
       deps.eodTime ?? DEFAULT_EOD_TIME,
     );
 
-    return { status: result.suppressed ? 'suppressed' : 'sent' };
+    return { status: result.suppressed ? "suppressed" : "sent" };
   },
 
   [EXECUTIVE_REFLECTION]: async (action, deps) => {
     const result = await runExecutiveReflection(
       {},
-      { db: deps.db, provider: deps.provider, now: deps.now ?? (() => new Date()) },
+      {
+        db: deps.db,
+        provider: deps.provider,
+        now: deps.now ?? (() => new Date()),
+      },
     );
 
     chainDaily(
@@ -385,13 +415,17 @@ export const HANDLERS: Readonly<Record<string, ActionHandler>> = {
 
     // Reflection always produces an artifact — never suppressed.
     void result;
-    return { status: 'sent' };
+    return { status: "sent" };
   },
 
   [WATCHLIST_RESEARCH]: async (action, deps) => {
     const result = await runExecutiveResearch(
       {},
-      { db: deps.db, provider: deps.provider, now: deps.now ?? (() => new Date()) },
+      {
+        db: deps.db,
+        provider: deps.provider,
+        now: deps.now ?? (() => new Date()),
+      },
     );
 
     // Research is periodic, not daily — chain at the same interval.
@@ -408,7 +442,7 @@ export const HANDLERS: Readonly<Record<string, ActionHandler>> = {
     );
 
     void result;
-    return { status: 'sent' };
+    return { status: "sent" };
   },
 };
 
@@ -440,7 +474,7 @@ export async function runDue(deps: SchedulerDeps): Promise<number> {
 
     try {
       const result = await handler(action, deps);
-      if (result.status === 'deferred') {
+      if (result.status === "deferred") {
         // The handler already moved the row back to 'pending'. Marking it done
         // here would lose the action, and counting it as dispatched would
         // misreport a tick that did nothing.
@@ -457,7 +491,9 @@ export async function runDue(deps: SchedulerDeps): Promise<number> {
         deps.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
         now,
       );
-      console.error(`scheduled action ${action.id} (${action.kind}) → ${outcome}: ${message}`);
+      console.error(
+        `scheduled action ${action.id} (${action.kind}) → ${outcome}: ${message}`,
+      );
     }
   }
 

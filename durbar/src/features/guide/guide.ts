@@ -32,7 +32,11 @@ export const GUIDE_SECTIONS: GuideSectionSpec[] = [
   { id: "settings", title: "Settings", sub: "Settings." },
   { id: "simulator", title: "Simulator", sub: "Fixture simulator." },
   { id: "skills", title: "Skills", sub: "Skills." },
-  { id: "staff_onboarding", title: "Staff Onboarding", sub: "New hire onboarding." },
+  {
+    id: "staff_onboarding",
+    title: "Staff Onboarding",
+    sub: "New hire onboarding.",
+  },
   { id: "talent", title: "Talent", sub: "Hiring pipeline." },
   { id: "today", title: "Today", sub: "Daily briefing." },
   { id: "token_usage", title: "Token Usage", sub: "Usage." },
@@ -46,7 +50,10 @@ export function getGuideSection(id: string): GuideSectionSpec | null {
 export function listGuidePrebuilt(): Map<string, Record<string, unknown>> {
   const map = new Map<string, Record<string, unknown>>();
   const candidates = [
-    new URL("../../../../packages/core/openexecutive/guide/prebuilt", import.meta.url).pathname,
+    new URL(
+      "../../../../packages/core/openexecutive/guide/prebuilt",
+      import.meta.url,
+    ).pathname,
     new URL("../../guide/prebuilt", import.meta.url).pathname,
   ];
   for (const dir of candidates) {
@@ -58,10 +65,14 @@ export function listGuidePrebuilt(): Map<string, Record<string, unknown>> {
         try {
           const text = readFileSync(join(dir, entry), "utf8");
           map.set(id, JSON.parse(text) as Record<string, unknown>);
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
       if (map.size > 0) break;
-    } catch { /* dir missing */ }
+    } catch {
+      /* dir missing */
+    }
   }
   if (map.size === 0) {
     for (const spec of GUIDE_SECTIONS) {

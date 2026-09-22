@@ -21,13 +21,26 @@ export interface OnboardingSession {
   updated_at: string;
 }
 
-function nowIso(): string { return new Date().toISOString(); }
+function nowIso(): string {
+  return new Date().toISOString();
+}
 
 function rowToSession(row: Record<string, unknown>): OnboardingSession {
   let transcript: Array<{ role: string; text: string }> = [];
-  try { transcript = JSON.parse((row["transcript_json"] as string) ?? "[]") as typeof transcript; } catch { transcript = []; }
+  try {
+    transcript = JSON.parse(
+      (row["transcript_json"] as string) ?? "[]",
+    ) as typeof transcript;
+  } catch {
+    transcript = [];
+  }
   let draft: Record<string, unknown> | null = null;
-  try { const raw = row["draft_json"] as string | null; if (raw) draft = JSON.parse(raw) as Record<string, unknown>; } catch { draft = null; }
+  try {
+    const raw = row["draft_json"] as string | null;
+    if (raw) draft = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    draft = null;
+  }
   return {
     id: row["id"] as string,
     transcript,
@@ -41,20 +54,39 @@ function rowToSession(row: Record<string, unknown>): OnboardingSession {
 
 export function createSession(db: Db, id: string): OnboardingSession {
   const now = nowIso();
-  const opening = "Tell me about your company — what do you do, who do you serve, and what stage are you at?";
+  const opening =
+    "Tell me about your company — what do you do, who do you serve, and what stage are you at?";
   const transcript = [{ role: "assistant", text: opening }];
-  db.run("INSERT INTO onboarding_sessions (id, transcript_json, questions_asked, created_at, updated_at) VALUES (?, ?, 0, ?, ?)", [id, JSON.stringify(transcript), now, now]);
-  const row = db.query<Record<string, unknown>, [string]>("SELECT * FROM onboarding_sessions WHERE id = ?").get(id);
+  db.run(
+    "INSERT INTO onboarding_sessions (id, transcript_json, questions_asked, created_at, updated_at) VALUES (?, ?, 0, ?, ?)",
+    [id, JSON.stringify(transcript), now, now],
+  );
+  const row = db
+    .query<
+      Record<string, unknown>,
+      [string]
+    >("SELECT * FROM onboarding_sessions WHERE id = ?")
+    .get(id);
   if (!row) throw new Error("Session vanished after insert");
   return rowToSession(row);
 }
 
 export function getSession(db: Db, id: string): OnboardingSession | null {
-  const row = db.query<Record<string, unknown>, [string]>("SELECT * FROM onboarding_sessions WHERE id = ?").get(id);
+  const row = db
+    .query<
+      Record<string, unknown>,
+      [string]
+    >("SELECT * FROM onboarding_sessions WHERE id = ?")
+    .get(id);
   return row ? rowToSession(row) : null;
 }
 
-export function appendMessage(db: Db, id: string, role: string, text: string): OnboardingSession | null {
+export function appendMessage(
+  db: Db,
+  id: string,
+  role: string,
+  text: string,
+): OnboardingSession | null {
   const session = getSession(db, id);
   if (!session) return null;
   if (session.saved) throw new Error("Already committed");
@@ -70,20 +102,39 @@ export function appendMessage(db: Db, id: string, role: string, text: string): O
   ];
   if (userCount >= 3 && !draft) {
     // Build a minimal draft from transcript
-    const allUserText = session.transcript.filter((t) => t.role === "user").map((t) => t.text).join(" ");
+    const allUserText = session.transcript
+      .filter((t) => t.role === "user")
+      .map((t) => t.text)
+      .join(" ");
     draft = {
-      profile: { name: allUserText.slice(0, 80) || "Acme Inc", industry: "Technology", stage: "Series A", mission: allUserText.slice(0, 200) },
+      profile: {
+        name: allUserText.slice(0, 80) || "Acme Inc",
+        industry: "Technology",
+        stage: "Series A",
+        mission: allUserText.slice(0, 200),
+      },
       people: [{ full_name: "Founder", is_principal: true, role: "CEO" }],
       departments: [{ title: "Operations", mission: "Run the company" }],
       confidence_notes: ["Draft generated from interview transcript (stub)"],
       summary: allUserText.slice(0, 500),
     };
   } else if (!draft) {
-    const q = cannedQuestions[questionsAsked] ?? "Anything else you'd like to add about your company?";
+    const q =
+      cannedQuestions[questionsAsked] ??
+      "Anything else you'd like to add about your company?";
     session.transcript.push({ role: "assistant", text: q });
     questionsAsked += 1;
   }
-  db.run("UPDATE onboarding_sessions SET transcript_json = ?, questions_asked = ?, draft_json = ?, updated_at = ? WHERE id = ?", [JSON.stringify(session.transcript), questionsAsked, draft ? JSON.stringify(draft) : null, nowIso(), id]);
+  db.run(
+    "UPDATE onboarding_sessions SET transcript_json = ?, questions_asked = ?, draft_json = ?, updated_at = ? WHERE id = ?",
+    [
+      JSON.stringify(session.transcript),
+      questionsAsked,
+      draft ? JSON.stringify(draft) : null,
+      nowIso(),
+      id,
+    ],
+  );
   return getSession(db, id);
 }
 
@@ -91,28 +142,49 @@ export function forceDraft(db: Db, id: string): OnboardingSession | null {
   const session = getSession(db, id);
   if (!session) return null;
   if (session.draft) return session;
-  const allUserText = session.transcript.filter((t) => t.role === "user").map((t) => t.text).join(" ");
+  const allUserText = session.transcript
+    .filter((t) => t.role === "user")
+    .map((t) => t.text)
+    .join(" ");
   const draft = {
-    profile: { name: allUserText.slice(0, 80) || "Acme Inc", industry: "Technology", stage: "Series A", mission: allUserText.slice(0, 200) },
+    profile: {
+      name: allUserText.slice(0, 80) || "Acme Inc",
+      industry: "Technology",
+      stage: "Series A",
+      mission: allUserText.slice(0, 200),
+    },
     people: [{ full_name: "Founder", is_principal: true, role: "CEO" }],
     departments: [{ title: "Operations", mission: "Run the company" }],
     confidence_notes: ["Draft forced (stub)"],
     summary: allUserText.slice(0, 500),
   };
-  db.run("UPDATE onboarding_sessions SET draft_json = ?, updated_at = ? WHERE id = ?", [JSON.stringify(draft), nowIso(), id]);
+  db.run(
+    "UPDATE onboarding_sessions SET draft_json = ?, updated_at = ? WHERE id = ?",
+    [JSON.stringify(draft), nowIso(), id],
+  );
   return getSession(db, id);
 }
 
-export function commitSession(db: Db, id: string, profilePatch?: Record<string, unknown>): OnboardingSession | null {
+export function commitSession(
+  db: Db,
+  id: string,
+  profilePatch?: Record<string, unknown>,
+): OnboardingSession | null {
   const session = getSession(db, id);
   if (!session) return null;
-  if (!session.draft) throw new Error("No draft to commit — answer more questions or force a draft");
+  if (!session.draft)
+    throw new Error(
+      "No draft to commit — answer more questions or force a draft",
+    );
   if (session.saved) throw new Error("Already committed");
   const draft = session.draft as Record<string, unknown>;
   const profile = (draft["profile"] as Record<string, unknown>) ?? {};
   const mergedPatch = { ...profile, ...(profilePatch ?? {}) };
   // Validate: must have name
-  if (typeof mergedPatch["name"] !== "string" || !(mergedPatch["name"] as string).trim()) {
+  if (
+    typeof mergedPatch["name"] !== "string" ||
+    !(mergedPatch["name"] as string).trim()
+  ) {
     throw new Error("Draft profile must have a name");
   }
   // Write to company_profile via existing helper
@@ -120,41 +192,77 @@ export function commitSession(db: Db, id: string, profilePatch?: Record<string, 
   const existing = getCompanyProfile(db);
   if (!existing) {
     // Create via patch with full profile
-    patchCompanyProfile(db, mergedPatch as Parameters<typeof patchCompanyProfile>[1]);
+    patchCompanyProfile(
+      db,
+      mergedPatch as Parameters<typeof patchCompanyProfile>[1],
+    );
   } else {
-    patchCompanyProfile(db, mergedPatch as Parameters<typeof patchCompanyProfile>[1]);
+    patchCompanyProfile(
+      db,
+      mergedPatch as Parameters<typeof patchCompanyProfile>[1],
+    );
   }
   // Also seed people/departments if present. Enforce single principal:
   // if a principal already exists, new people are inserted as non-principal.
-  let hasPrincipal = !!db.query<Record<string, unknown>, []>("SELECT id FROM people WHERE is_principal = 1 AND archived = 0 LIMIT 1").get();
+  let hasPrincipal = !!db
+    .query<
+      Record<string, unknown>,
+      []
+    >("SELECT id FROM people WHERE is_principal = 1 AND archived = 0 LIMIT 1")
+    .get();
   const people = (draft["people"] as Array<Record<string, unknown>>) ?? [];
   for (const p of people) {
     const name = typeof p["full_name"] === "string" ? p["full_name"] : "";
     if (!name) continue;
-    const existingPerson = db.query<Record<string, unknown>, [string]>("SELECT id FROM people WHERE full_name = ?").get(name);
+    const existingPerson = db
+      .query<
+        Record<string, unknown>,
+        [string]
+      >("SELECT id FROM people WHERE full_name = ?")
+      .get(name);
     if (!existingPerson) {
       const now = nowIso();
       const wantsPrincipal = Boolean(p["is_principal"]);
       const isPrincipal = wantsPrincipal && !hasPrincipal ? 1 : 0;
-      db.run("INSERT INTO people (full_name, role, is_principal, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", [name, (p["role"] as string) ?? "", isPrincipal, now, now]);
+      db.run(
+        "INSERT INTO people (full_name, role, is_principal, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        [name, (p["role"] as string) ?? "", isPrincipal, now, now],
+      );
       if (isPrincipal) hasPrincipal = true;
     }
   }
-  const departments = (draft["departments"] as Array<Record<string, unknown>>) ?? [];
+  const departments =
+    (draft["departments"] as Array<Record<string, unknown>>) ?? [];
   for (const d of departments) {
     const title = typeof d["title"] === "string" ? d["title"] : "";
     if (!title) continue;
-    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    const existingDept = db.query<Record<string, unknown>, [string]>("SELECT slug FROM departments WHERE slug = ?").get(slug);
+    const slug = title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    const existingDept = db
+      .query<
+        Record<string, unknown>,
+        [string]
+      >("SELECT slug FROM departments WHERE slug = ?")
+      .get(slug);
     if (!existingDept) {
-      db.run("INSERT INTO departments (slug, title, charter_mission, updated_at) VALUES (?, ?, ?, ?)", [slug, title, (d["mission"] as string) ?? "", nowIso()]);
+      db.run(
+        "INSERT INTO departments (slug, title, charter_mission, updated_at) VALUES (?, ?, ?, ?)",
+        [slug, title, (d["mission"] as string) ?? "", nowIso()],
+      );
     }
   }
-  db.run("UPDATE onboarding_sessions SET saved = 1, updated_at = ? WHERE id = ?", [nowIso(), id]);
+  db.run(
+    "UPDATE onboarding_sessions SET saved = 1, updated_at = ? WHERE id = ?",
+    [nowIso(), id],
+  );
   return getSession(db, id);
 }
 
-export function sessionToResponse(session: OnboardingSession): Record<string, unknown> {
+export function sessionToResponse(
+  session: OnboardingSession,
+): Record<string, unknown> {
   if (session.draft) {
     const d = session.draft as Record<string, unknown>;
     return {
@@ -171,7 +279,10 @@ export function sessionToResponse(session: OnboardingSession): Record<string, un
   }
   let question = "";
   for (let i = session.transcript.length - 1; i >= 0; i--) {
-    if (session.transcript[i]!.role === "assistant") { question = session.transcript[i]!.text; break; }
+    if (session.transcript[i]!.role === "assistant") {
+      question = session.transcript[i]!.text;
+      break;
+    }
   }
   return {
     session_id: session.id,

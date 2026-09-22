@@ -111,7 +111,11 @@ const KIND_BY_EVENT_TYPE: Record<string, string> = {
   alert: "alert",
 };
 
-function nodeLabel(eventType: string, summary: string, details: Record<string, unknown>): string {
+function nodeLabel(
+  eventType: string,
+  summary: string,
+  details: Record<string, unknown>,
+): string {
   if (eventType === "specialist_consult") {
     const actor = (details["specialist"] as string) ?? "";
     return (actor || summary).slice(0, 60);
@@ -122,7 +126,9 @@ function nodeLabel(eventType: string, summary: string, details: Record<string, u
     return summary.slice(0, 60);
   }
   if (eventType === "knowledge_retrieval") {
-    const n = ((details["builtin_count"] as number) ?? 0) + ((details["company_count"] as number) ?? 0);
+    const n =
+      ((details["builtin_count"] as number) ?? 0) +
+      ((details["company_count"] as number) ?? 0);
     let domain: string = "*";
     const df = details["domain_filter"];
     if (Array.isArray(df)) domain = (df as string[]).join(",") || "*";
@@ -184,9 +190,10 @@ function escapeLike(s: string): string {
 
 export function getAuditEvent(db: Db, id: number): AuditEvent | null {
   const row = db
-    .query<Record<string, unknown>, [number]>(
-      "SELECT id, ts, event_type, session_id, turn_id, actor, summary, details_json, full_json, department FROM audit_log WHERE id = ?",
-    )
+    .query<
+      Record<string, unknown>,
+      [number]
+    >("SELECT id, ts, event_type, session_id, turn_id, actor, summary, details_json, full_json, department FROM audit_log WHERE id = ?")
     .get(id);
   return row ? rowToEvent(row) : null;
 }
@@ -280,12 +287,18 @@ export function countAudit(
   }
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
   const row = db
-    .query<{ n: number }, (string | number | null)[]>(`SELECT COUNT(*) as n FROM audit_log ${where}`)
+    .query<
+      { n: number },
+      (string | number | null)[]
+    >(`SELECT COUNT(*) as n FROM audit_log ${where}`)
     .get(...(params as (string | number | null)[]));
   return row?.n ?? 0;
 }
 
-export function buildSessionGraph(events: AuditEvent[]): { graph: AuditGraph; channel: string | null } {
+export function buildSessionGraph(events: AuditEvent[]): {
+  graph: AuditGraph;
+  channel: string | null;
+} {
   const ordered = [...events].sort((a, b) => a.id - b.id);
   const nodes: AuditGraphNode[] = [];
   const edges: AuditGraphEdge[] = [];
@@ -322,7 +335,11 @@ export function buildSessionGraph(events: AuditEvent[]): { graph: AuditGraph; ch
     if (evt.event_type === "memory_snapshot" && tid) {
       turnAnchor.set(tid, nodeId);
       if (inboundNodeId && !inboundConsumed) {
-        edges.push({ source: inboundNodeId, target: nodeId, relation: "cause" });
+        edges.push({
+          source: inboundNodeId,
+          target: nodeId,
+          relation: "cause",
+        });
         inboundConsumed = true;
       }
     } else if (
@@ -334,19 +351,29 @@ export function buildSessionGraph(events: AuditEvent[]): { graph: AuditGraph; ch
       tid
     ) {
       const anchor = turnAnchor.get(tid);
-      if (anchor) edges.push({ source: anchor, target: nodeId, relation: "order" });
+      if (anchor)
+        edges.push({ source: anchor, target: nodeId, relation: "order" });
       if (evt.event_type === "tool_invocation") {
         const prev = lastSpecialistInTurn.get(tid);
-        if (prev) edges.push({ source: prev, target: nodeId, relation: "cause" });
+        if (prev)
+          edges.push({ source: prev, target: nodeId, relation: "cause" });
       }
       if (evt.event_type === "specialist_consult" && tid) {
         lastSpecialistInTurn.set(tid, nodeId);
       }
     } else if (evt.event_type === "chat_turn") {
       if (tid && turnAnchor.has(tid)) {
-        edges.push({ source: turnAnchor.get(tid) as string, target: nodeId, relation: "cause" });
+        edges.push({
+          source: turnAnchor.get(tid) as string,
+          target: nodeId,
+          relation: "cause",
+        });
       } else if (inboundNodeId && !inboundConsumed) {
-        edges.push({ source: inboundNodeId, target: nodeId, relation: "cause" });
+        edges.push({
+          source: inboundNodeId,
+          target: nodeId,
+          relation: "cause",
+        });
         inboundConsumed = true;
       }
       if (tid) {
@@ -362,7 +389,13 @@ export function computeCostSummary(events: AuditEvent[]): CostSummary | null {
   const rows = events.filter((e) => e.event_type === "cache_event");
   if (rows.length === 0) return null;
   const sorted = [...rows].sort((a, b) => a.id - b.id);
-  const fields = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens", "web_search_requests"] as const;
+  const fields = [
+    "input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "output_tokens",
+    "web_search_requests",
+  ] as const;
   const toInt = (v: unknown): number => {
     const n = Number(v ?? 0);
     return Number.isFinite(n) ? Math.floor(n) : 0;
@@ -371,7 +404,14 @@ export function computeCostSummary(events: AuditEvent[]): CostSummary | null {
   const order: Array<string | null> = [];
   for (const e of sorted) {
     if (!perTurnAcc.has(e.turn_id)) {
-      perTurnAcc.set(e.turn_id, { calls: 0, input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0, web_search_requests: 0 });
+      perTurnAcc.set(e.turn_id, {
+        calls: 0,
+        input_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        output_tokens: 0,
+        web_search_requests: 0,
+      });
       order.push(e.turn_id);
     }
     const acc = perTurnAcc.get(e.turn_id) as Record<string, number>;
@@ -400,14 +440,18 @@ export function computeCostSummary(events: AuditEvent[]): CostSummary | null {
     web_search_requests: 0,
   };
   for (const acc of perTurnAcc.values()) {
-    for (const k of Object.keys(totals) as Array<keyof typeof totals>) totals[k] += acc[k] ?? 0;
+    for (const k of Object.keys(totals) as Array<keyof typeof totals>)
+      totals[k] += acc[k] ?? 0;
   }
   return { ...totals, per_turn: perTurn };
 }
 
 export function computeDegradations(events: AuditEvent[]): Degradation[] {
   const degradedOutcomes = new Set(["timeout", "error"]);
-  const acc = new Map<string, { count: number; turn_ids: string[]; detail: string | null }>();
+  const acc = new Map<
+    string,
+    { count: number; turn_ids: string[]; detail: string | null }
+  >();
   const order: string[] = [];
   for (const e of events) {
     if (e.event_type !== "peer_memory") continue;
@@ -418,15 +462,31 @@ export function computeDegradations(events: AuditEvent[]): Degradation[] {
       acc.set(key, { count: 0, turn_ids: [], detail: null });
       order.push(key);
     }
-    const entry = acc.get(key) as { count: number; turn_ids: string[]; detail: string | null };
+    const entry = acc.get(key) as {
+      count: number;
+      turn_ids: string[];
+      detail: string | null;
+    };
     entry.count += 1;
-    if (e.turn_id && !entry.turn_ids.includes(e.turn_id)) entry.turn_ids.push(e.turn_id);
-    if (entry.detail === null && e.details?.["error_type"]) entry.detail = String(e.details["error_type"]);
+    if (e.turn_id && !entry.turn_ids.includes(e.turn_id))
+      entry.turn_ids.push(e.turn_id);
+    if (entry.detail === null && e.details?.["error_type"])
+      entry.detail = String(e.details["error_type"]);
   }
   return order.map((key) => {
     const [kind, reason] = key.split(":");
-    const entry = acc.get(key) as { count: number; turn_ids: string[]; detail: string | null };
-    return { kind: kind ?? "memory", reason: reason ?? "", count: entry.count, turn_ids: entry.turn_ids, detail: entry.detail };
+    const entry = acc.get(key) as {
+      count: number;
+      turn_ids: string[];
+      detail: string | null;
+    };
+    return {
+      kind: kind ?? "memory",
+      reason: reason ?? "",
+      count: entry.count,
+      turn_ids: entry.turn_ids,
+      detail: entry.detail,
+    };
   });
 }
 
@@ -435,10 +495,45 @@ export function usageSummary(
   since?: string | null,
   until?: string | null,
 ): {
-  totals: { calls: number; input_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number; output_tokens: number; web_search_requests: number; cost_usd: number };
-  by_day: Array<{ day: string; calls: number; input_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number; output_tokens: number; web_search_requests: number; cost_usd: number }>;
-  by_model: Array<{ model: string; calls: number; input_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number; output_tokens: number; web_search_requests: number; cost_usd: number }>;
-  by_source: Array<{ source: string; calls: number; input_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number; output_tokens: number; web_search_requests: number; cost_usd: number }>;
+  totals: {
+    calls: number;
+    input_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+    output_tokens: number;
+    web_search_requests: number;
+    cost_usd: number;
+  };
+  by_day: Array<{
+    day: string;
+    calls: number;
+    input_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+    output_tokens: number;
+    web_search_requests: number;
+    cost_usd: number;
+  }>;
+  by_model: Array<{
+    model: string;
+    calls: number;
+    input_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+    output_tokens: number;
+    web_search_requests: number;
+    cost_usd: number;
+  }>;
+  by_source: Array<{
+    source: string;
+    calls: number;
+    input_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+    output_tokens: number;
+    web_search_requests: number;
+    cost_usd: number;
+  }>;
 } {
   // Filter cache_event rows by ts window, then aggregate.
   const clauses: string[] = ["event_type = 'cache_event'"];
@@ -453,10 +548,21 @@ export function usageSummary(
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
   const rows = db
-    .query<Record<string, unknown>, (string | number | null)[]>(`SELECT details_json, ts, actor FROM audit_log ${where} ORDER BY id`)
+    .query<
+      Record<string, unknown>,
+      (string | number | null)[]
+    >(`SELECT details_json, ts, actor FROM audit_log ${where} ORDER BY id`)
     .all(...(params as (string | number | null)[]));
 
-  const totals = { calls: 0, input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0, web_search_requests: 0, cost_usd: 0 };
+  const totals = {
+    calls: 0,
+    input_tokens: 0,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+    output_tokens: 0,
+    web_search_requests: 0,
+    cost_usd: 0,
+  };
   const byDay = new Map<string, typeof totals>();
   const byModel = new Map<string, typeof totals>();
   const bySource = new Map<string, typeof totals>();
@@ -480,7 +586,9 @@ export function usageSummary(
     totals.calls += 1;
     totals.input_tokens += toInt(details["input_tokens"]);
     totals.cache_read_input_tokens += toInt(details["cache_read_input_tokens"]);
-    totals.cache_creation_input_tokens += toInt(details["cache_creation_input_tokens"]);
+    totals.cache_creation_input_tokens += toInt(
+      details["cache_creation_input_tokens"],
+    );
     totals.output_tokens += toInt(details["output_tokens"]);
     totals.web_search_requests += toInt(details["web_search_requests"]);
     totals.cost_usd += cost;
@@ -491,12 +599,23 @@ export function usageSummary(
       [bySource, source],
     ] as const) {
       const m = map as Map<string, typeof totals>;
-      if (!m.has(key)) m.set(key, { calls: 0, input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0, web_search_requests: 0, cost_usd: 0 });
+      if (!m.has(key))
+        m.set(key, {
+          calls: 0,
+          input_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          output_tokens: 0,
+          web_search_requests: 0,
+          cost_usd: 0,
+        });
       const acc = m.get(key) as typeof totals;
       acc.calls += 1;
       acc.input_tokens += toInt(details["input_tokens"]);
       acc.cache_read_input_tokens += toInt(details["cache_read_input_tokens"]);
-      acc.cache_creation_input_tokens += toInt(details["cache_creation_input_tokens"]);
+      acc.cache_creation_input_tokens += toInt(
+        details["cache_creation_input_tokens"],
+      );
       acc.output_tokens += toInt(details["output_tokens"]);
       acc.web_search_requests += toInt(details["web_search_requests"]);
       acc.cost_usd += cost;

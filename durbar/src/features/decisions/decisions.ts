@@ -73,7 +73,8 @@ function rowToInstance(row: Record<string, unknown>): DecisionInstance {
     decision_class: row["decision_class"] as string,
     created_at: row["created_at"] as string,
     department: (row["department"] as string) ?? "",
-    originating_session_id: (row["originating_session_id"] as string | null) ?? null,
+    originating_session_id:
+      (row["originating_session_id"] as string | null) ?? null,
     proposed_payload_json: row["proposed_payload_json"] as string,
     idempotency_key: (row["idempotency_key"] as string | null) ?? null,
     gate_mode: (row["gate_mode"] as string) ?? "propose",
@@ -97,7 +98,9 @@ function parsePayload(json: string): Record<string, unknown> {
   }
 }
 
-function canonicalPayload(payload: Record<string, unknown>): Record<string, unknown> {
+function canonicalPayload(
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(payload).sort()) {
     const val = payload[key];
@@ -110,15 +113,27 @@ function canonicalPayload(payload: Record<string, unknown>): Record<string, unkn
   return out;
 }
 
-function payloadDiff(original: Record<string, unknown>, final: Record<string, unknown>): boolean {
-  return JSON.stringify(canonicalPayload(original)) !== JSON.stringify(canonicalPayload(final));
+function payloadDiff(
+  original: Record<string, unknown>,
+  final: Record<string, unknown>,
+): boolean {
+  return (
+    JSON.stringify(canonicalPayload(original)) !==
+    JSON.stringify(canonicalPayload(final))
+  );
 }
 
 // ── store ──────────────────────────────────────────────────────────────────
 
-export function getDecisionInstance(db: Db, id: number): DecisionInstance | null {
+export function getDecisionInstance(
+  db: Db,
+  id: number,
+): DecisionInstance | null {
   const row = db
-    .query<Record<string, unknown>, [number]>("SELECT * FROM decision_instances WHERE id = ?",)
+    .query<
+      Record<string, unknown>,
+      [number]
+    >("SELECT * FROM decision_instances WHERE id = ?")
     .get(id);
   return row ? rowToInstance(row) : null;
 }
@@ -131,16 +146,18 @@ export function listInstances(
   const limit = Math.max(1, Math.min(opts.limit ?? 50, 500));
   if (opts.status) {
     return db
-      .query<Record<string, unknown>, [string, string, number]>(
-        "SELECT * FROM decision_instances WHERE decision_class = ? AND status = ? ORDER BY created_at DESC LIMIT ?",
-      )
+      .query<
+        Record<string, unknown>,
+        [string, string, number]
+      >("SELECT * FROM decision_instances WHERE decision_class = ? AND status = ? ORDER BY created_at DESC LIMIT ?")
       .all(decisionClass, opts.status, limit)
       .map(rowToInstance);
   }
   return db
-    .query<Record<string, unknown>, [string, number]>(
-      "SELECT * FROM decision_instances WHERE decision_class = ? ORDER BY created_at DESC LIMIT ?",
-    )
+    .query<
+      Record<string, unknown>,
+      [string, number]
+    >("SELECT * FROM decision_instances WHERE decision_class = ? ORDER BY created_at DESC LIMIT ?")
     .all(decisionClass, limit)
     .map(rowToInstance);
 }
@@ -156,12 +173,22 @@ export function markResolved(
   } = {},
 ): boolean {
   const now = new Date().toISOString();
-  const finalJson = opts.finalPayload ? JSON.stringify(opts.finalPayload) : null;
+  const finalJson = opts.finalPayload
+    ? JSON.stringify(opts.finalPayload)
+    : null;
   const result = db.run(
     `UPDATE decision_instances
      SET status = ?, resolved_at = ?, resolver_person_id = ?, final_payload_json = ?, external_event_id = ?
      WHERE id = ? AND status = ?`,
-    [status, now, opts.resolverPersonId ?? null, finalJson, opts.externalEventId ?? null, id, STATUS_PROPOSED],
+    [
+      status,
+      now,
+      opts.resolverPersonId ?? null,
+      finalJson,
+      opts.externalEventId ?? null,
+      id,
+      STATUS_PROPOSED,
+    ],
   );
   return result.changes === 1;
 }
@@ -172,7 +199,12 @@ export function approveDecision(
   edits?: Record<string, unknown> | null,
 ): { instance: DecisionInstance | null; error?: string; statusCode?: number } {
   const instance = getDecisionInstance(db, id);
-  if (!instance) return { instance: null, error: "Decision instance not found", statusCode: 404 };
+  if (!instance)
+    return {
+      instance: null,
+      error: "Decision instance not found",
+      statusCode: 404,
+    };
   if (instance.status !== STATUS_PROPOSED) {
     return {
       instance: null,
@@ -188,16 +220,23 @@ export function approveDecision(
     }
   }
   const edited = payloadDiff(original, finalPayload);
-  const outcome = edited ? STATUS_APPROVED_WITH_EDIT : STATUS_APPROVED_UNCHANGED;
+  const outcome = edited
+    ? STATUS_APPROVED_WITH_EDIT
+    : STATUS_APPROVED_UNCHANGED;
   const ok = markResolved(db, id, outcome, { finalPayload });
   if (!ok) {
-    return { instance: null, error: "Decision was already resolved", statusCode: 409 };
+    return {
+      instance: null,
+      error: "Decision was already resolved",
+      statusCode: 409,
+    };
   }
   // Clear companion alert if present (best-effort).
   try {
-    db.run("UPDATE alerts SET status = 'ack' WHERE source = 'decision_scheduling' AND external_id = ?", [
-      `decision:${id}`,
-    ]);
+    db.run(
+      "UPDATE alerts SET status = 'ack' WHERE source = 'decision_scheduling' AND external_id = ?",
+      [`decision:${id}`],
+    );
   } catch {
     // ignore
   }
@@ -209,7 +248,12 @@ export function rejectDecision(
   id: number,
 ): { instance: DecisionInstance | null; error?: string; statusCode?: number } {
   const instance = getDecisionInstance(db, id);
-  if (!instance) return { instance: null, error: "Decision instance not found", statusCode: 404 };
+  if (!instance)
+    return {
+      instance: null,
+      error: "Decision instance not found",
+      statusCode: 404,
+    };
   if (instance.status !== STATUS_PROPOSED) {
     return {
       instance: null,
@@ -218,11 +262,17 @@ export function rejectDecision(
     };
   }
   const ok = markResolved(db, id, STATUS_REJECTED);
-  if (!ok) return { instance: null, error: "Decision was already resolved", statusCode: 409 };
+  if (!ok)
+    return {
+      instance: null,
+      error: "Decision was already resolved",
+      statusCode: 409,
+    };
   try {
-    db.run("UPDATE alerts SET status = 'dismissed' WHERE source = 'decision_scheduling' AND external_id = ?", [
-      `decision:${id}`,
-    ]);
+    db.run(
+      "UPDATE alerts SET status = 'dismissed' WHERE source = 'decision_scheduling' AND external_id = ?",
+      [`decision:${id}`],
+    );
   } catch {
     // ignore
   }
@@ -235,11 +285,14 @@ export function aggregateReliability(
   windowDays = 30,
 ): ReliabilityCard {
   const now = new Date();
-  const since = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+  const since = new Date(
+    now.getTime() - windowDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
   const rows = db
-    .query<{ status: string; severity: string; confidence: number | null }, [string, string]>(
-      "SELECT status, severity, confidence FROM decision_instances WHERE decision_class = ? AND created_at >= ?",
-    )
+    .query<
+      { status: string; severity: string; confidence: number | null },
+      [string, string]
+    >("SELECT status, severity, confidence FROM decision_instances WHERE decision_class = ? AND created_at >= ?")
     .all(decisionClass, since);
 
   const volume = rows.length;
@@ -249,15 +302,18 @@ export function aggregateReliability(
   for (const row of rows) {
     counts.set(row.status, (counts.get(row.status) ?? 0) + 1);
     if (row.severity === "high") highSeverity += 1;
-    if (row.confidence !== null) confWithStatus.push([row.confidence, row.status]);
+    if (row.confidence !== null)
+      confWithStatus.push([row.confidence, row.status]);
   }
 
   const approvedTotal =
-    (counts.get(STATUS_APPROVED_UNCHANGED) ?? 0) + (counts.get(STATUS_APPROVED_WITH_EDIT) ?? 0);
+    (counts.get(STATUS_APPROVED_UNCHANGED) ?? 0) +
+    (counts.get(STATUS_APPROVED_WITH_EDIT) ?? 0);
   const resolved = approvedTotal + (counts.get(STATUS_REJECTED) ?? 0);
   const executedOrApproved = (counts.get(STATUS_EXECUTED) ?? 0) + approvedTotal;
 
-  const rate = (num: number, denom: number): number => (denom > 0 ? Math.round((num / denom) * 10000) / 10000 : 0);
+  const rate = (num: number, denom: number): number =>
+    denom > 0 ? Math.round((num / denom) * 10000) / 10000 : 0;
 
   // Calibration buckets: 0.1-wide bands.
   const buckets = new Map<string, string[]>();
@@ -275,7 +331,9 @@ export function aggregateReliability(
     const lo = Number(loStr);
     const hi = Number(hiStr);
     const n = statuses.length;
-    const nUnchanged = statuses.filter((s) => s === STATUS_APPROVED_UNCHANGED).length;
+    const nUnchanged = statuses.filter(
+      (s) => s === STATUS_APPROVED_UNCHANGED,
+    ).length;
     calibration.push({
       confidence_min: lo,
       confidence_max: hi,
@@ -289,7 +347,10 @@ export function aggregateReliability(
     window_start: since,
     window_end: now.toISOString(),
     volume,
-    unchanged_approval_rate: rate(counts.get(STATUS_APPROVED_UNCHANGED) ?? 0, resolved),
+    unchanged_approval_rate: rate(
+      counts.get(STATUS_APPROVED_UNCHANGED) ?? 0,
+      resolved,
+    ),
     edit_rate: rate(counts.get(STATUS_APPROVED_WITH_EDIT) ?? 0, resolved),
     rejection_rate: rate(counts.get(STATUS_REJECTED) ?? 0, resolved),
     reversal_rate: rate(counts.get(STATUS_REVERSED) ?? 0, executedOrApproved),

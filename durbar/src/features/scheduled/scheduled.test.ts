@@ -12,7 +12,13 @@ import type { Settings } from "../../config.ts";
 import type { Provider } from "../../providers.ts";
 
 function fakeProvider(): Provider {
-  return { name: "fake", defaultModel: "fake-model", async chat() { return "ok"; } };
+  return {
+    name: "fake",
+    defaultModel: "fake-model",
+    async chat() {
+      return "ok";
+    },
+  };
 }
 
 function fakeSettings(overrides: Partial<Settings> = {}): Settings {
@@ -25,22 +31,44 @@ function fakeSettings(overrides: Partial<Settings> = {}): Settings {
     eodDigestTime: "18:00",
     reflectionTime: "07:30",
     scheduledAdminToken: "",
-    provider: { name: "deepseek", baseUrl: "https://api.deepseek.com", apiKey: "test", model: "deepseek-chat", reasoningModel: "deepseek-reasoner", routingModel: "deepseek-chat", headers: {} },
+    provider: {
+      name: "deepseek",
+      baseUrl: "https://api.deepseek.com",
+      apiKey: "test",
+      model: "deepseek-chat",
+      reasoningModel: "deepseek-reasoner",
+      routingModel: "deepseek-chat",
+      headers: {},
+    },
     ...overrides,
   };
 }
 
-function appWith(db: ReturnType<typeof openDb>, settingsOverrides: Partial<Settings> = {}) {
-  return createApp({ settings: fakeSettings(settingsOverrides), db, provider: fakeProvider() });
+function appWith(
+  db: ReturnType<typeof openDb>,
+  settingsOverrides: Partial<Settings> = {},
+) {
+  return createApp({
+    settings: fakeSettings(settingsOverrides),
+    db,
+    provider: fakeProvider(),
+  });
 }
 
-async function req(app: ReturnType<typeof createApp>, path: string, init?: RequestInit) {
+async function req(
+  app: ReturnType<typeof createApp>,
+  path: string,
+  init?: RequestInit,
+) {
   const res = await app(new Request(`http://localhost${path}`, init));
   const body: unknown = await res.json().catch(() => null);
   return { res, body };
 }
 
-function insertScheduled(db: Db, overrides: Partial<{ run_at: string; status: string }> = {}): number {
+function insertScheduled(
+  db: Db,
+  overrides: Partial<{ run_at: string; status: string }> = {},
+): number {
   const now = new Date().toISOString();
   const runAt = overrides.run_at ?? "2026-09-21T00:00:00.000Z";
   const status = overrides.status ?? "pending";

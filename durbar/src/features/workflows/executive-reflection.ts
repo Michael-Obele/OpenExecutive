@@ -133,7 +133,10 @@ export function gatherReflectionContext(db: Db): ReflectionContext {
     }));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (message.includes("no such column") || message.includes("no such table")) {
+    if (
+      message.includes("no such column") ||
+      message.includes("no such table")
+    ) {
       awaitingPeople = [];
     } else {
       throw error;

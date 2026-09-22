@@ -8,7 +8,7 @@
  * the lie cost real time to unpick. Vendors are named for what they are here.
  */
 
-export type ProviderName = 'deepseek' | 'openrouter' | 'compat';
+export type ProviderName = "deepseek" | "openrouter" | "compat";
 
 export interface ProviderConfig {
   readonly name: ProviderName;
@@ -56,7 +56,7 @@ export interface Settings {
 
 function required(name: string): string {
   const value = process.env[name];
-  if (value === undefined || value === '') {
+  if (value === undefined || value === "") {
     throw new Error(
       `${name} is required. Copy .env.example to .env and fill it in.`,
     );
@@ -66,75 +66,90 @@ function required(name: string): string {
 
 function optional(name: string, fallback: string): string {
   const value = process.env[name];
-  return value === undefined || value === '' ? fallback : value;
+  return value === undefined || value === "" ? fallback : value;
 }
 
 function providerFrom(name: ProviderName): ProviderConfig {
   switch (name) {
-    case 'deepseek':
+    case "deepseek":
       return {
         name,
-        baseUrl: optional('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'),
-        apiKey: required('DEEPSEEK_API_KEY'),
-        model: optional('DURBAR_MODEL', 'deepseek-chat'),
-        reasoningModel: optional('DURBAR_REASONING_MODEL', 'deepseek-reasoner'),
-        routingModel: optional('DURBAR_ROUTING_MODEL', 'deepseek-chat'),
+        baseUrl: optional("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        apiKey: required("DEEPSEEK_API_KEY"),
+        model: optional("DURBAR_MODEL", "deepseek-chat"),
+        reasoningModel: optional("DURBAR_REASONING_MODEL", "deepseek-reasoner"),
+        routingModel: optional("DURBAR_ROUTING_MODEL", "deepseek-chat"),
         headers: {},
       };
 
-    case 'openrouter':
+    case "openrouter":
       return {
         name,
-        baseUrl: optional('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1'),
-        apiKey: required('OPENROUTER_API_KEY'),
-        model: optional('DURBAR_MODEL', 'deepseek/deepseek-chat'),
-        reasoningModel: optional(
-          'DURBAR_REASONING_MODEL',
-          'deepseek/deepseek-r1',
+        baseUrl: optional(
+          "OPENROUTER_BASE_URL",
+          "https://openrouter.ai/api/v1",
         ),
-        routingModel: optional('DURBAR_ROUTING_MODEL', 'deepseek/deepseek-chat'),
+        apiKey: required("OPENROUTER_API_KEY"),
+        model: optional("DURBAR_MODEL", "deepseek/deepseek-chat"),
+        reasoningModel: optional(
+          "DURBAR_REASONING_MODEL",
+          "deepseek/deepseek-r1",
+        ),
+        routingModel: optional(
+          "DURBAR_ROUTING_MODEL",
+          "deepseek/deepseek-chat",
+        ),
         // OpenRouter attributes traffic by these; they are optional but polite.
         headers: {
-          'HTTP-Referer': optional('OPENROUTER_REFERER', 'https://durbar.local'),
-          'X-Title': optional('OPENROUTER_TITLE', 'Durbar'),
+          "HTTP-Referer": optional(
+            "OPENROUTER_REFERER",
+            "https://durbar.local",
+          ),
+          "X-Title": optional("OPENROUTER_TITLE", "Durbar"),
         },
       };
 
-    case 'compat':
+    case "compat":
       // Any OpenAI-compatible endpoint: a gateway, a proxy, a vendor with a
       // different name for the same wire protocol.
       return {
         name,
-        baseUrl: required('DURBAR_BASE_URL'),
-        apiKey: required('DURBAR_API_KEY'),
-        model: required('DURBAR_MODEL'),
-        reasoningModel: optional('DURBAR_REASONING_MODEL', required('DURBAR_MODEL')),
-        routingModel: optional('DURBAR_ROUTING_MODEL', required('DURBAR_MODEL')),
+        baseUrl: required("DURBAR_BASE_URL"),
+        apiKey: required("DURBAR_API_KEY"),
+        model: required("DURBAR_MODEL"),
+        reasoningModel: optional(
+          "DURBAR_REASONING_MODEL",
+          required("DURBAR_MODEL"),
+        ),
+        routingModel: optional(
+          "DURBAR_ROUTING_MODEL",
+          required("DURBAR_MODEL"),
+        ),
         headers: {},
       };
   }
 }
 
 export function loadSettings(): Settings {
-  const raw = optional('DURBAR_PROVIDER', 'deepseek');
-  if (raw !== 'deepseek' && raw !== 'openrouter' && raw !== 'compat') {
+  const raw = optional("DURBAR_PROVIDER", "deepseek");
+  if (raw !== "deepseek" && raw !== "openrouter" && raw !== "compat") {
     throw new Error(
       `DURBAR_PROVIDER must be deepseek, openrouter or compat (got "${raw}")`,
     );
   }
 
   return {
-    dbPath: optional('DURBAR_DB_PATH', './durbar.db'),
-    port: Number(optional('DURBAR_PORT', '8787')),
-    publicServerUrl: optional('DURBAR_PUBLIC_URL', ''),
-    allowedOrigins: optional('DURBAR_ALLOWED_ORIGINS', '')
-      .split(',')
+    dbPath: optional("DURBAR_DB_PATH", "./durbar.db"),
+    port: Number(optional("DURBAR_PORT", "8787")),
+    publicServerUrl: optional("DURBAR_PUBLIC_URL", ""),
+    allowedOrigins: optional("DURBAR_ALLOWED_ORIGINS", "")
+      .split(",")
       .map((origin) => origin.trim())
-      .filter((origin) => origin !== ''),
-    morningBriefTime: optional('PRINCIPAL_BRIEF_MORNING_TIME', '08:00'),
-    eodDigestTime: optional('PRINCIPAL_BRIEF_EOD_TIME', '18:00'),
-    reflectionTime: optional('PRINCIPAL_REFLECTION_TIME', '07:30'),
+      .filter((origin) => origin !== ""),
+    morningBriefTime: optional("PRINCIPAL_BRIEF_MORNING_TIME", "08:00"),
+    eodDigestTime: optional("PRINCIPAL_BRIEF_EOD_TIME", "18:00"),
+    reflectionTime: optional("PRINCIPAL_REFLECTION_TIME", "07:30"),
     provider: providerFrom(raw),
-    scheduledAdminToken: optional('SCHEDULED_ADMIN_TOKEN', ''),
+    scheduledAdminToken: optional("SCHEDULED_ADMIN_TOKEN", ""),
   };
 }

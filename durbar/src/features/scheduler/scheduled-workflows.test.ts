@@ -43,7 +43,10 @@ function seedPrincipal(db: Db): void {
 
 function seedAtRiskGoal(db: Db): void {
   const now = new Date().toISOString();
-  db.run(`INSERT INTO departments (slug, title, updated_at) VALUES ('finance', 'Finance', ?)`, [now]);
+  db.run(
+    `INSERT INTO departments (slug, title, updated_at) VALUES ('finance', 'Finance', ?)`,
+    [now],
+  );
   db.run(
     `INSERT INTO department_goals
        (department_slug, period_value, key_result, target, status, created_at, updated_at)
@@ -56,7 +59,13 @@ function deps(db: Db, overrides: Partial<SchedulerDeps> = {}): SchedulerDeps {
   return { db, provider: fakeProvider(), ...overrides };
 }
 
-function insert(db: Db, runAt: string, kind: string, status = "pending", attempts = 0): number {
+function insert(
+  db: Db,
+  runAt: string,
+  kind: string,
+  status = "pending",
+  attempts = 0,
+): number {
   const result = db.run(
     `INSERT INTO scheduled_actions
        (created_at, run_at, channel, channel_ref, intent_text, status, attempts, kind)

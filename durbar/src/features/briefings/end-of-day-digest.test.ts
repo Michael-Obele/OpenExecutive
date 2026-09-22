@@ -19,7 +19,9 @@ import {
   sinceForEod,
 } from "./end-of-day-digest.ts";
 
-function fakeProvider(reply = "An EoD digest."): Provider & { calls: ChatMessage[][] } {
+function fakeProvider(
+  reply = "An EoD digest.",
+): Provider & { calls: ChatMessage[][] } {
   const calls: ChatMessage[][] = [];
   return {
     name: "fake",
@@ -40,7 +42,13 @@ function seedDepartment(db: Db, slug: string, title: string): void {
   ]);
 }
 
-function seedGoal(db: Db, slug: string, keyResult: string, status = "at_risk", current = ""): void {
+function seedGoal(
+  db: Db,
+  slug: string,
+  keyResult: string,
+  status = "at_risk",
+  current = "",
+): void {
   const now = new Date().toISOString();
   db.run(
     `INSERT INTO department_goals
@@ -59,17 +67,19 @@ function seedAlert(db: Db, source: string, headline: string): void {
 }
 
 function seedActivity(db: Db, summary: string, ts: string): void {
-  db.run(`INSERT INTO audit_log (ts, event_type, summary) VALUES (?, 'tool_invocation', ?)`, [
-    ts,
-    summary,
-  ]);
+  db.run(
+    `INSERT INTO audit_log (ts, event_type, summary) VALUES (?, 'tool_invocation', ?)`,
+    [ts, summary],
+  );
 }
 
 describe("sinceForEod", () => {
   test("falls back to a 24h window on a cold store", () => {
     const db = openDb();
     const now = new Date("2026-09-20T18:00:00.000Z");
-    expect(sinceForEod(db, EOD_BRIEF_KIND, now)).toBe("2026-09-19T18:00:00.000Z");
+    expect(sinceForEod(db, EOD_BRIEF_KIND, now)).toBe(
+      "2026-09-19T18:00:00.000Z",
+    );
   });
 
   test("uses the last delivered digest, not a fixed window", () => {
@@ -80,7 +90,9 @@ describe("sinceForEod", () => {
       [EOD_BRIEF_KIND],
     );
     const now = new Date("2026-09-26T18:00:00.000Z");
-    expect(sinceForEod(db, EOD_BRIEF_KIND, now)).toBe("2026-09-20T17:30:00.000Z");
+    expect(sinceForEod(db, EOD_BRIEF_KIND, now)).toBe(
+      "2026-09-20T17:30:00.000Z",
+    );
   });
 });
 
@@ -88,7 +100,13 @@ describe("gatherEodContext", () => {
   test("collects at-risk goals with their department title", () => {
     const db = openDb();
     seedDepartment(db, "marketing", "Marketing");
-    seedGoal(db, "marketing", "Post on three platforms", "at_risk", "Bluesky only");
+    seedGoal(
+      db,
+      "marketing",
+      "Post on three platforms",
+      "at_risk",
+      "Bluesky only",
+    );
 
     const context = gatherEodContext(db, "1970-01-01T00:00:00.000Z");
     expect(context.atRiskGoals).toHaveLength(1);
@@ -119,7 +137,10 @@ describe("gatherEodContext", () => {
 describe("renderEodContext", () => {
   test("states counts for each section", () => {
     const db = openDb();
-    const rendered = renderEodContext(gatherEodContext(db, "1970-01-01T00:00:00.000Z"), "2026-09-20");
+    const rendered = renderEodContext(
+      gatherEodContext(db, "1970-01-01T00:00:00.000Z"),
+      "2026-09-20",
+    );
     expect(rendered).toContain("WHAT I DID TODAY");
     expect(rendered).toContain("STILL PENDING");
     expect(rendered).toContain("AT RISK TOMORROW");
@@ -158,7 +179,10 @@ describe("runEndOfDayDigest", () => {
     const db = openDb();
     const provider = fakeProvider("Full digest.");
 
-    const result = await runEndOfDayDigest({ forceFull: true }, { db, provider });
+    const result = await runEndOfDayDigest(
+      { forceFull: true },
+      { db, provider },
+    );
 
     expect(result.suppressed).toBe(false);
     expect(provider.calls).toHaveLength(1);
@@ -172,13 +196,18 @@ describe("runEndOfDayDigest", () => {
 
     const result = await runEndOfDayDigest(
       {},
-      { db, provider: fakeProvider("Legal needs you tomorrow."), now: () => at },
+      {
+        db,
+        provider: fakeProvider("Legal needs you tomorrow."),
+        now: () => at,
+      },
     );
 
     const run = db
-      .query<{ workflow_name: string; status: string; artifact: string }, [string]>(
-        "SELECT workflow_name, status, artifact FROM workflow_runs WHERE run_id = ?",
-      )
+      .query<
+        { workflow_name: string; status: string; artifact: string },
+        [string]
+      >("SELECT workflow_name, status, artifact FROM workflow_runs WHERE run_id = ?")
       .get(result.runId);
     expect(run?.workflow_name).toBe("end_of_day_digest");
     expect(run?.status).toBe("succeeded");
@@ -198,10 +227,12 @@ describe("runEndOfDayDigest", () => {
       },
     };
 
-    await expect(runEndOfDayDigest({}, { db, provider: failing })).rejects.toThrow(
-      "deepseek 402",
-    );
-    const runs = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM workflow_runs").get();
+    await expect(
+      runEndOfDayDigest({}, { db, provider: failing }),
+    ).rejects.toThrow("deepseek 402");
+    const runs = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM workflow_runs")
+      .get();
     expect(runs?.n).toBe(0);
   });
 });
@@ -209,9 +240,13 @@ describe("runEndOfDayDigest", () => {
 describe("isEodQuiet", () => {
   test("is quiet only when all three sources are empty", () => {
     const db = openDb();
-    expect(isEodQuiet(gatherEodContext(db, "1970-01-01T00:00:00.000Z"))).toBe(true);
+    expect(isEodQuiet(gatherEodContext(db, "1970-01-01T00:00:00.000Z"))).toBe(
+      true,
+    );
 
     seedActivity(db, "did a thing", new Date().toISOString());
-    expect(isEodQuiet(gatherEodContext(db, "1970-01-01T00:00:00.000Z"))).toBe(false);
+    expect(isEodQuiet(gatherEodContext(db, "1970-01-01T00:00:00.000Z"))).toBe(
+      false,
+    );
   });
 });

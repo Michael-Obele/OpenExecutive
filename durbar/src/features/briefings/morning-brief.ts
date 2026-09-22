@@ -21,11 +21,11 @@
  * artefact, not org coordination.
  */
 
-import { randomUUID } from 'node:crypto';
-import type { Db } from '../../db.ts';
-import type { Provider } from '../../providers.ts';
+import { randomUUID } from "node:crypto";
+import type { Db } from "../../db.ts";
+import type { Provider } from "../../providers.ts";
 
-export const BRIEF_KIND = 'principal_brief_morning';
+export const BRIEF_KIND = "principal_brief_morning";
 
 /** Cold-store window when no brief has ever been delivered. */
 const COLD_START_WINDOW_HOURS = 24;
@@ -86,15 +86,12 @@ export interface MorningBriefResult {
  * be recorded without being delivered, and counting an undelivered run would
  * silently swallow whatever it contained.
  */
-export function sinceFor(
-  db: Db,
-  kind: string,
-  now: Date = new Date(),
-): string {
+export function sinceFor(db: Db, kind: string, now: Date = new Date()): string {
   const row = db
-    .query<{ generated_at: string }, [string]>(
-      'SELECT generated_at FROM briefing_narrative WHERE scope = ?',
-    )
+    .query<
+      { generated_at: string },
+      [string]
+    >("SELECT generated_at FROM briefing_narrative WHERE scope = ?")
     .get(kind);
 
   if (row?.generated_at) return row.generated_at;
@@ -109,7 +106,7 @@ export function sinceFor(
  * `/today` route's exclusion so the brief and the page tell the same story.
  */
 function isActionable(source: string): boolean {
-  return !source.startsWith('monitoring') && !source.startsWith('watchlist');
+  return !source.startsWith("monitoring") && !source.startsWith("watchlist");
 }
 
 export function gatherContext(db: Db, since: string): BriefContext {
@@ -157,31 +154,31 @@ export function gatherContext(db: Db, since: string): BriefContext {
 
 /** Renders the context as plain text for the model. No prompt cleverness. */
 export function renderContext(context: BriefContext, period: string): string {
-  const lines: string[] = [`Period: ${period}`, `Since: ${context.since}`, ''];
+  const lines: string[] = [`Period: ${period}`, `Since: ${context.since}`, ""];
 
   lines.push(`AT-RISK GOALS (${context.atRiskGoals.length})`);
-  if (context.atRiskGoals.length === 0) lines.push('- none');
+  if (context.atRiskGoals.length === 0) lines.push("- none");
   for (const goal of context.atRiskGoals) {
     lines.push(
       `- [${goal.status}] ${goal.department}: ${goal.keyResult}` +
-        (goal.current ? ` — current: ${goal.current}` : ''),
+        (goal.current ? ` — current: ${goal.current}` : ""),
     );
   }
 
-  lines.push('', `AWAITING A DECISION (${context.proposals.length})`);
-  if (context.proposals.length === 0) lines.push('- none');
+  lines.push("", `AWAITING A DECISION (${context.proposals.length})`);
+  if (context.proposals.length === 0) lines.push("- none");
   for (const proposal of context.proposals) {
     lines.push(
       `- (${proposal.severity}) ${proposal.headline}` +
-        (proposal.suggestedAction ? ` → ${proposal.suggestedAction}` : ''),
+        (proposal.suggestedAction ? ` → ${proposal.suggestedAction}` : ""),
     );
   }
 
-  lines.push('', `ACTED ON SINCE THE LAST BRIEF (${context.activity.length})`);
-  if (context.activity.length === 0) lines.push('- nothing');
+  lines.push("", `ACTED ON SINCE THE LAST BRIEF (${context.activity.length})`);
+  if (context.activity.length === 0) lines.push("- nothing");
   for (const event of context.activity) lines.push(`- ${event.summary}`);
 
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 export const SYSTEM_PROMPT = `You are the principal's chief of staff, writing their morning brief.
@@ -219,10 +216,10 @@ export async function runMorningBrief(
   // Step 1 done (load_context). Step 2 follows.
   const suppressed = isQuiet(context) && input.forceFull !== true;
   const narrative = suppressed
-    ? 'Nothing new since the last brief.'
+    ? "Nothing new since the last brief."
     : await provider.chat([
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: renderContext(context, period) },
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: renderContext(context, period) },
       ]);
 
   const runId = deps.runId ?? randomUUID();
@@ -235,7 +232,7 @@ export async function runMorningBrief(
        VALUES (?, ?, ?, 'succeeded', ?, ?, ?, ?)`,
       [
         runId,
-        'morning_brief',
+        "morning_brief",
         `Morning Brief — ${period}`,
         JSON.stringify(input),
         narrative,

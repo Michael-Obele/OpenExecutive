@@ -25,7 +25,9 @@ export interface ClientSlot {
   updated_at: string;
 }
 
-function nowIso(): string { return new Date().toISOString(); }
+function nowIso(): string {
+  return new Date().toISOString();
+}
 
 function rowToClient(row: Record<string, unknown>): ClientSlot {
   return {
@@ -45,27 +47,56 @@ function rowToClient(row: Record<string, unknown>): ClientSlot {
 }
 
 export function listClients(db: Db): ClientSlot[] {
-  const rows = db.query<Record<string, unknown>, []>("SELECT * FROM clients ORDER BY updated_at DESC").all();
+  const rows = db
+    .query<
+      Record<string, unknown>,
+      []
+    >("SELECT * FROM clients ORDER BY updated_at DESC")
+    .all();
   return rows.map(rowToClient);
 }
 
 export function getClient(db: Db, slug: string): ClientSlot | null {
-  const row = db.query<Record<string, unknown>, [string]>("SELECT * FROM clients WHERE slug = ?").get(slug);
+  const row = db
+    .query<
+      Record<string, unknown>,
+      [string]
+    >("SELECT * FROM clients WHERE slug = ?")
+    .get(slug);
   return row ? rowToClient(row) : null;
 }
 
-export function createClient(db: Db, data: { slug: string; display_name: string }): ClientSlot {
+export function createClient(
+  db: Db,
+  data: { slug: string; display_name: string },
+): ClientSlot {
   const now = nowIso();
-  db.run("INSERT INTO clients (slug, display_name, created_at, updated_at) VALUES (?, ?, ?, ?)", [data.slug, data.display_name, now, now]);
+  db.run(
+    "INSERT INTO clients (slug, display_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+    [data.slug, data.display_name, now, now],
+  );
   const created = getClient(db, data.slug);
   if (!created) throw new Error("Client vanished after insert");
   return created;
 }
 
-export function updateClientMeta(db: Db, slug: string, patch: Record<string, unknown>): ClientSlot | null {
+export function updateClientMeta(
+  db: Db,
+  slug: string,
+  patch: Record<string, unknown>,
+): ClientSlot | null {
   const existing = getClient(db, slug);
   if (!existing) return null;
-  const allowed = ["role", "status", "engagement_start", "renewal_date", "retainer", "hours_per_week", "primary_contact", "notes"] as const;
+  const allowed = [
+    "role",
+    "status",
+    "engagement_start",
+    "renewal_date",
+    "retainer",
+    "hours_per_week",
+    "primary_contact",
+    "notes",
+  ] as const;
   const sets: string[] = [];
   const vals: unknown[] = [];
   for (const key of allowed) {
@@ -76,7 +107,10 @@ export function updateClientMeta(db: Db, slug: string, patch: Record<string, unk
   }
   if (sets.length === 0) return existing;
   vals.push(nowIso(), slug);
-  db.run(`UPDATE clients SET ${sets.join(", ")}, updated_at = ? WHERE slug = ?`, vals as Array<string | number | null>);
+  db.run(
+    `UPDATE clients SET ${sets.join(", ")}, updated_at = ? WHERE slug = ?`,
+    vals as Array<string | number | null>,
+  );
   return getClient(db, slug);
 }
 
@@ -86,7 +120,10 @@ export function deleteClient(db: Db, slug: string): boolean {
 }
 
 export function deriveSlug(displayName: string): string {
-  let slug = displayName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  let slug = displayName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
   if (!slug) slug = "client";
   return slug.slice(0, 64);
 }

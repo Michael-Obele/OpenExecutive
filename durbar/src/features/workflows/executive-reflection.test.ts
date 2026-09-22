@@ -15,7 +15,9 @@ import {
   runExecutiveReflection,
 } from "./executive-reflection.ts";
 
-function fakeProvider(reply = "Reflection narrative."): Provider & { calls: ChatMessage[][] } {
+function fakeProvider(
+  reply = "Reflection narrative.",
+): Provider & { calls: ChatMessage[][] } {
   const calls: ChatMessage[][] = [];
   return {
     name: "fake",
@@ -36,7 +38,12 @@ function seedDepartment(db: Db, slug: string, title: string): void {
   ]);
 }
 
-function seedGoal(db: Db, slug: string, keyResult: string, status = "at_risk"): void {
+function seedGoal(
+  db: Db,
+  slug: string,
+  keyResult: string,
+  status = "at_risk",
+): void {
   const now = new Date().toISOString();
   db.run(
     `INSERT INTO department_goals
@@ -55,10 +62,10 @@ function seedAlert(db: Db, source: string, headline: string): void {
 }
 
 function seedActivity(db: Db, summary: string, ts: string): void {
-  db.run(`INSERT INTO audit_log (ts, event_type, summary) VALUES (?, 'tool_invocation', ?)`, [
-    ts,
-    summary,
-  ]);
+  db.run(
+    `INSERT INTO audit_log (ts, event_type, summary) VALUES (?, 'tool_invocation', ?)`,
+    [ts, summary],
+  );
 }
 
 describe("gatherReflectionContext", () => {
@@ -95,7 +102,10 @@ describe("gatherReflectionContext", () => {
 describe("renderReflectionContext", () => {
   test("renders all signal sections", () => {
     const db = openDb();
-    const rendered = renderReflectionContext(gatherReflectionContext(db), "2026-09-20");
+    const rendered = renderReflectionContext(
+      gatherReflectionContext(db),
+      "2026-09-20",
+    );
     expect(rendered).toContain("DEPARTMENTS WITH RISK");
     expect(rendered).toContain("PROPOSALS AWAITING DECISION");
     expect(rendered).toContain("RECENT ACTIVITY");
@@ -103,7 +113,10 @@ describe("renderReflectionContext", () => {
 
   test("notes when no signals", () => {
     const db = openDb();
-    const rendered = renderReflectionContext(gatherReflectionContext(db), "2026-09-20");
+    const rendered = renderReflectionContext(
+      gatherReflectionContext(db),
+      "2026-09-20",
+    );
     expect(rendered).toContain("No signals worth acting on");
   });
 });
@@ -145,9 +158,10 @@ describe("runExecutiveReflection", () => {
     );
 
     const run = db
-      .query<{ workflow_name: string; status: string; artifact: string }, [string]>(
-        "SELECT workflow_name, status, artifact FROM workflow_runs WHERE run_id = ?",
-      )
+      .query<
+        { workflow_name: string; status: string; artifact: string },
+        [string]
+      >("SELECT workflow_name, status, artifact FROM workflow_runs WHERE run_id = ?")
       .get(result.runId);
     expect(run?.workflow_name).toBe("executive_reflection");
     expect(run?.status).toBe("succeeded");
@@ -164,10 +178,12 @@ describe("runExecutiveReflection", () => {
       },
     };
 
-    await expect(runExecutiveReflection({}, { db, provider: failing })).rejects.toThrow(
-      "429",
-    );
-    const runs = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM workflow_runs").get();
+    await expect(
+      runExecutiveReflection({}, { db, provider: failing }),
+    ).rejects.toThrow("429");
+    const runs = db
+      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM workflow_runs")
+      .get();
     expect(runs?.n).toBe(0);
   });
 

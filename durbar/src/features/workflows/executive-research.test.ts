@@ -34,7 +34,9 @@ function scriptedProvider(
 const systemOf = (messages: readonly ChatMessage[]): string =>
   messages.find((m) => m.role === "system")?.content ?? "";
 
-function kindOf(messages: readonly ChatMessage[]): "route" | "specialist" | "synthesize" | "other" {
+function kindOf(
+  messages: readonly ChatMessage[],
+): "route" | "specialist" | "synthesize" | "other" {
   const system = systemOf(messages);
   if (system.includes("You route questions")) return "route";
   if (system.includes("speaking with one voice")) return "synthesize";
@@ -42,7 +44,12 @@ function kindOf(messages: readonly ChatMessage[]): "route" | "specialist" | "syn
   return "other";
 }
 
-function seedDepartment(db: Db, slug: string, title: string, watchedEntities: string[] = []): void {
+function seedDepartment(
+  db: Db,
+  slug: string,
+  title: string,
+  watchedEntities: string[] = [],
+): void {
   db.run(
     `INSERT INTO departments (slug, title, watched_entities_json, updated_at) VALUES (?, ?, ?, ?)`,
     [slug, title, JSON.stringify(watchedEntities), new Date().toISOString()],
@@ -85,12 +92,19 @@ describe("renderResearchContext", () => {
           industry: "SaaS",
           stage: "Series A",
           mission: "Build great software",
-          competitive_landscape: { primary_competitors: ["Beta"], competitive_advantages: [] },
+          competitive_landscape: {
+            primary_competitors: ["Beta"],
+            competitive_advantages: [],
+          },
           target_customer: { profile: "", pain_points: [] },
           org_structure: { departments: [], leadership_team: [] },
           strategic_priorities: { current_year: [], north_star_metric: "" },
           culture: { values: [], operating_principles: [] },
-          financials: { burn_rate_monthly: null, runway_months: null, key_metrics: {} },
+          financials: {
+            burn_rate_monthly: null,
+            runway_months: null,
+            key_metrics: {},
+          },
           vendors: [],
           tickers: [],
         }),
@@ -136,8 +150,10 @@ describe("runExecutiveResearch", () => {
       if (kind === "synthesize") return "One voice: Acme is the key move.";
       // Specialist calls — return analysis.
       const system = systemOf(messages);
-      if (system.includes("Chief Strategy Officer")) return "CSO analysis: Acme raised $50M.";
-      if (system.includes("Chief Financial Officer")) return "CFO analysis: Runway is 12 months.";
+      if (system.includes("Chief Strategy Officer"))
+        return "CSO analysis: Acme raised $50M.";
+      if (system.includes("Chief Financial Officer"))
+        return "CFO analysis: Runway is 12 months.";
       return "Generic analysis.";
     });
 
@@ -196,9 +212,10 @@ describe("runExecutiveResearch", () => {
     const result = await runExecutiveResearch({}, { db, provider });
 
     const run = db
-      .query<{ workflow_name: string; status: string }, [string]>(
-        "SELECT workflow_name, status FROM workflow_runs WHERE run_id = ?",
-      )
+      .query<
+        { workflow_name: string; status: string },
+        [string]
+      >("SELECT workflow_name, status FROM workflow_runs WHERE run_id = ?")
       .get(result.runId);
     expect(run?.workflow_name).toBe("executive_research");
     expect(run?.status).toBe("succeeded");
@@ -229,7 +246,10 @@ describe("runExecutiveResearch", () => {
       return "ok";
     });
 
-    const result = await runExecutiveResearch({ note: "focus on fintech" }, { db, provider });
+    const result = await runExecutiveResearch(
+      { note: "focus on fintech" },
+      { db, provider },
+    );
 
     expect(result.narrative).toContain("focus on fintech");
   });

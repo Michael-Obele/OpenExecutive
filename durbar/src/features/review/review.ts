@@ -14,11 +14,20 @@ import type { Db } from "../../db.ts";
 
 // ── types ──────────────────────────────────────────────────────────────────
 
-export type ReviewStatus = "pending" | "approved" | "rejected" | "needs_revision";
+export type ReviewStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "needs_revision";
 export type ContentType = "builtin" | "external";
 export type Priority = "low" | "normal" | "high";
 
-export const REVIEW_STATUSES: readonly ReviewStatus[] = ["pending", "approved", "rejected", "needs_revision"];
+export const REVIEW_STATUSES: readonly ReviewStatus[] = [
+  "pending",
+  "approved",
+  "rejected",
+  "needs_revision",
+];
 export const CONTENT_TYPES: readonly ContentType[] = ["builtin", "external"];
 export const PRIORITIES: readonly Priority[] = ["low", "normal", "high"];
 
@@ -122,14 +131,20 @@ export function listReviewItems(
 
 export function getReviewItem(db: Db, itemId: string): ReviewItem | null {
   const row = db
-    .query<Record<string, unknown>, [string]>("SELECT * FROM review_items WHERE item_id = ?",)
+    .query<
+      Record<string, unknown>,
+      [string]
+    >("SELECT * FROM review_items WHERE item_id = ?")
     .get(itemId);
   return row ? rowToItem(row) : null;
 }
 
 export function countByStatus(db: Db): ReviewStats {
   const rows = db
-    .query<{ status: string; n: number }, []>("SELECT status, COUNT(*) as n FROM review_items GROUP BY status")
+    .query<
+      { status: string; n: number },
+      []
+    >("SELECT status, COUNT(*) as n FROM review_items GROUP BY status")
     .all();
   const byStatus = new Map(rows.map((r) => [r.status, r.n]));
   const total = rows.reduce((sum, r) => sum + r.n, 0);
@@ -142,27 +157,44 @@ export function countByStatus(db: Db): ReviewStats {
   };
 }
 
-export function setReviewStatus(db: Db, itemId: string, status: ReviewStatus, notes?: string): ReviewItem | null {
+export function setReviewStatus(
+  db: Db,
+  itemId: string,
+  status: ReviewStatus,
+  notes?: string,
+): ReviewItem | null {
   const now = new Date().toISOString();
   const existing = getReviewItem(db, itemId);
   if (!existing) return null;
   const reviewerNotes = notes !== undefined ? notes : existing.reviewer_notes;
-  db.run("UPDATE review_items SET status = ?, reviewer_notes = ?, reviewed_at = ? WHERE item_id = ?", [
-    status,
-    reviewerNotes,
-    now,
+  db.run(
+    "UPDATE review_items SET status = ?, reviewer_notes = ?, reviewed_at = ? WHERE item_id = ?",
+    [status, reviewerNotes, now, itemId],
+  );
+  return getReviewItem(db, itemId);
+}
+
+export function updateReviewNotes(
+  db: Db,
+  itemId: string,
+  notes: string,
+): ReviewItem | null {
+  db.run("UPDATE review_items SET reviewer_notes = ? WHERE item_id = ?", [
+    notes,
     itemId,
   ]);
   return getReviewItem(db, itemId);
 }
 
-export function updateReviewNotes(db: Db, itemId: string, notes: string): ReviewItem | null {
-  db.run("UPDATE review_items SET reviewer_notes = ? WHERE item_id = ?", [notes, itemId]);
-  return getReviewItem(db, itemId);
-}
-
-export function setReviewPriority(db: Db, itemId: string, priority: Priority): ReviewItem | null {
-  db.run("UPDATE review_items SET priority = ? WHERE item_id = ?", [priority, itemId]);
+export function setReviewPriority(
+  db: Db,
+  itemId: string,
+  priority: Priority,
+): ReviewItem | null {
+  db.run("UPDATE review_items SET priority = ? WHERE item_id = ?", [
+    priority,
+    itemId,
+  ]);
   return getReviewItem(db, itemId);
 }
 
@@ -178,13 +210,14 @@ export function setReviewStatusAndPriority(
   if (!existing) return null;
   const reviewerNotes = notes !== undefined ? notes : existing.reviewer_notes;
   const tx = db.transaction(() => {
-    db.run("UPDATE review_items SET status = ?, reviewer_notes = ?, reviewed_at = ? WHERE item_id = ?", [
-      status,
-      reviewerNotes,
-      now,
+    db.run(
+      "UPDATE review_items SET status = ?, reviewer_notes = ?, reviewed_at = ? WHERE item_id = ?",
+      [status, reviewerNotes, now, itemId],
+    );
+    db.run("UPDATE review_items SET priority = ? WHERE item_id = ?", [
+      priority,
       itemId,
     ]);
-    db.run("UPDATE review_items SET priority = ? WHERE item_id = ?", [priority, itemId]);
   });
   tx();
   return getReviewItem(db, itemId);
@@ -192,15 +225,16 @@ export function setReviewStatusAndPriority(
 
 export function bulkApprove(db: Db, domain?: string | null): number {
   if (domain) {
-    const result = db.run("UPDATE review_items SET status = 'approved', reviewed_at = ? WHERE status = 'pending' AND domain = ?", [
-      new Date().toISOString(),
-      domain,
-    ]);
+    const result = db.run(
+      "UPDATE review_items SET status = 'approved', reviewed_at = ? WHERE status = 'pending' AND domain = ?",
+      [new Date().toISOString(), domain],
+    );
     return result.changes;
   }
-  const result = db.run("UPDATE review_items SET status = 'approved', reviewed_at = ? WHERE status = 'pending'", [
-    new Date().toISOString(),
-  ]);
+  const result = db.run(
+    "UPDATE review_items SET status = 'approved', reviewed_at = ? WHERE status = 'pending'",
+    [new Date().toISOString()],
+  );
   return result.changes;
 }
 
@@ -221,12 +255,19 @@ export function listAnnotations(
   }
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
   return db
-    .query<Record<string, unknown>, (string | number | null)[]>(`SELECT * FROM review_annotations ${where} ORDER BY created_at DESC`)
+    .query<Record<string, unknown>, (string | number | null)[]>(
+      `SELECT * FROM review_annotations ${where} ORDER BY created_at DESC`,
+    )
     .all(...(params as (string | number | null)[]))
     .map(rowToAnnotation);
 }
 
-export function addAnnotation(db: Db, itemId: string, domain: string, correction: string): Annotation {
+export function addAnnotation(
+  db: Db,
+  itemId: string,
+  domain: string,
+  correction: string,
+): Annotation {
   const id = `annot_${crypto.randomUUID()}`;
   const now = new Date().toISOString();
   db.run(
@@ -234,19 +275,38 @@ export function addAnnotation(db: Db, itemId: string, domain: string, correction
     [id, itemId, domain, correction, now],
   );
   const row = db
-    .query<Record<string, unknown>, [string]>("SELECT * FROM review_annotations WHERE annotation_id = ?",)
+    .query<
+      Record<string, unknown>,
+      [string]
+    >("SELECT * FROM review_annotations WHERE annotation_id = ?")
     .get(id);
   return rowToAnnotation(row as Record<string, unknown>);
 }
 
-export function updateAnnotation(db: Db, annotationId: string, correction: string): void {
-  db.run("UPDATE review_annotations SET correction = ? WHERE annotation_id = ?", [correction, annotationId]);
+export function updateAnnotation(
+  db: Db,
+  annotationId: string,
+  correction: string,
+): void {
+  db.run(
+    "UPDATE review_annotations SET correction = ? WHERE annotation_id = ?",
+    [correction, annotationId],
+  );
 }
 
-export function toggleAnnotation(db: Db, annotationId: string, isActive: boolean): void {
-  db.run("UPDATE review_annotations SET is_active = ? WHERE annotation_id = ?", [isActive ? 1 : 0, annotationId]);
+export function toggleAnnotation(
+  db: Db,
+  annotationId: string,
+  isActive: boolean,
+): void {
+  db.run(
+    "UPDATE review_annotations SET is_active = ? WHERE annotation_id = ?",
+    [isActive ? 1 : 0, annotationId],
+  );
 }
 
 export function deleteAnnotation(db: Db, annotationId: string): void {
-  db.run("DELETE FROM review_annotations WHERE annotation_id = ?", [annotationId]);
+  db.run("DELETE FROM review_annotations WHERE annotation_id = ?", [
+    annotationId,
+  ]);
 }

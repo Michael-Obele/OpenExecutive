@@ -56,7 +56,9 @@ export function renderResearchContext(
   const parts: string[] = [];
 
   const today = now.toISOString().slice(0, 10);
-  parts.push(`TODAY'S DATE: ${today} (UTC). Scanning for recent developments.\n`);
+  parts.push(
+    `TODAY'S DATE: ${today} (UTC). Scanning for recent developments.\n`,
+  );
 
   if (note) parts.push(`USER NOTE: ${note}\n`);
 
@@ -68,23 +70,36 @@ export function renderResearchContext(
   let profileMission = "";
   let profileCompetitors: string[] = [];
   try {
-    const row = db.query<{ data: string }, []>("SELECT data FROM company_profile WHERE id = 1").get();
+    const row = db
+      .query<
+        { data: string },
+        []
+      >("SELECT data FROM company_profile WHERE id = 1")
+      .get();
     if (row?.data) {
       const parsed = JSON.parse(row.data) as Record<string, unknown>;
       profileName = typeof parsed["name"] === "string" ? parsed["name"] : "";
-      profileIndustry = typeof parsed["industry"] === "string" ? parsed["industry"] : "";
+      profileIndustry =
+        typeof parsed["industry"] === "string" ? parsed["industry"] : "";
       profileStage = typeof parsed["stage"] === "string" ? parsed["stage"] : "";
-      profileMission = typeof parsed["mission"] === "string" ? parsed["mission"] : "";
-      const cl = parsed["competitive_landscape"] as Record<string, unknown> | undefined;
+      profileMission =
+        typeof parsed["mission"] === "string" ? parsed["mission"] : "";
+      const cl = parsed["competitive_landscape"] as
+        | Record<string, unknown>
+        | undefined;
       if (cl && Array.isArray(cl["primary_competitors"])) {
-        profileCompetitors = (cl["primary_competitors"] as unknown[]).filter((x): x is string => typeof x === "string");
+        profileCompetitors = (cl["primary_competitors"] as unknown[]).filter(
+          (x): x is string => typeof x === "string",
+        );
       }
     }
   } catch {
     // ignore parse errors — profile is optional
   }
   if (profileName) {
-    parts.push(`COMPANY: ${profileName} — ${profileIndustry} (${profileStage})`);
+    parts.push(
+      `COMPANY: ${profileName} — ${profileIndustry} (${profileStage})`,
+    );
     if (profileMission) parts.push(`Mission: ${profileMission}`);
     if (profileCompetitors.length > 0) {
       parts.push(`Competitors: ${profileCompetitors.join(", ")}`);
@@ -93,25 +108,47 @@ export function renderResearchContext(
   }
 
   // Initiatives — direct db query to avoid cross-feature import
-  let activeInitiatives: Array<{ title: string; status: string; summary: string }> = [];
+  let activeInitiatives: Array<{
+    title: string;
+    status: string;
+    summary: string;
+  }> = [];
   try {
-    const rows = db.query<{ title: string; status: string; summary: string }, []>("SELECT title, status, summary FROM initiatives ORDER BY updated_at DESC").all();
-    activeInitiatives = rows.filter((r) => r.status !== "completed" && r.status !== "done");
+    const rows = db
+      .query<
+        { title: string; status: string; summary: string },
+        []
+      >("SELECT title, status, summary FROM initiatives ORDER BY updated_at DESC")
+      .all();
+    activeInitiatives = rows.filter(
+      (r) => r.status !== "completed" && r.status !== "done",
+    );
   } catch {
     // ignore — initiatives table may not exist on old DBs
   }
   if (activeInitiatives.length > 0) {
     parts.push("ACTIVE INITIATIVES:");
     for (const item of activeInitiatives.slice(0, 10)) {
-      parts.push(`- ${item.title} (${item.status})${item.summary ? `: ${item.summary.slice(0, 120)}` : ""}`);
+      parts.push(
+        `- ${item.title} (${item.status})${item.summary ? `: ${item.summary.slice(0, 120)}` : ""}`,
+      );
     }
     parts.push("");
   }
 
   // Watchlist — direct db query to avoid cross-feature import
-  let watchlistItems: Array<{ slug: string; signal_type: string; target: string }> = [];
+  let watchlistItems: Array<{
+    slug: string;
+    signal_type: string;
+    target: string;
+  }> = [];
   try {
-    const rows = db.query<{ slug: string; signal_type: string; target: string }, []>("SELECT slug, signal_type, target FROM watchlist WHERE enabled = 1 ORDER BY id").all();
+    const rows = db
+      .query<
+        { slug: string; signal_type: string; target: string },
+        []
+      >("SELECT slug, signal_type, target FROM watchlist WHERE enabled = 1 ORDER BY id")
+      .all();
     watchlistItems = rows;
   } catch {
     // ignore — watchlist table may not exist on old DBs
@@ -127,17 +164,21 @@ export function renderResearchContext(
   // Department watch interests
   try {
     const depts = db
-      .query<{ slug: string; watched_entities_json: string }, []>(
-        "SELECT slug, watched_entities_json FROM departments ORDER BY slug",
-      )
+      .query<
+        { slug: string; watched_entities_json: string },
+        []
+      >("SELECT slug, watched_entities_json FROM departments ORDER BY slug")
       .all();
     const interestLines: string[] = [];
     for (const dept of depts) {
       try {
         const entities: unknown = JSON.parse(dept.watched_entities_json);
         if (Array.isArray(entities) && entities.length > 0) {
-          const names = (entities as string[]).map((e) => String(e).trim()).filter(Boolean);
-          if (names.length > 0) interestLines.push(`- ${dept.slug}: ${names.join(", ")}`);
+          const names = (entities as string[])
+            .map((e) => String(e).trim())
+            .filter(Boolean);
+          if (names.length > 0)
+            interestLines.push(`- ${dept.slug}: ${names.join(", ")}`);
         }
       } catch {
         // ignore malformed JSON
@@ -150,7 +191,10 @@ export function renderResearchContext(
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (!message.includes("no such column") && !message.includes("no such table")) {
+    if (
+      !message.includes("no such column") &&
+      !message.includes("no such table")
+    ) {
       throw error;
     }
   }
@@ -164,7 +208,9 @@ export function renderResearchContext(
 }
 
 /** Deduplicates findings by title (case-insensitive). */
-export function dedupFindings(findings: readonly ResearchFinding[]): ResearchFinding[] {
+export function dedupFindings(
+  findings: readonly ResearchFinding[],
+): ResearchFinding[] {
   const seen = new Set<string>();
   const out: ResearchFinding[] = [];
   for (const finding of findings) {
@@ -245,7 +291,10 @@ export async function runExecutiveResearch(
   let synthesisNarrative = "";
   if (deduped.length > 0) {
     const findingsBlock = deduped
-      .map((f, i) => `#${i + 1} [${f.specialist}] ${f.title}\n  ${f.summary.slice(0, 300)}`)
+      .map(
+        (f, i) =>
+          `#${i + 1} [${f.specialist}] ${f.title}\n  ${f.summary.slice(0, 300)}`,
+      )
       .join("\n\n");
 
     try {
@@ -281,7 +330,9 @@ export async function runExecutiveResearch(
     lines.push(`\n\n## Findings reviewed`);
     lines.push(`_${deduped.length} finding(s) after dedup._\n`);
     for (const finding of deduped.slice(0, 25)) {
-      lines.push(`- [${finding.specialist}] **${finding.title}** — ${finding.summary.slice(0, 160)}`);
+      lines.push(
+        `- [${finding.specialist}] **${finding.title}** — ${finding.summary.slice(0, 160)}`,
+      );
     }
   }
 

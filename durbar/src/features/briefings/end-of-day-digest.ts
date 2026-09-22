@@ -88,9 +88,10 @@ export function sinceForEod(
   now: Date = new Date(),
 ): string {
   const row = db
-    .query<{ generated_at: string }, [string]>(
-      "SELECT generated_at FROM briefing_narrative WHERE scope = ? ORDER BY generated_at DESC LIMIT 1",
-    )
+    .query<
+      { generated_at: string },
+      [string]
+    >("SELECT generated_at FROM briefing_narrative WHERE scope = ? ORDER BY generated_at DESC LIMIT 1")
     .get(kind);
 
   if (row?.generated_at) return row.generated_at;
@@ -102,7 +103,9 @@ export function sinceForEod(
 
 function eodInputHash(context: EodContext): string {
   const payload = JSON.stringify({
-    atRiskGoals: context.atRiskGoals.map((g) => `${g.department}:${g.keyResult}:${g.status}`),
+    atRiskGoals: context.atRiskGoals.map(
+      (g) => `${g.department}:${g.keyResult}:${g.status}`,
+    ),
     proposals: context.proposals.map((p) => `${p.headline}:${p.severity}`),
     activity: context.activity.map((a) => `${a.summary}:${a.eventType}`),
   });
