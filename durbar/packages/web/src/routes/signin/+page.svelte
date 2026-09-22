@@ -1,0 +1,1 @@
+<div class="mx-auto max-w-md px-6 py-12"><h1 class="text-xl font-semibold text-zinc-100">Sign in</h1><p class="mt-1 text-sm text-zinc-400">Stub — wire Better Auth when auth is needed. Durbar itself is unauthenticated in local mode; gate at the dashboard layer.</p></div>
